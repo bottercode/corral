@@ -104,13 +104,24 @@ impl Conn {
 /// terminal so it survives the client, the terminal and SSH hangups.
 pub fn start_daemon(socket: &Path) -> Result<()> {
     let exe = std::env::current_exe().context("finding the corral executable")?;
+    // Panics and early errors land in the server log rather than nowhere.
+    let log_dir = paths::log_dir();
+    let stderr = std::fs::create_dir_all(&log_dir)
+        .and_then(|_| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_dir.join("server.log"))
+        })
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("server")
         .arg("--daemon")
         .env(paths::SOCKET_ENV, socket)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     // SAFETY: setsid is async-signal-safe and touches no Rust state.
     unsafe {
         cmd.pre_exec(|| {
