@@ -16,7 +16,12 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (prog, rest) = args.split_first().expect("usage: spike <cmd> [args]");
 
-    let pty = native_pty_system().openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })?;
+    let pty = native_pty_system().openpty(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
     let mut cmd = CommandBuilder::new(prog);
     cmd.args(rest);
     cmd.cwd(std::env::temp_dir());
@@ -41,20 +46,33 @@ fn main() -> anyhow::Result<()> {
 
     let leader = pty.master.process_group_leader();
     let mut sys = System::new();
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::everything());
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
     if let Some(pid) = leader {
         let proc_ = sys.process(Pid::from_u32(pid as u32));
         println!(
             "leader pid={pid} name={:?} cmd={:?}",
             proc_.map(|p| p.name().to_string_lossy().into_owned()),
-            proc_.map(|p| p.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>())
+            proc_.map(|p| p
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect::<Vec<_>>())
         );
     } else {
         println!("leader: none");
     }
 
     // Resize the PTY and the parser together, as the server will.
-    pty.master.resize(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 })?;
+    pty.master.resize(PtySize {
+        rows: 30,
+        cols: 100,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
     parser.lock().unwrap().screen_mut().set_size(30, 100);
     std::thread::sleep(Duration::from_millis(800));
 
@@ -63,7 +81,10 @@ fn main() -> anyhow::Result<()> {
         let guard = parser.lock().unwrap();
         term.draw(|f| f.render_widget(PseudoTerminal::new(guard.screen()), f.area()))?;
         let snap = guard.screen().state_formatted();
-        println!("snapshot bytes: {}", snap.len() + guard.screen().contents_formatted().len());
+        println!(
+            "snapshot bytes: {}",
+            snap.len() + guard.screen().contents_formatted().len()
+        );
     }
     let buf = term.backend().buffer();
     for y in 0..buf.area.height {

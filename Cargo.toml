@@ -9,6 +9,10 @@ description = "A terminal runtime for coding agents, with optional per-agent git
 keywords = ["terminal", "agents", "tui", "multiplexer", "worktree"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lib]
+name = "corral"
+path = "src/lib.rs"
+
 [[bin]]
 name = "corral"
 path = "src/main.rs"
@@ -27,12 +31,13 @@ ratatui = "0.30"
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 sysinfo = "0.38"
 thiserror = "2"
 tokio = { version = "1.54", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 toml = "0.9"
+toml_edit = "0.23"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
