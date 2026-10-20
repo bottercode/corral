@@ -1,7 +1,959 @@
 //! The terminal UI client.
+//!
+//! Stdin goes to the terminal in raw mode and is forwarded byte-for-byte to
+//! the focused pane, except for the prefix key, mouse events and corral's
+//! dialogs. The focused pane is mirrored locally in a vt100 parser (snapshot
+//! plus live output) and drawn with tui-term next to the sidebar.
 
 pub mod conn;
+pub mod input;
+pub mod sidebar;
+pub mod ui;
 
-pub async fn run(_workspace: Option<String>) -> anyhow::Result<()> {
-    anyhow::bail!("the terminal UI isn't built yet")
+use std::collections::HashMap;
+use std::io::{IsTerminal, Read, Write};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+use futures::{SinkExt, StreamExt};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
+use tokio::sync::mpsc;
+
+use crate::config::{Config, prefix_label};
+use crate::paths;
+use crate::protocol::{
+    self, AgentState, ClientMsg, Command, NewPane, PaneId, PaneInfo, Reply, ServerMsg,
+    WorktreeAction,
+};
+use conn::Conn;
+use input::{Chunk, Key, Mouse, MouseKind, Splitter, decode_keys};
+use ui::{CloseStep, NewDialog, TextInput};
+
+const STATUS_FOR: Duration = Duration::from_secs(6);
+const WHEEL_LINES: usize = 3;
+
+#[derive(Debug, Clone)]
+pub enum Mode {
+    Normal,
+    Help,
+    Scroll { offset: usize },
+    New(NewDialog),
+    Rename { pane: PaneId, input: TextInput },
+    Close { pane: PaneId, step: CloseStep },
+}
+
+#[derive(Debug)]
+enum Pending {
+    New,
+    Kill { pane: PaneId },
+    Other,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Exit {
+    Detached,
+    ServerGone(String),
+}
+
+pub struct App {
+    pub panes: Vec<PaneInfo>,
+    pub focus: Option<PaneId>,
+    pub parser: Option<vt100::Parser>,
+    parser_pane: Option<PaneId>,
+    pub mode: Mode,
+    status: Option<(String, Instant, bool)>,
+    pub prefix_label: String,
+    prefix: u8,
+    pub awaiting_command: bool,
+    pub sidebar_width: u16,
+    pub sidebar_area: Rect,
+    pub pane_area: Rect,
+    pub hits: Vec<(u16, PaneId)>,
+    pub frame: usize,
+    pub scroll_max: usize,
+    splitter: Splitter,
+    default_command: String,
+    cwd: PathBuf,
+    next_id: u64,
+    pending: HashMap<u64, Pending>,
+    seen_state: bool,
+    pub outbox: Vec<ClientMsg>,
+    /// Raw bytes for the outer terminal (bell, OSC 9).
+    pub term_writes: Vec<u8>,
+    pub exit: Option<Exit>,
+    pub dirty: bool,
+}
+
+impl App {
+    pub fn new(config: &Config, cwd: PathBuf) -> Result<Self> {
+        let prefix = config.prefix_byte()?;
+        Ok(App {
+            panes: Vec::new(),
+            focus: None,
+            parser: None,
+            parser_pane: None,
+            mode: Mode::Normal,
+            status: None,
+            prefix_label: prefix_label(prefix),
+            prefix,
+            awaiting_command: false,
+            sidebar_width: config.sidebar_width,
+            sidebar_area: Rect::default(),
+            pane_area: Rect::default(),
+            hits: Vec::new(),
+            frame: 0,
+            scroll_max: 0,
+            splitter: Splitter::new(prefix),
+            default_command: config.default_command.clone(),
+            cwd,
+            next_id: 1,
+            pending: HashMap::new(),
+            seen_state: false,
+            outbox: Vec::new(),
+            term_writes: Vec::new(),
+            exit: None,
+            dirty: true,
+        })
+    }
+
+    pub fn status(&self) -> Option<(&str, bool)> {
+        self.status
+            .as_ref()
+            .filter(|(_, at, _)| at.elapsed() < STATUS_FOR)
+            .map(|(m, _, e)| (m.as_str(), *e))
+    }
+
+    fn set_status(&mut self, msg: impl Into<String>, error: bool) {
+        self.status = Some((msg.into(), Instant::now(), error));
+    }
+
+    fn request(&mut self, cmd: Command, kind: Pending) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.pending.insert(id, kind);
+        self.outbox.push(ClientMsg::Command { id, cmd });
+    }
+
+    fn focused(&self) -> Option<&PaneInfo> {
+        let id = self.focus.as_ref()?;
+        self.panes.iter().find(|p| &p.id == id)
+    }
+
+    fn order(&self) -> Vec<PaneId> {
+        sidebar::display_order(&self.panes)
+            .into_iter()
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    fn set_focus(&mut self, pane: PaneId) {
+        if self.focus.as_ref() != Some(&pane) {
+            self.outbox.push(ClientMsg::Focus { pane: pane.clone() });
+            self.focus = Some(pane);
+        }
+        if matches!(self.mode, Mode::Scroll { .. }) {
+            self.mode = Mode::Normal;
+        }
+    }
+
+    fn cycle_focus(&mut self, delta: isize) {
+        let order = self.order();
+        if order.is_empty() {
+            return;
+        }
+        let cur = self
+            .focus
+            .as_ref()
+            .and_then(|f| order.iter().position(|p| p == f))
+            .unwrap_or(0) as isize;
+        let next = (cur + delta).rem_euclid(order.len() as isize) as usize;
+        self.set_focus(order[next].clone());
+    }
+
+    fn focus_next_blocked(&mut self) {
+        let order = self.order();
+        let cur = self
+            .focus
+            .as_ref()
+            .and_then(|f| order.iter().position(|p| p == f))
+            .unwrap_or(0);
+        let n = order.len();
+        let blocked = |id: &PaneId| {
+            self.panes
+                .iter()
+                .any(|p| &p.id == id && p.state == AgentState::Blocked)
+        };
+        match (1..=n)
+            .map(|i| &order[(cur + i) % n])
+            .find(|id| blocked(id))
+        {
+            Some(id) => {
+                let id = id.clone();
+                self.set_focus(id);
+            }
+            None => self.set_status("no agent is blocked", false),
+        }
+    }
+
+    /// Directory a new agent should start in by default.
+    fn default_dir(&self) -> PathBuf {
+        match self.focused() {
+            Some(p) => p
+                .worktree
+                .as_ref()
+                .map_or_else(|| p.cwd.clone(), |w| w.repo.clone()),
+            None => self.cwd.clone(),
+        }
+    }
+
+    fn open_new(&mut self, worktree: bool) {
+        let dir = self.default_dir();
+        self.mode = Mode::New(NewDialog::new(&self.default_command, &dir, worktree));
+    }
+
+    fn submit_new(&mut self, d: NewDialog) {
+        let cwd = paths::expand_tilde(d.cwd.text.trim());
+        let cwd = if cwd.is_relative() {
+            self.cwd.join(cwd)
+        } else {
+            cwd
+        };
+        let branch = d.branch.text.trim().to_string();
+        let line = d.command.text.trim().to_string();
+        let req = NewPane {
+            name: None,
+            cwd: Some(cwd),
+            workspace: None,
+            command: if line.is_empty() {
+                Vec::new()
+            } else {
+                vec![line]
+            },
+            shell: true,
+            worktree: d.worktree,
+            branch: (d.worktree && !branch.is_empty()).then_some(branch),
+            focus: true,
+        };
+        self.set_status(
+            if d.worktree {
+                "creating worktree…"
+            } else {
+                "starting…"
+            },
+            false,
+        );
+        self.request(Command::New(req), Pending::New);
+    }
+
+    fn open_close(&mut self) {
+        let Some(p) = self.focused() else { return };
+        let step = if p.worktree.is_some() {
+            CloseStep::Worktree
+        } else {
+            CloseStep::Confirm
+        };
+        self.mode = Mode::Close {
+            pane: p.id.clone(),
+            step,
+        };
+    }
+
+    fn kill(&mut self, pane: PaneId, worktree: WorktreeAction, force: bool) {
+        self.request(
+            Command::Kill {
+                pane: pane.clone(),
+                worktree,
+                force,
+            },
+            Pending::Kill { pane },
+        );
+    }
+
+    fn forward(&mut self, bytes: &[u8], is_paste: bool) {
+        let Some(pane) = self.focus.clone() else {
+            return;
+        };
+        let (bp, app_cursor) = self.parser.as_ref().map_or((false, false), |p| {
+            let s = p.screen();
+            (s.bracketed_paste(), s.application_cursor())
+        });
+        let bytes = input::adapt_for_pane(bytes, bp, app_cursor, is_paste);
+        if !bytes.is_empty() {
+            self.outbox.push(ClientMsg::Input { pane, bytes });
+        }
+    }
+
+    fn prefix_command(&mut self, key: Key) {
+        match key {
+            Key::Char('n') => self.open_new(false),
+            Key::Char('w') => self.open_new(true),
+            Key::Char('j') | Key::Down => self.cycle_focus(1),
+            Key::Char('k') | Key::Up => self.cycle_focus(-1),
+            Key::Char(c @ '1'..='9') => {
+                let i = c as usize - '1' as usize;
+                if let Some(id) = self.order().get(i).cloned() {
+                    self.set_focus(id);
+                }
+            }
+            Key::Char('b') => self.focus_next_blocked(),
+            Key::Char('x') => self.open_close(),
+            Key::Char('r') => {
+                if let Some(p) = self.focused() {
+                    self.mode = Mode::Rename {
+                        pane: p.id.clone(),
+                        input: TextInput::new(&p.name),
+                    };
+                }
+            }
+            Key::Char('d') => {
+                self.outbox.push(ClientMsg::Detach);
+                self.exit = Some(Exit::Detached);
+            }
+            Key::Char('[') => self.enter_scroll(0),
+            Key::Char('?') => self.mode = Mode::Help,
+            _ => {}
+        }
+    }
+
+    fn scroll_limit(&mut self) -> usize {
+        let Some(p) = self.parser.as_mut() else {
+            return 0;
+        };
+        let s = p.screen_mut();
+        let cur = s.scrollback();
+        s.set_scrollback(usize::MAX);
+        let max = s.scrollback();
+        s.set_scrollback(cur);
+        self.scroll_max = max;
+        max
+    }
+
+    fn enter_scroll(&mut self, offset: usize) {
+        let max = self.scroll_limit();
+        if max == 0 && offset == 0 && self.parser.is_some() {
+            self.set_status("no scrollback in this pane", false);
+            return;
+        }
+        self.mode = Mode::Scroll {
+            offset: offset.min(max),
+        };
+    }
+
+    fn scroll_by(&mut self, delta: isize) {
+        let max = self.scroll_limit();
+        let cur = match self.mode {
+            Mode::Scroll { offset } => offset as isize,
+            _ => 0,
+        };
+        let next = (cur + delta).clamp(0, max as isize) as usize;
+        self.mode = if next == 0 && delta < 0 {
+            Mode::Normal
+        } else {
+            Mode::Scroll { offset: next }
+        };
+    }
+
+    fn scroll_key(&mut self, key: Key) {
+        let page = self.pane_area.height.max(2) as isize - 1;
+        match key {
+            Key::Char('q') | Key::Esc | Key::Ctrl('c') | Key::Enter => self.mode = Mode::Normal,
+            Key::Char('k') | Key::Up => self.scroll_by(1),
+            Key::Char('j') | Key::Down => self.scroll_by(-1),
+            Key::PageUp | Key::Ctrl('u') => self.scroll_by(page),
+            Key::PageDown | Key::Ctrl('d') => self.scroll_by(-page),
+            Key::Char('g') | Key::Home => self.scroll_by(isize::MAX / 2),
+            Key::Char('G') | Key::End => self.mode = Mode::Normal,
+            _ => {}
+        }
+    }
+
+    fn on_mouse(&mut self, m: Mouse) {
+        let in_sidebar = m.x < self.sidebar_area.x + self.sidebar_area.width;
+        match m.kind {
+            MouseKind::LeftDown if in_sidebar => {
+                if let Some((_, id)) = self.hits.iter().find(|(y, _)| *y == m.y).cloned() {
+                    self.set_focus(id);
+                }
+            }
+            MouseKind::WheelUp
+                if !in_sidebar && matches!(self.mode, Mode::Normal | Mode::Scroll { .. }) =>
+            {
+                if matches!(self.mode, Mode::Normal) {
+                    self.enter_scroll(WHEEL_LINES);
+                    if !matches!(self.mode, Mode::Scroll { .. }) {
+                        self.status = None;
+                    }
+                } else {
+                    self.scroll_by(WHEEL_LINES as isize);
+                }
+            }
+            MouseKind::WheelDown if matches!(self.mode, Mode::Scroll { .. }) => {
+                self.scroll_by(-(WHEEL_LINES as isize));
+            }
+            _ => {}
+        }
+    }
+
+    fn dialog_key(&mut self, key: Key) {
+        match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::Help => {}
+            Mode::New(mut d) => match d.handle(key) {
+                Some(true) => self.submit_new(d),
+                Some(false) => {}
+                None => self.mode = Mode::New(d),
+            },
+            Mode::Rename { pane, mut input } => match key {
+                Key::Esc | Key::Ctrl('c') => {}
+                Key::Enter => {
+                    let name = input.text.trim().to_string();
+                    if !name.is_empty() {
+                        self.request(Command::Rename { pane, name }, Pending::Other);
+                    }
+                }
+                k => {
+                    input.handle(k);
+                    self.mode = Mode::Rename { pane, input };
+                }
+            },
+            Mode::Close { pane, step } => {
+                let keep = |s: &mut Self, pane: PaneId| s.kill(pane, WorktreeAction::Keep, false);
+                match (&step, key) {
+                    (_, Key::Esc | Key::Ctrl('c')) => {}
+                    (CloseStep::Confirm, Key::Char('y' | 'Y' | 'x') | Key::Enter) => {
+                        keep(self, pane)
+                    }
+                    (CloseStep::Confirm, Key::Char('n' | 'N')) => {}
+                    (CloseStep::Worktree, Key::Char('k')) => keep(self, pane),
+                    (CloseStep::Worktree, Key::Char('r')) => {
+                        self.kill(pane, WorktreeAction::Remove, false)
+                    }
+                    (CloseStep::Worktree, Key::Char('d')) => {
+                        self.kill(pane, WorktreeAction::RemoveAndDeleteBranch, false)
+                    }
+                    (CloseStep::Force { action, .. }, Key::Char('f')) => {
+                        let action = *action;
+                        self.kill(pane, action, true)
+                    }
+                    (CloseStep::Force { .. }, Key::Char('k')) => keep(self, pane),
+                    _ => self.mode = Mode::Close { pane, step },
+                }
+            }
+            m @ (Mode::Normal | Mode::Scroll { .. }) => self.mode = m,
+        }
+    }
+
+    fn paste_into_dialog(&mut self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes);
+        let text = text
+            .trim_start_matches("\x1b[200~")
+            .trim_end_matches("\x1b[201~")
+            .replace(['\r', '\n'], " ");
+        match &mut self.mode {
+            Mode::New(d) => d.paste(&text),
+            Mode::Rename { input, .. } => input.insert_str(&text),
+            _ => {}
+        }
+    }
+
+    pub fn on_stdin(&mut self, bytes: &[u8]) {
+        self.dirty = true;
+        for chunk in self.splitter.feed(bytes) {
+            let in_dialog = !matches!(self.mode, Mode::Normal | Mode::Scroll { .. });
+            match chunk {
+                Chunk::Mouse(m) => {
+                    if !in_dialog {
+                        self.on_mouse(m);
+                    }
+                }
+                Chunk::Paste(p) => {
+                    if in_dialog {
+                        self.paste_into_dialog(&p);
+                    } else {
+                        self.awaiting_command = false;
+                        self.mode = Mode::Normal;
+                        self.forward(&p, true);
+                    }
+                }
+                Chunk::Prefix if in_dialog => {
+                    if matches!(self.mode, Mode::Help) {
+                        self.mode = Mode::Normal;
+                    }
+                }
+                Chunk::Prefix => {
+                    if self.awaiting_command {
+                        // Prefix twice sends it to the pane.
+                        self.awaiting_command = false;
+                        let p = [self.prefix];
+                        self.forward(&p, false);
+                    } else {
+                        self.awaiting_command = true;
+                    }
+                }
+                Chunk::Bytes(b) => {
+                    if in_dialog {
+                        for k in decode_keys(&b) {
+                            if matches!(self.mode, Mode::Normal | Mode::Scroll { .. }) {
+                                break;
+                            }
+                            self.dialog_key(k);
+                        }
+                    } else if self.awaiting_command {
+                        self.awaiting_command = false;
+                        if let Some(k) = decode_keys(&b).into_iter().next() {
+                            self.prefix_command(k);
+                        }
+                    } else if matches!(self.mode, Mode::Scroll { .. }) {
+                        for k in decode_keys(&b) {
+                            self.scroll_key(k);
+                        }
+                    } else {
+                        self.forward(&b, false);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn on_server(&mut self, msg: ServerMsg) {
+        self.dirty = true;
+        match msg {
+            ServerMsg::State { panes, focus } => {
+                self.panes = panes;
+                if focus.is_none() {
+                    self.parser = None;
+                    self.parser_pane = None;
+                }
+                self.focus = focus;
+                if !self.seen_state {
+                    self.seen_state = true;
+                    if self.panes.is_empty() {
+                        self.open_new(false);
+                    }
+                }
+            }
+            ServerMsg::Screen {
+                pane,
+                cols,
+                rows,
+                bytes,
+                ..
+            } => {
+                let mut p = vt100::Parser::new(rows, cols, crate::server::pane::SCROLLBACK);
+                p.process(&bytes);
+                self.parser = Some(p);
+                self.parser_pane = Some(pane);
+                if matches!(self.mode, Mode::Scroll { .. }) {
+                    self.mode = Mode::Normal;
+                }
+            }
+            ServerMsg::Output { pane, bytes, .. } => {
+                if self.parser_pane.as_ref() == Some(&pane)
+                    && let Some(p) = self.parser.as_mut()
+                {
+                    p.process(&bytes);
+                }
+            }
+            ServerMsg::Notify { message, .. } => {
+                self.term_writes.push(0x07);
+                let clean: String = message.chars().filter(|c| !c.is_control()).collect();
+                self.term_writes
+                    .extend_from_slice(format!("\x1b]9;corral: {clean}\x07").as_bytes());
+                self.set_status(message, false);
+            }
+            ServerMsg::Reply { id, result } => {
+                let kind = self.pending.remove(&id).unwrap_or(Pending::Other);
+                self.on_reply(kind, result);
+            }
+            ServerMsg::Shutdown { reason } => self.exit = Some(Exit::ServerGone(reason)),
+            ServerMsg::Hello { .. } => {}
+        }
+    }
+
+    fn on_reply(&mut self, kind: Pending, result: Result<Reply, String>) {
+        match (kind, result) {
+            (Pending::New, Ok(Reply::Created { pane, warning })) => match warning {
+                Some(w) => self.set_status(w, true),
+                None => match &pane.worktree {
+                    Some(w) => self.set_status(
+                        format!("{} started in worktree {}", pane.id, w.branch),
+                        false,
+                    ),
+                    None => self.status = None,
+                },
+            },
+            (Pending::Kill { .. }, Ok(Reply::Text(t))) => self.set_status(t, false),
+            (Pending::Kill { pane }, Err(e))
+                if e.contains("uncommitted changes")
+                    || e.contains("aren't on any other branch") =>
+            {
+                let action = if e.contains("aren't on any other branch") {
+                    WorktreeAction::RemoveAndDeleteBranch
+                } else {
+                    // Keep the user's choice of deleting the branch too.
+                    WorktreeAction::Remove
+                };
+                self.mode = Mode::Close {
+                    pane,
+                    step: CloseStep::Force { action, message: e },
+                };
+            }
+            (_, Err(e)) => self.set_status(e, true),
+            (_, Ok(_)) => {}
+        }
+    }
+
+    pub fn tick(&mut self) {
+        let working = self.panes.iter().any(|p| p.state == AgentState::Working);
+        if working {
+            self.frame = self.frame.wrapping_add(1);
+            self.dirty = true;
+        }
+        if let Some((_, at, _)) = &self.status
+            && at.elapsed() >= STATUS_FOR
+        {
+            self.status = None;
+            self.dirty = true;
+        }
+    }
+}
+
+/// Puts the terminal in raw mode on the alternate screen with mouse and
+/// bracketed paste reporting, and restores it on drop (and on panic).
+struct TerminalGuard;
+
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h";
+const LEAVE: &[u8] = b"\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l";
+
+fn restore_terminal() {
+    let mut out = std::io::stdout();
+    let _ = out.write_all(LEAVE);
+    let _ = out.flush();
+    let _ = crossterm::terminal::disable_raw_mode();
+}
+
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        crossterm::terminal::enable_raw_mode().context("switching the terminal to raw mode")?;
+        let mut out = std::io::stdout();
+        out.write_all(ENTER)?;
+        out.flush()?;
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal();
+            default(info);
+        }));
+        Ok(TerminalGuard)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+fn pane_size(app: &App) -> Result<(u16, u16)> {
+    let (w, h) = crossterm::terminal::size()?;
+    let a = ui::layout(Rect::new(0, 0, w, h), app.sidebar_width).pane;
+    Ok((a.width.max(2), a.height.max(1)))
+}
+
+pub async fn run(workspace: Option<String>) -> Result<()> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        bail!(
+            "the corral UI needs a terminal; use `corral ls`, `corral read` and friends from scripts"
+        );
+    }
+    if std::env::var_os(paths::PANE_ENV).is_some() {
+        bail!(
+            "already inside a corral pane; detach first (or unset {})",
+            paths::PANE_ENV
+        );
+    }
+    let config = Config::load()?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let mut app = App::new(&config, cwd)?;
+    let conn = Conn::connect_or_start(&paths::socket_path()).await?;
+
+    let exit = {
+        let _guard = TerminalGuard::enter()?;
+        event_loop(&mut app, conn, workspace).await
+    };
+    match exit? {
+        Exit::Detached => {
+            println!("[detached from corral; agents keep running — `corral` to reattach]")
+        }
+        Exit::ServerGone(reason) => println!("[corral: {reason}]"),
+    }
+    Ok(())
+}
+
+async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Result<Exit> {
+    let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    term.clear()?;
+
+    let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    std::thread::Builder::new()
+        .name("stdin".into())
+        .spawn(move || {
+            let mut buf = vec![0u8; 16 * 1024];
+            let stdin = std::io::stdin();
+            loop {
+                match stdin.lock().read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if stdin_tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        })?;
+
+    let (mut sink, mut stream) = conn.transport.split();
+    let mut size = pane_size(app)?;
+    let attach = ClientMsg::Attach {
+        cols: size.0,
+        rows: size.1,
+        workspace: workspace.clone(),
+    };
+    sink.send(protocol::encode(&attach)?).await?;
+
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut winch = signal(SignalKind::window_change())?;
+    let mut redraw = tokio::time::interval(Duration::from_millis(16));
+    redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut anim = tokio::time::interval(Duration::from_millis(100));
+    let mut checked_workspace = false;
+
+    loop {
+        tokio::select! {
+            bytes = stdin_rx.recv() => match bytes {
+                Some(b) => app.on_stdin(&b),
+                None => return Ok(Exit::Detached),
+            },
+            frame = stream.next() => match frame {
+                Some(Ok(f)) => {
+                    let msg: ServerMsg = protocol::decode(&f)?;
+                    app.on_server(msg);
+                    if !checked_workspace && app.seen_state {
+                        checked_workspace = true;
+                        if let Some(ws) = &workspace
+                            && !app.panes.iter().any(|p| &p.workspace == ws)
+                        {
+                            app.set_status(format!("no workspace named {ws}"), true);
+                        }
+                    }
+                }
+                Some(Err(e)) => return Err(e).context("reading from the server"),
+                None => return Ok(Exit::ServerGone("server closed the connection".into())),
+            },
+            _ = winch.recv() => {
+                app.dirty = true;
+                let new = pane_size(app)?;
+                if new != size {
+                    size = new;
+                    app.outbox.push(ClientMsg::Resize { cols: size.0, rows: size.1 });
+                }
+            }
+            _ = redraw.tick() => {
+                if app.dirty {
+                    app.dirty = false;
+                    term.draw(|f| ui::draw(f, app))?;
+                }
+            }
+            _ = anim.tick() => app.tick(),
+        }
+
+        for msg in app.outbox.drain(..) {
+            sink.send(protocol::encode(&msg)?).await?;
+        }
+        if !app.term_writes.is_empty() {
+            let mut out = std::io::stdout();
+            out.write_all(&app.term_writes)?;
+            out.flush()?;
+            app.term_writes.clear();
+        }
+        if let Some(exit) = app.exit.take() {
+            let _ = sink.flush().await;
+            return Ok(exit);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane(id: &str, state: AgentState) -> PaneInfo {
+        PaneInfo {
+            id: id.into(),
+            name: id.into(),
+            workspace: "w".into(),
+            command: vec![],
+            cwd: "/tmp".into(),
+            agent: None,
+            state,
+            pid: None,
+            exit_code: None,
+            title: None,
+            worktree: None,
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    fn app() -> App {
+        let mut a = App::new(&Config::default(), "/tmp".into()).unwrap();
+        a.on_server(ServerMsg::State {
+            panes: vec![
+                pane("p1", AgentState::Idle),
+                pane("p2", AgentState::Blocked),
+                pane("p3", AgentState::Working),
+            ],
+            focus: Some("p1".into()),
+        });
+        a.on_server(ServerMsg::Screen {
+            pane: "p1".into(),
+            cols: 80,
+            rows: 24,
+            seq: 0,
+            bytes: vec![],
+        });
+        a
+    }
+
+    #[test]
+    fn typing_is_forwarded() {
+        let mut a = app();
+        a.on_stdin(b"hi\r");
+        assert_eq!(
+            a.outbox,
+            vec![ClientMsg::Input {
+                pane: "p1".into(),
+                bytes: b"hi\r".to_vec()
+            }]
+        );
+    }
+
+    #[test]
+    fn prefix_commands() {
+        let mut a = app();
+        a.on_stdin(b"\x02j");
+        assert_eq!(a.outbox, vec![ClientMsg::Focus { pane: "p2".into() }]);
+        a.outbox.clear();
+        a.on_stdin(b"\x023");
+        assert_eq!(a.outbox, vec![ClientMsg::Focus { pane: "p3".into() }]);
+        a.outbox.clear();
+        // Prefix split from its key across reads.
+        a.on_stdin(b"\x02");
+        a.on_stdin(b"b");
+        assert_eq!(a.outbox, vec![ClientMsg::Focus { pane: "p2".into() }]);
+        a.outbox.clear();
+        // Prefix twice sends a literal prefix byte.
+        a.on_stdin(b"\x02\x02");
+        assert_eq!(
+            a.outbox,
+            vec![ClientMsg::Input {
+                pane: "p2".into(),
+                bytes: vec![2]
+            }]
+        );
+        a.outbox.clear();
+        a.on_stdin(b"\x02d");
+        assert_eq!(a.outbox, vec![ClientMsg::Detach]);
+        assert_eq!(a.exit, Some(Exit::Detached));
+    }
+
+    #[test]
+    fn new_dialog_sends_a_shell_command() {
+        let mut a = app();
+        a.on_stdin(b"\x02w");
+        assert!(matches!(&a.mode, Mode::New(d) if d.worktree));
+        a.on_stdin(b" --resume\r");
+        let Some(ClientMsg::Command {
+            cmd: Command::New(req),
+            ..
+        }) = a.outbox.first()
+        else {
+            panic!("{:?}", a.outbox);
+        };
+        assert_eq!(req.command, vec!["claude --resume"]);
+        assert!(req.shell && req.worktree && req.focus);
+        assert_eq!(req.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+        assert!(matches!(a.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn dirty_worktree_offers_force() {
+        let mut a = app();
+        a.kill("p1".into(), WorktreeAction::Remove, false);
+        let ClientMsg::Command { id, .. } = a.outbox[0] else {
+            panic!()
+        };
+        a.on_server(ServerMsg::Reply {
+            id,
+            result: Err(
+                "…/x has uncommitted changes (2 files); commit them or force removal".into(),
+            ),
+        });
+        assert!(matches!(
+            &a.mode,
+            Mode::Close {
+                step: CloseStep::Force {
+                    action: WorktreeAction::Remove,
+                    ..
+                },
+                ..
+            }
+        ));
+        a.outbox.clear();
+        a.on_stdin(b"f");
+        assert!(matches!(
+            &a.outbox[0],
+            ClientMsg::Command {
+                cmd: Command::Kill {
+                    force: true,
+                    worktree: WorktreeAction::Remove,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn notifications_ring_the_bell() {
+        let mut a = app();
+        a.on_server(ServerMsg::Notify {
+            pane: "p2".into(),
+            state: AgentState::Blocked,
+            message: "codex (p2) needs your input".into(),
+        });
+        let w = String::from_utf8(a.term_writes.clone()).unwrap();
+        assert!(w.starts_with('\x07'));
+        assert!(w.contains("\x1b]9;corral: codex (p2) needs your input\x07"));
+    }
+
+    #[test]
+    fn opens_new_dialog_when_empty() {
+        let mut a = App::new(&Config::default(), "/tmp".into()).unwrap();
+        a.on_server(ServerMsg::State {
+            panes: vec![],
+            focus: None,
+        });
+        assert!(matches!(a.mode, Mode::New(_)));
+    }
+
+    #[test]
+    fn sidebar_click_focuses() {
+        let mut a = app();
+        a.sidebar_area = Rect::new(0, 0, 30, 20);
+        a.hits = vec![(3, "p1".into()), (4, "p3".into())];
+        a.on_stdin(b"\x1b[<0;5;5M");
+        assert_eq!(a.outbox, vec![ClientMsg::Focus { pane: "p3".into() }]);
+    }
 }

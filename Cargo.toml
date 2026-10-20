@@ -42,6 +42,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tui-term = "0.3.4"
+unicode-width = "0.2"
 vt100 = "0.16"
 
 [dev-dependencies]

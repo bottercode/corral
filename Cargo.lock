@@ -301,6 +301,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tui-term",
+ "unicode-width",
  "vt100",
 ]
 
