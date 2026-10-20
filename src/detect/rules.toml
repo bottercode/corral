@@ -3,7 +3,9 @@
 # Each rule matches the visible screen text, lowercased. A rule matches when
 # every string in `all` appears and, if `any` is given, at least one of those
 # appears too. `agent` is a name from the agent table, or "*" for any pane.
-# Blocked rules win over working rules.
+# `scope` is "screen" (the bottom of the screen, the default) or
+# "cursor-line" (only the line the cursor is on, i.e. where a program is
+# waiting for an answer). Blocked rules win over working rules.
 
 # Claude Code: tool permission prompts ("Do you want to make this edit…?",
 # "Do you want to proceed?") with a numbered choice list.
@@ -71,10 +73,11 @@ agent = "gemini"
 state = "working"
 all = ["esc to cancel"]
 
-# Generic: yes/no prompts from any program.
+# Generic: yes/no prompts from any program, while the cursor waits on them.
 [[rule]]
 agent = "*"
 state = "blocked"
+scope = "cursor-line"
 any = ["(y/n)", "[y/n]", "(yes/no)", "[yes/no]"]
 
 # Generic: "esc to interrupt" is the common spinner footer.

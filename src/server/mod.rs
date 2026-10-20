@@ -21,7 +21,7 @@ use tokio::sync::{Notify, broadcast};
 
 use crate::config::Config;
 use crate::detect::agents::Identifier;
-use crate::detect::rules::Rules;
+use crate::detect::rules::{Rules, View};
 use crate::paths;
 use crate::protocol::{
     AgentState, NewPane, PaneId, PaneInfo, ServerMsg, WorktreeAction, WorktreeInfo,
@@ -675,8 +675,11 @@ impl Hub {
             for (p, focused) in g.panes.iter_mut().zip(focus) {
                 if p.dirty {
                     p.dirty = false;
-                    let text = p.parser.screen().contents();
-                    let verdict = self.rules.classify(p.agent.as_deref(), &text);
+                    let screen = p.parser.screen();
+                    let text = screen.contents();
+                    let mut line = String::new();
+                    let view = View::of_screen(screen, &text, &mut line);
+                    let verdict = self.rules.classify(p.agent.as_deref(), view);
                     p.detector.set_verdict(verdict);
                 }
                 if let Some((_, new)) = p.detector.evaluate(now) {

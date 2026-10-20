@@ -1,0 +1,9 @@
+[2J[H[1mWould you like to run the following command?[0m
+
+  $ cargo test
+
+[7m› 1. Yes, proceed[0m
+  2. Yes, and don't ask again for this command
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel
