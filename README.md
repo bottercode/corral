@@ -1,0 +1,290 @@
+# corral
+
+A terminal runtime for coding agents. Run Claude Code, Codex, opencode and
+friends side by side, see at a glance which one is waiting for you, and keep
+them running when you close the laptop or lose SSH. Optionally, give each
+agent its own git worktree so parallel agents never edit the same checkout.
+
+```
+ corral  ●1  ✓1                │> fix the failing test in parser.rs
+                               │
+ api                           │⏺ I'll run the tests first.
+▌1 claude            ● blocked │
+   ⎇ corral/claude-3f9a · 3 fi…│ Bash(cargo test)
+ 2 codex             ⠋ working │
+   ⎇ corral/codex-81c2 · clean │ Do you want to proceed?
+                               │ ❯ 1. Yes
+ website                       │   2. Yes, and don't ask again for cargo test
+ 3 opencode            ✓ done  │   3. No, and tell Claude what to do differently
+                               │
+ ^b n new · w worktree · j/k switch · b next blocked · x close · d detach · ? help
+```
+
+## Why
+
+Running several agents in separate terminal tabs breaks down quickly:
+
+- **You miss agents that are blocked.** An agent asks for permission in a
+  tab you're not looking at and sits idle for twenty minutes.
+- **Closing the terminal kills the work.** Shutting the laptop lid or
+  dropping an SSH connection ends every agent.
+- **Parallel agents trip over each other.** Two agents editing the same
+  checkout overwrite each other's changes and confuse each other's builds.
+
+corral runs a small background server that owns every agent's terminal. The
+UI is a client that attaches and detaches; the agents don't notice. Each pane
+is watched for its state (working, blocked, done), and you get a bell and a
+desktop notification when an agent you aren't looking at needs you. With
+`--worktree`, an agent starts in a fresh git worktree on its own branch.
+
+## Install
+
+corral is not published yet. Build it from source (Rust 1.88+, macOS or
+Linux):
+
+```sh
+git clone <this repo> corral && cd corral
+cargo install --path .
+```
+
+This installs a `corral` binary into `~/.cargo/bin`.
+
+## Quick start
+
+```sh
+corral                      # open the UI (starts the server if needed)
+```
+
+With no agents running, the new-agent dialog opens. Type a command
+(`claude` by default), pick a directory, tick **Worktree** if you want one, and
+press Enter. Then, with the prefix key `Ctrl-b`:
+
+| Keys | Action |
+|---|---|
+| `^b n` | new agent |
+| `^b w` | new agent in its own git worktree |
+| `^b j` / `^b k`, `^b ↑` / `^b ↓` | next / previous pane |
+| `^b 1` … `^b 9` | jump to a pane |
+| `^b b` | jump to the next blocked agent |
+| `^b x` | close the pane |
+| `^b r` | rename the pane |
+| `^b d` | detach (agents keep running) |
+| `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`) |
+| `^b ?` | help |
+| `^b ^b` | send a literal `Ctrl-b` to the pane |
+
+Click a sidebar row to focus that pane, and scroll the wheel for scrollback.
+corral captures the mouse, so hold Shift (Option in some terminals) to select
+text.
+
+Detach with `^b d`, close the terminal, come back later (or from another
+machine over SSH) and run `corral` again: everything is where you left it.
+
+## Worktrees
+
+```sh
+corral new --worktree -- claude
+corral new --worktree --branch fix/login -- codex
+```
+
+Each worktree is created next to, not inside, your repository:
+
+```
+~/.corral/worktrees/<repo>-<hash>/<slug>     on branch corral/<slug>
+```
+
+- Your own checkout stays untouched, and each agent works on its own branch.
+- The sidebar shows the branch and how many files the agent has changed
+  (`⎇ corral/claude-3f9a · 3 files`). This updates every few seconds.
+- `--branch` uses that branch, creating it from `HEAD` if it doesn't exist
+  yet or checking it out if it does.
+- Closing a worktree pane asks whether to **keep** the worktree, **remove**
+  it, or **remove it and delete the branch**.
+  - Removing refuses while there are uncommitted changes.
+  - Deleting the branch refuses while it has commits that aren't on any other
+    branch.
+  - Both can be forced, from the UI or with `--force`.
+- Starting with `--worktree` outside a git repository prints a warning and
+  starts the agent without one.
+
+```sh
+corral worktree ls                        # worktrees corral created, with their panes
+corral worktree rm p3                     # by pane (once it has exited) …
+corral worktree rm ~/.corral/worktrees/api-1a2b3c4d/claude-3f9a --delete-branch   # … or by path
+corral kill p3 --rm-worktree              # close a pane and remove its worktree
+corral kill p3 --delete-branch            # … and delete its branch
+```
+
+Merging an agent's branch is up to you, with your usual git tools.
+
+## Agent state
+
+| State | Meaning |
+|---|---|
+| ⠋ working | output in the last moment, or a spinner / "esc to interrupt" on screen |
+| ● blocked | a permission prompt or question is on screen |
+| ✓ done | it was working and stopped, and you haven't looked at it since |
+| ○ idle | you've seen it, or it hasn't started anything |
+| ✗ exit N | the process ended |
+
+corral recognises claude, codex, opencode, gemini, amp, cursor-agent, copilot,
+pi, droid and grok from the pane's foreground process. It then reads their
+prompts from the screen using
+[data-driven rules](src/detect/rules.toml), plus a generic `(y/n)` / `[Y/n]`
+rule for any program.
+
+### Hooks (more accurate)
+
+Screen heuristics can drift as agent UIs change. Agents that support hooks
+can report their state directly:
+
+```sh
+corral integrate claude     # adds hooks to ~/.claude/settings.json
+corral integrate codex      # sets `notify` in ~/.codex/config.toml
+```
+
+Both commands show the diff and ask before writing. They back up the
+original file once, can be run again safely, and are undone with
+`--uninstall`. The hooks only do anything inside corral panes (they check
+`$CORRAL_PANE`), so agents started elsewhere are unaffected.
+
+| Claude Code hook | Reports |
+|---|---|
+| Notification (permission prompts) | blocked |
+| Stop | done |
+| UserPromptSubmit, PreToolUse, PostToolUse | working |
+
+A hook report wins over the heuristics until the next hook event. It also
+gives way when it goes stale:
+- a minute of further output, for any report
+- typing an answer, for `blocked`
+- 10 s without output, for `working`
+
+Other tools can report the same way from inside a pane:
+`corral report --state blocked|working|done|idle`.
+
+### Notifications
+
+When an agent you aren't looking at becomes blocked or done, every attached
+client rings the bell and sends an OSC 9 desktop notification. iTerm2,
+Ghostty, WezTerm and kitty show these; Terminal.app ignores them. Turn
+notifications off with `notifications = false`.
+
+## CLI
+
+The CLI is also the API for scripts and for agents that drive other agents.
+Read commands take `--json`. Panes can be given as `p3`, `3`, or a unique
+name.
+
+| Command | |
+|---|---|
+| `corral` / `corral attach [workspace]` | open the UI |
+| `corral ls [--json]` | list panes |
+| `corral new [--name N] [--cwd DIR] [--workspace W] [--worktree [--branch B]] [--json] -- <cmd…>` | start a pane (default: your shell) |
+| `corral send <pane> <text> [--enter]` | type into a pane |
+| `corral read <pane> [--lines N] [--scrollback] [--json]` | print a pane's screen as text |
+| `corral wait <pane> --state blocked\|done\|idle\|working\|exited [--timeout S]` | wait for a state (exit code 2 on timeout) |
+| `corral kill <pane> [--rm-worktree] [--delete-branch] [--force]` | close a pane |
+| `corral rename <pane> <name>` | rename |
+| `corral report --state S [--pane P]` | report state (hooks use this) |
+| `corral integrate claude\|codex [--uninstall] [--yes]` | install agent hooks |
+| `corral worktree ls [--json]` / `corral worktree rm <pane\|path> [--force] [--delete-branch]` | worktrees |
+| `corral server [--daemon]`, `corral kill-server` | run / stop the server (stopping ends every agent) |
+| `corral debug dump <pane> [-o FILE]` | save a pane's screen as replayable bytes (for rule fixtures) |
+
+Example: run an agent unattended and collect its answer.
+
+```sh
+p=$(corral new --worktree -- claude)
+corral send "$p" "add input validation to the signup form" --enter
+corral wait "$p" --state blocked --timeout 600 && corral read "$p" --lines 30
+```
+
+Each pane gets these environment variables:
+- `CORRAL_PANE`: the pane's id
+- `CORRAL_SOCKET`: the socket of the server it belongs to
+- `CORRAL_BIN`: the corral binary
+
+## Configuration
+
+`~/.config/corral/config.toml` (all optional):
+
+```toml
+prefix = "C-b"                         # C-a … C-z or C-space
+default_command = "claude"             # prefilled in the new-agent dialog
+notifications = true
+worktree_root = "~/.corral/worktrees"
+sidebar_width = 30
+```
+
+Environment variables:
+
+| Variable | Default |
+|---|---|
+| `CORRAL_SOCKET` | `$TMPDIR/corral-$UID/default.sock` |
+| `CORRAL_HOME` | `~/.corral` (logs, worktrees) |
+| `CORRAL_CONFIG` | the config file path above |
+| `CORRAL_LOG` | log filter, e.g. `debug` |
+
+The server logs to `~/.corral/log/server.log`.
+
+## How it works
+
+```
+corral (UI) ─────────┐
+corral ls/send/read ─┼── Unix socket ($TMPDIR/corral-$UID/default.sock, 0700)
+agent hooks (report) ┘          │
+                         corral server (background, own session)
+                         └─ pane = PTY + child process + vt100 emulator (10k lines scrollback)
+                                   + state detector
+```
+
+- The server owns every PTY, so agents survive clients coming and going.
+- Each pane's output feeds a terminal emulator (vt100) on the server. A
+  client attaching gets a snapshot (scrollback included) and then the live
+  byte stream, rendered with Ratatui and tui-term.
+- The PTY size follows whichever client was used most recently, like tmux's
+  `latest` policy.
+- Keystrokes pass through to the pane untouched, apart from the prefix key,
+  mouse events and bracketed pastes (which pass through whole).
+- The server answers terminal queries (cursor position, device attributes),
+  so programs that ask the terminal about itself start normally.
+- Messages are MessagePack in length-delimited frames, with a strict
+  protocol-version handshake.
+
+## Compared to
+
+**tmux / screen** keep processes alive and attachable too, but know nothing
+about agents. You have to check each window for blocked prompts yourself, and
+setting up worktrees is up to you.
+
+**[Herdr](https://herdr.dev)** is the established tool in this space and the
+inspiration for corral's design: a server that owns the terminals, attachable
+clients, agent state detection and a CLI API. It is more mature and does more
+than corral, including features corral doesn't have, such as access from
+other devices. corral's main difference is built-in per-agent git worktrees:
+creating them, showing each one's changes, and cleaning them up safely.
+Herdr leaves worktrees to external tools.
+
+## Limitations (v0.1)
+
+- macOS and Linux only.
+- One pane visible at a time (no splits).
+- Agents don't survive a reboot or `corral kill-server`.
+- Programs inside panes don't receive mouse events; the wheel scrolls
+  corral's scrollback instead.
+- No diff review or merging of worktree branches inside corral.
+
+## Development
+
+```sh
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo test --test tui -- --ignored --nocapture   # renders a real `claude` pane (needs claude)
+```
+
+The integration tests run the real binary as a server on a private socket,
+and drive the TUI inside a PTY.
+
+## License
+
+MIT © 2026 bottercode

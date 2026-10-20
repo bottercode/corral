@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 authors = ["bottercode"]
 license = "MIT"
+readme = "README.md"
 description = "A terminal runtime for coding agents, with optional per-agent git worktrees"
 keywords = ["terminal", "agents", "tui", "multiplexer", "worktree"]
 categories = ["command-line-utilities", "development-tools"]
@@ -48,3 +49,8 @@ vt100 = "0.16"
 [dev-dependencies]
 insta = "1.49"
 tempfile = "3"
+
+# Used by cargo-dist for release builds.
+[profile.dist]
+inherits = "release"
+lto = "thin"

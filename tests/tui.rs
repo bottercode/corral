@@ -182,3 +182,22 @@ fn tui_mouse_click_focuses_a_sidebar_row() {
     t.type_(format!("\x1b[<0;5;{}M\x1b[<0;5;{}m", row + 1, row + 1).as_bytes());
     t.wait_for("pane two", |x| x.contains("pane-two"));
 }
+
+/// Needs `claude` on PATH; run with `cargo test --test tui -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn tui_renders_a_real_claude_pane() {
+    let s = TestServer::start();
+    let proj = s.dir.path().join("proj");
+    std::fs::create_dir(&proj).unwrap();
+    s.ok(&["new", "--cwd", proj.to_str().unwrap(), "--", "claude"]);
+    let t = Tui::start(&s, 130, 32);
+    t.wait_for("claude trust prompt", |x| x.contains("trust this folder"));
+    eventually("detected", || {
+        let p = &s.panes()[0];
+        p.agent.as_deref() == Some("claude") && p.state == corral::protocol::AgentState::Blocked
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    println!("{}", t.screen());
+    s.ok(&["kill", "p1"]);
+}

@@ -340,9 +340,10 @@ async fn run_client(cmd: Cmd) -> Result<ExitCode> {
                     if a.json {
                         print_json(&pane)?;
                     } else {
-                        match &pane.worktree {
-                            Some(w) => println!("{}\t{}\t{}", pane.id, w.branch, w.path.display()),
-                            None => println!("{}", pane.id),
+                        // stdout is just the id, so `p=$(corral new …)` works.
+                        println!("{}", pane.id);
+                        if let Some(w) = &pane.worktree {
+                            eprintln!("worktree {} on branch {}", home_relative(&w.path), w.branch);
                         }
                     }
                 }

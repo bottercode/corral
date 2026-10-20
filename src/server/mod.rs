@@ -179,6 +179,7 @@ impl Hub {
     }
 
     pub fn attach(&self, client: ClientId, cols: u16, rows: u16) {
+        tracing::info!(client, cols, rows, "client attached");
         let mut g = self.lock();
         if let Some(c) = g.clients.get_mut(&client) {
             c.attached = true;
@@ -189,6 +190,7 @@ impl Hub {
     }
 
     pub fn detach(&self, client: ClientId) {
+        tracing::info!(client, "client detached");
         let mut g = self.lock();
         if let Some(c) = g.clients.get_mut(&client) {
             c.attached = false;
@@ -462,6 +464,13 @@ impl Hub {
             child,
         } = spawned;
         let info = pane.info();
+        tracing::info!(
+            pane = %info.id,
+            command = ?info.command,
+            cwd = %info.cwd.display(),
+            worktree = ?info.worktree.as_ref().map(|w| &w.branch),
+            "pane started"
+        );
         self.lock().panes.push(pane);
         self.start_io(id, reader, child);
         self.emit(Event::State);
@@ -528,6 +537,7 @@ impl Hub {
     /// Close a pane: refuse first if its worktree would lose work, then end
     /// the process and apply the worktree action. Blocking.
     pub fn kill_pane(&self, id: &str, action: WorktreeAction, force: bool) -> Result<String> {
+        tracing::info!(pane = id, ?action, force, "closing pane");
         let wt = self.lock().pane(id)?.worktree.clone();
         let opts = RemoveOpts {
             force,

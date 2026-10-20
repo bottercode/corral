@@ -235,7 +235,7 @@ fn worktree_panes() {
     assert!(String::from_utf8_lossy(&branches.stdout).contains(&wt.branch));
 
     // Explicit branch name + delete-branch on close.
-    let out = s.ok(&[
+    let out = s.cli(&[
         "new",
         "--worktree",
         "--branch",
@@ -247,7 +247,10 @@ fn worktree_panes() {
         "-c",
         "read x",
     ]);
-    assert!(out.contains("feat/x"), "{out}");
+    // stdout is only the id, so `p=$(corral new …)` works in scripts.
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "p2");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("on branch feat/x"), "{err}");
     let msg = s.ok(&["kill", "p2", "--delete-branch"]);
     assert!(msg.contains("deleted branch feat/x"), "{msg}");
 
