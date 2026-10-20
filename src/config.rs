@@ -1,0 +1,146 @@
+//! `~/.config/corral/config.toml`.
+//!
+//! ```toml
+//! prefix = "C-b"                    # C-a … C-z, or C-space
+//! default_command = "claude"        # prefilled in the new-agent dialog
+//! notifications = true              # bell + OSC 9 when an unfocused agent is blocked/done
+//! worktree_root = "~/.corral/worktrees"
+//! sidebar_width = 30
+//! ```
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+
+use crate::paths;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    pub prefix: String,
+    pub default_command: String,
+    pub notifications: bool,
+    pub worktree_root: Option<String>,
+    pub sidebar_width: u16,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            prefix: "C-b".into(),
+            default_command: "claude".into(),
+            notifications: true,
+            worktree_root: None,
+            sidebar_width: 30,
+        }
+    }
+}
+
+impl Config {
+    /// Load from the default path; a missing file means defaults.
+    pub fn load() -> Result<Self> {
+        Self::load_from(&paths::config_path())
+    }
+
+    pub fn load_from(path: &Path) -> Result<Self> {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        Self::parse(&src).with_context(|| format!("in {}", path.display()))
+    }
+
+    pub fn parse(src: &str) -> Result<Self> {
+        let cfg: Config = toml::from_str(src)?;
+        cfg.prefix_byte()?;
+        Ok(cfg)
+    }
+
+    /// The byte the prefix key sends.
+    pub fn prefix_byte(&self) -> Result<u8> {
+        parse_prefix(&self.prefix)
+    }
+
+    pub fn worktree_root(&self) -> PathBuf {
+        match &self.worktree_root {
+            Some(p) => paths::expand_tilde(p),
+            None => paths::default_worktree_root(),
+        }
+    }
+}
+
+/// `C-b` → 0x02, `C-space` → 0x00.
+pub fn parse_prefix(s: &str) -> Result<u8> {
+    let lower = s.trim().to_ascii_lowercase();
+    let key = lower
+        .strip_prefix("c-")
+        .or_else(|| lower.strip_prefix("ctrl-"))
+        .or_else(|| lower.strip_prefix("ctrl+"))
+        .or_else(|| lower.strip_prefix('^'));
+    match key {
+        Some("space") | Some("@") => Ok(0),
+        Some(k) if k.len() == 1 && k.as_bytes()[0].is_ascii_lowercase() => {
+            Ok(k.as_bytes()[0] - b'a' + 1)
+        }
+        _ => bail!("prefix must look like C-b, C-a or C-space (got {s:?})"),
+    }
+}
+
+/// Display form of a prefix byte, e.g. `^b`.
+pub fn prefix_label(b: u8) -> String {
+    match b {
+        0 => "^space".into(),
+        1..=26 => format!("^{}", (b'a' + b - 1) as char),
+        _ => format!("0x{b:02x}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults() {
+        let c = Config::parse("").unwrap();
+        assert_eq!(c.prefix_byte().unwrap(), 0x02);
+        assert!(c.notifications);
+        assert_eq!(c.default_command, "claude");
+    }
+
+    #[test]
+    fn prefixes() {
+        assert_eq!(parse_prefix("C-a").unwrap(), 1);
+        assert_eq!(parse_prefix("ctrl-b").unwrap(), 2);
+        assert_eq!(parse_prefix("^z").unwrap(), 26);
+        assert_eq!(parse_prefix("C-space").unwrap(), 0);
+        assert!(parse_prefix("b").is_err());
+        assert!(parse_prefix("C-1").is_err());
+        assert_eq!(prefix_label(2), "^b");
+    }
+
+    #[test]
+    fn full_file() {
+        let c = Config::parse(
+            "prefix = 'C-a'\ndefault_command = 'codex'\nnotifications = false\nworktree_root = '/w'\nsidebar_width = 24\n",
+        )
+        .unwrap();
+        assert_eq!(c.prefix_byte().unwrap(), 1);
+        assert_eq!(c.worktree_root(), PathBuf::from("/w"));
+        assert_eq!(c.sidebar_width, 24);
+        assert!(!c.notifications);
+    }
+
+    #[test]
+    fn unknown_keys_and_bad_prefix_fail() {
+        assert!(Config::parse("prefx = 'C-a'").is_err());
+        assert!(Config::parse("prefix = 'x'").is_err());
+    }
+
+    #[test]
+    fn missing_file_is_default() {
+        let c = Config::load_from(Path::new("/nonexistent/corral.toml")).unwrap();
+        assert_eq!(c.prefix, "C-b");
+    }
+}

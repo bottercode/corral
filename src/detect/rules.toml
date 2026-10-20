@@ -1,0 +1,84 @@
+# Screen rules for agent state detection.
+#
+# Each rule matches the visible screen text, lowercased. A rule matches when
+# every string in `all` appears and, if `any` is given, at least one of those
+# appears too. `agent` is a name from the agent table, or "*" for any pane.
+# Blocked rules win over working rules.
+
+# Claude Code: tool permission prompts ("Do you want to make this edit…?",
+# "Do you want to proceed?") with a numbered choice list.
+[[rule]]
+agent = "claude"
+state = "blocked"
+all = ["do you want", "1. yes"]
+
+[[rule]]
+agent = "claude"
+state = "blocked"
+all = ["❯ 1. yes"]
+
+# Claude Code: folder trust prompt on first launch in a directory.
+[[rule]]
+agent = "claude"
+state = "blocked"
+all = ["yes, i trust this folder"]
+
+[[rule]]
+agent = "claude"
+state = "working"
+all = ["esc to interrupt"]
+
+# Codex: command and edit approvals.
+[[rule]]
+agent = "codex"
+state = "blocked"
+any = [
+  "would you like to run the following command",
+  "would you like to make the following edits",
+  "allow command?",
+  "approve this command",
+]
+
+[[rule]]
+agent = "codex"
+state = "blocked"
+all = ["yes, proceed", "esc"]
+
+[[rule]]
+agent = "codex"
+state = "working"
+all = ["esc to interrupt"]
+
+# opencode: permission dialog.
+[[rule]]
+agent = "opencode"
+state = "blocked"
+all = ["permission required"]
+
+[[rule]]
+agent = "opencode"
+state = "working"
+any = ["esc interrupt", "esc to interrupt"]
+
+# Gemini CLI.
+[[rule]]
+agent = "gemini"
+state = "blocked"
+any = ["allow execution", "apply this change?", "waiting for user confirmation"]
+
+[[rule]]
+agent = "gemini"
+state = "working"
+all = ["esc to cancel"]
+
+# Generic: yes/no prompts from any program.
+[[rule]]
+agent = "*"
+state = "blocked"
+any = ["(y/n)", "[y/n]", "(yes/no)", "[yes/no]"]
+
+# Generic: "esc to interrupt" is the common spinner footer.
+[[rule]]
+agent = "*"
+state = "working"
+all = ["esc to interrupt"]

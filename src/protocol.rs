@@ -164,8 +164,13 @@ pub enum Command {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     Ok,
-    List { panes: Vec<PaneInfo> },
-    Pane(PaneInfo),
+    List {
+        panes: Vec<PaneInfo>,
+    },
+    Created {
+        pane: PaneInfo,
+        warning: Option<String>,
+    },
     Text(String),
     State(AgentState),
     Worktrees(Vec<WorktreeInfo>),
@@ -435,7 +440,10 @@ mod tests {
             Ok(Reply::List {
                 panes: vec![pane()],
             }),
-            Ok(Reply::Pane(pane())),
+            Ok(Reply::Created {
+                pane: pane(),
+                warning: Some("not a repo".into()),
+            }),
             Ok(Reply::Text("x".into())),
             Ok(Reply::State(AgentState::Idle)),
             Ok(Reply::Worktrees(vec![pane().worktree.unwrap()])),
