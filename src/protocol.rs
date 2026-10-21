@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Largest frame either side will accept (scrollback snapshots can be large).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -66,14 +66,52 @@ impl std::str::FromStr for AgentState {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorktreeInfo {
     pub path: PathBuf,
     pub branch: String,
     pub repo: PathBuf,
+    /// Branch (or commit) the worktree was created from.
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Uncommitted changed or untracked files (what removal would lose).
     pub changed_files: u32,
+    /// Files, added and removed lines compared with where the branch
+    /// started, committed work and untracked files included.
+    #[serde(default)]
+    pub diff_files: u32,
+    #[serde(default)]
+    pub added: u32,
+    #[serde(default)]
+    pub removed: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<PaneId>,
+}
+
+/// One file in a worktree's diff.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct FileDiff {
+    pub path: String,
+    /// `M`odified, `A`dded, `D`eleted, or `?` for untracked.
+    pub status: String,
+    pub added: u32,
+    pub removed: u32,
+    pub binary: bool,
+    /// Unified diff text (hunks only, no file header).
+    pub patch: String,
+}
+
+/// Everything an agent changed in its worktree since its branch started.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct DiffReport {
+    pub pane: Option<PaneId>,
+    pub branch: String,
+    pub base: String,
+    /// Commits on the branch that aren't on the base yet.
+    pub commits: u32,
+    /// Files with uncommitted changes.
+    pub uncommitted: u32,
+    pub files: Vec<FileDiff>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -91,6 +129,9 @@ pub struct PaneInfo {
     pub worktree: Option<WorktreeInfo>,
     pub cols: u16,
     pub rows: u16,
+    /// Seconds spent in the current state when this was sent.
+    #[serde(default)]
+    pub state_secs: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -157,6 +198,23 @@ pub enum Command {
     DebugDump {
         pane: PaneId,
     },
+    /// The pane's worktree diff against where its branch started.
+    Diff {
+        pane: PaneId,
+    },
+    /// Commit everything in the pane's worktree.
+    Commit {
+        pane: PaneId,
+        message: String,
+    },
+    /// Merge the pane's branch into the base branch in the main checkout.
+    Merge {
+        pane: PaneId,
+    },
+    /// Throw away uncommitted changes in the pane's worktree.
+    Discard {
+        pane: PaneId,
+    },
     KillServer,
 }
 
@@ -175,6 +233,7 @@ pub enum Reply {
     State(AgentState),
     Worktrees(Vec<WorktreeInfo>),
     Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
+    Diff(DiffReport),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -190,8 +249,10 @@ pub enum ClientMsg {
         workspace: Option<String>,
     },
     Detach,
+    /// Look at one pane (`Some`), or at the overview of all panes (`None`),
+    /// which streams [`ServerMsg::Preview`]s instead of one pane's output.
     Focus {
-        pane: PaneId,
+        pane: Option<PaneId>,
     },
     Input {
         pane: PaneId,
@@ -232,6 +293,15 @@ pub enum ServerMsg {
     Output {
         pane: PaneId,
         seq: u64,
+        #[serde(with = "serde_bytes")]
+        bytes: Vec<u8>,
+    },
+    /// The bottom of a pane's screen for the overview: `rows` formatted
+    /// rows, replayable into a `rows`×`cols` emulator.
+    Preview {
+        pane: PaneId,
+        cols: u16,
+        rows: u16,
         #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
     },
@@ -324,11 +394,16 @@ mod tests {
                 path: "/w/x".into(),
                 branch: "corral/x".into(),
                 repo: "/r".into(),
+                base: Some("main".into()),
                 changed_files: 3,
+                diff_files: 4,
+                added: 40,
+                removed: 2,
                 pane: Some("p1".into()),
             }),
             cols: 80,
             rows: 24,
+            state_secs: 12,
         }
     }
 
@@ -343,7 +418,10 @@ mod tests {
             workspace: Some("w".into()),
         });
         roundtrip(ClientMsg::Detach);
-        roundtrip(ClientMsg::Focus { pane: "p2".into() });
+        roundtrip(ClientMsg::Focus {
+            pane: Some("p2".into()),
+        });
+        roundtrip(ClientMsg::Focus { pane: None });
         roundtrip(ClientMsg::Input {
             pane: "p1".into(),
             bytes: b"\x1b[A\x00\xff\xe2\x9c\xb3".to_vec(),
@@ -398,6 +476,13 @@ mod tests {
                 delete_branch: true,
             },
             Command::DebugDump { pane: "p1".into() },
+            Command::Diff { pane: "p1".into() },
+            Command::Commit {
+                pane: "p1".into(),
+                message: "wip".into(),
+            },
+            Command::Merge { pane: "p1".into() },
+            Command::Discard { pane: "p1".into() },
             Command::KillServer,
         ];
         for (id, cmd) in cmds.into_iter().enumerate() {
@@ -427,6 +512,12 @@ mod tests {
             seq: 8,
             bytes: b"hi".to_vec(),
         });
+        roundtrip(ServerMsg::Preview {
+            pane: "p1".into(),
+            cols: 80,
+            rows: 3,
+            bytes: b"a\r\nb\r\nc".to_vec(),
+        });
         roundtrip(ServerMsg::Notify {
             pane: "p1".into(),
             state: AgentState::Blocked,
@@ -448,6 +539,21 @@ mod tests {
             Ok(Reply::State(AgentState::Idle)),
             Ok(Reply::Worktrees(vec![pane().worktree.unwrap()])),
             Ok(Reply::Bytes(vec![1, 2, 3])),
+            Ok(Reply::Diff(DiffReport {
+                pane: Some("p1".into()),
+                branch: "corral/x".into(),
+                base: "main".into(),
+                commits: 1,
+                uncommitted: 2,
+                files: vec![FileDiff {
+                    path: "a.rs".into(),
+                    status: "M".into(),
+                    added: 1,
+                    removed: 1,
+                    binary: false,
+                    patch: "@@ -1 +1 @@\n-a\n+b\n".into(),
+                }],
+            })),
             Err("no such pane".into()),
         ];
         for (id, result) in replies.into_iter().enumerate() {

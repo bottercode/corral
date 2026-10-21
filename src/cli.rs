@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crate::client::conn::Conn;
 use crate::config::Config;
 use crate::protocol::{
-    AgentState, Command, NewPane, PaneInfo, Reply, WorktreeAction, WorktreeInfo,
+    AgentState, Command, DiffReport, NewPane, PaneInfo, Reply, WorktreeAction, WorktreeInfo,
 };
 use crate::{integrate, paths, server};
 
@@ -103,6 +103,30 @@ pub enum Cmd {
         /// Extra arguments some agents append (e.g. Codex's notify JSON)
         #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
         extra: Vec<String>,
+    },
+    /// Show what an agent changed in its worktree
+    Diff {
+        pane: String,
+        /// Only list files and line counts
+        #[arg(long)]
+        stat: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Commit everything in an agent's worktree
+    Commit {
+        pane: String,
+        #[arg(long, short)]
+        message: String,
+    },
+    /// Merge an agent's branch into the branch its worktree came from
+    Merge { pane: String },
+    /// Throw away uncommitted changes in an agent's worktree
+    Discard {
+        pane: String,
+        /// Required: this can't be undone
+        #[arg(long)]
+        yes: bool,
     },
     /// Install hooks so an agent reports its own state
     Integrate {
@@ -553,6 +577,45 @@ async fn run_client(cmd: Cmd) -> Result<ExitCode> {
                 }
             }
         }
+        Cmd::Diff { pane, stat, json } => {
+            let mut c = connect(false).await?;
+            let pane = resolve_pane(&mut c, &pane).await?;
+            let Reply::Diff(report) = c.request(Command::Diff { pane }).await? else {
+                bail!("unexpected reply");
+            };
+            if json {
+                print_json(&report)?;
+            } else {
+                print!(
+                    "{}",
+                    format_diff(&report, stat, std::io::stdout().is_terminal())
+                );
+            }
+        }
+        Cmd::Commit { pane, message } => {
+            let mut c = connect(false).await?;
+            let pane = resolve_pane(&mut c, &pane).await?;
+            if let Reply::Text(t) = c.request(Command::Commit { pane, message }).await? {
+                println!("{t}");
+            }
+        }
+        Cmd::Merge { pane } => {
+            let mut c = connect(false).await?;
+            let pane = resolve_pane(&mut c, &pane).await?;
+            if let Reply::Text(t) = c.request(Command::Merge { pane }).await? {
+                println!("{t}");
+            }
+        }
+        Cmd::Discard { pane, yes } => {
+            if !yes {
+                bail!("this throws away the agent's uncommitted work; pass --yes to confirm");
+            }
+            let mut c = connect(false).await?;
+            let pane = resolve_pane(&mut c, &pane).await?;
+            if let Reply::Text(t) = c.request(Command::Discard { pane }).await? {
+                println!("{t}");
+            }
+        }
         Cmd::Server { .. } | Cmd::Integrate { .. } => unreachable!(),
     }
     Ok(ExitCode::SUCCESS)
@@ -667,6 +730,60 @@ pub fn format_table(panes: &[PaneInfo]) -> String {
     table(rows)
 }
 
+/// Human-readable diff report, coloured for terminals.
+pub fn format_diff(r: &DiffReport, stat: bool, color: bool) -> String {
+    let paint = |code: &str, s: &str| {
+        if color {
+            format!("\x1b[{code}m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    };
+    let added: u32 = r.files.iter().map(|f| f.added).sum();
+    let removed: u32 = r.files.iter().map(|f| f.removed).sum();
+    let mut out = format!(
+        "{} → {} · {} files +{added} −{removed} · {} commits · {} uncommitted\n",
+        paint("35", &r.branch),
+        r.base,
+        r.files.len(),
+        r.commits,
+        r.uncommitted
+    );
+    for f in &r.files {
+        let counts = if f.binary {
+            "binary".to_string()
+        } else {
+            format!("+{} −{}", f.added, f.removed)
+        };
+        out.push_str(&format!(
+            "{} {}  {counts}\n",
+            paint("33", &f.status),
+            paint("1", &f.path)
+        ));
+        if stat || f.binary {
+            continue;
+        }
+        for line in f.patch.lines() {
+            let code = if line.starts_with("@@") {
+                "36"
+            } else if line.starts_with('+') {
+                "32"
+            } else if line.starts_with('-') {
+                "31"
+            } else {
+                ""
+            };
+            if code.is_empty() {
+                out.push_str(line);
+            } else {
+                out.push_str(&paint(code, line));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
 pub fn format_worktrees(list: &[WorktreeInfo]) -> String {
     if list.is_empty() {
         return "no worktrees\n".into();
@@ -765,6 +882,7 @@ mod tests {
             worktree: None,
             cols: 80,
             rows: 24,
+            state_secs: 0,
         };
         let t = format_table(&[p]);
         assert!(t.starts_with("ID  NAME"), "{t}");

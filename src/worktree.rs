@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::protocol::WorktreeInfo;
+use crate::protocol::{DiffReport, FileDiff, WorktreeInfo};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorktreeError {
@@ -185,6 +185,7 @@ pub fn create(dir: &Path, root: &Path, branch: Option<&str>, hint: &str) -> Resu
         n += 1;
     }
     let path_s = path.to_string_lossy().into_owned();
+    let base = current_ref(dir)?;
 
     if branch_exists(&repo, &branch) {
         git(dir, &["worktree", "add", &path_s, &branch])?;
@@ -200,13 +201,288 @@ pub fn create(dir: &Path, root: &Path, branch: Option<&str>, hint: &str) -> Resu
         })?;
     }
     let path = path.canonicalize().unwrap_or(path);
+    // Remember where the branch started, for diffs and merges later.
+    let key = format!("branch.{branch}.corralBase");
+    if git(&repo, &["config", "--get", &key]).is_err() {
+        let _ = git(&repo, &["config", &key, &base]);
+    }
+    let base = base_of(&repo, &branch);
     Ok(WorktreeInfo {
         path,
         branch,
         repo,
-        changed_files: 0,
-        pane: None,
+        base: Some(base),
+        ..Default::default()
     })
+}
+
+/// The branch checked out in `dir`, or the commit if HEAD is detached.
+fn current_ref(dir: &Path) -> Result<String> {
+    // symbolic-ref also works on a branch with no commits yet.
+    git(dir, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .or_else(|_| git(dir, &["rev-parse", "HEAD"]))
+}
+
+/// Where `branch` started: recorded at creation, else the main checkout's
+/// current branch.
+pub fn base_of(repo: &Path, branch: &str) -> String {
+    git(
+        repo,
+        &["config", "--get", &format!("branch.{branch}.corralBase")],
+    )
+    .or_else(|_| current_ref(repo))
+    .unwrap_or_else(|_| "HEAD".into())
+}
+
+/// The commit the worktree's branch forked from its base.
+fn fork_point(wt: &Path, base: &str) -> String {
+    git(wt, &["merge-base", base, "HEAD"]).unwrap_or_else(|_| "HEAD".into())
+}
+
+const MAX_UNTRACKED_BYTES: u64 = 512 * 1024;
+const MAX_PATCH_BYTES: usize = 1024 * 1024;
+
+fn untracked(wt: &Path) -> Result<Vec<String>> {
+    let out = git(wt, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    Ok(out
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+/// Read an untracked file for display: `(text, binary)`; large files are
+/// treated as binary.
+fn read_untracked(wt: &Path, rel: &str) -> (Option<String>, bool) {
+    let p = wt.join(rel);
+    match std::fs::metadata(&p) {
+        Ok(m) if m.is_file() && m.len() <= MAX_UNTRACKED_BYTES => {}
+        _ => return (None, true),
+    }
+    match std::fs::read(&p) {
+        Ok(b) if !b.contains(&0) => (Some(String::from_utf8_lossy(&b).into_owned()), false),
+        _ => (None, true),
+    }
+}
+
+/// `+files`, `+lines`, `-lines` against the fork point, untracked files
+/// included.
+pub fn diff_stats(wt: &Path, base: &str) -> Result<(u32, u32, u32)> {
+    let fork = fork_point(wt, base);
+    let numstat = git(wt, &["diff", "--numstat", "--no-renames", &fork])?;
+    let (mut files, mut added, mut removed) = (0u32, 0u32, 0u32);
+    for line in numstat.lines() {
+        let mut parts = line.split('\t');
+        let a = parts
+            .next()
+            .and_then(|x| x.parse::<u32>().ok())
+            .unwrap_or(0);
+        let r = parts
+            .next()
+            .and_then(|x| x.parse::<u32>().ok())
+            .unwrap_or(0);
+        files += 1;
+        added += a;
+        removed += r;
+    }
+    for rel in untracked(wt)? {
+        files += 1;
+        if let (Some(text), false) = read_untracked(wt, &rel) {
+            added += text.lines().count() as u32;
+        }
+    }
+    Ok((files, added, removed))
+}
+
+/// Full diff of a worktree against where its branch started: committed and
+/// uncommitted changes plus untracked files.
+pub fn diff(wt: &Path) -> Result<DiffReport> {
+    let info = info(wt)?;
+    let base = info.base.clone().unwrap_or_else(|| "HEAD".into());
+    let fork = fork_point(wt, &base);
+
+    let mut files: Vec<FileDiff> = Vec::new();
+    let status = git(wt, &["diff", "--name-status", "--no-renames", &fork])?;
+    for line in status.lines() {
+        if let Some((st, path)) = line.split_once('\t') {
+            files.push(FileDiff {
+                path: path.to_string(),
+                status: st.chars().next().unwrap_or('M').to_string(),
+                ..Default::default()
+            });
+        }
+    }
+    let numstat = git(wt, &["diff", "--numstat", "--no-renames", &fork])?;
+    for line in numstat.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if let [a, r, path] = parts.as_slice()
+            && let Some(f) = files.iter_mut().find(|f| f.path == *path)
+        {
+            f.binary = *a == "-";
+            f.added = a.parse().unwrap_or(0);
+            f.removed = r.parse().unwrap_or(0);
+        }
+    }
+    let patch = git(
+        wt,
+        &["diff", "--no-color", "--no-renames", "--no-ext-diff", &fork],
+    )?;
+    for chunk in split_patch(&patch) {
+        if let Some(f) = files.iter_mut().find(|f| f.path == chunk.0) {
+            f.patch = truncate_patch(chunk.1);
+        }
+    }
+    for rel in untracked(wt)? {
+        let (text, binary) = read_untracked(wt, &rel);
+        let mut f = FileDiff {
+            path: rel,
+            status: "?".into(),
+            binary,
+            ..Default::default()
+        };
+        if let Some(text) = text {
+            let n = text.lines().count();
+            f.added = n as u32;
+            let mut p = format!("@@ -0,0 +1,{n} @@\n");
+            for l in text.lines() {
+                p.push('+');
+                p.push_str(l);
+                p.push('\n');
+            }
+            f.patch = truncate_patch(&p);
+        }
+        files.push(f);
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let commits = git(wt, &["rev-list", "--count", &format!("{fork}..HEAD")])
+        .ok()
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0);
+    Ok(DiffReport {
+        pane: None,
+        branch: info.branch,
+        base,
+        commits,
+        uncommitted: info.changed_files,
+        files,
+    })
+}
+
+/// Split `git diff` output into `(path, hunks)` per file.
+fn split_patch(patch: &str) -> Vec<(String, &str)> {
+    let mut out = Vec::new();
+    let mut starts: Vec<usize> = patch
+        .match_indices("diff --git ")
+        .filter(|(i, _)| *i == 0 || patch.as_bytes()[i - 1] == b'\n')
+        .map(|(i, _)| i)
+        .collect();
+    starts.push(patch.len());
+    for w in starts.windows(2) {
+        let section = &patch[w[0]..w[1]];
+        let header = section.lines().next().unwrap_or("");
+        // "diff --git a/<path> b/<path>"
+        let path = header
+            .rsplit_once(" b/")
+            .map(|(_, p)| p.to_string())
+            .unwrap_or_default();
+        let hunks = section.find("\n@@").map_or("", |i| &section[i + 1..]);
+        out.push((path, hunks));
+    }
+    out
+}
+
+fn truncate_patch(p: &str) -> String {
+    if p.len() <= MAX_PATCH_BYTES {
+        return p.to_string();
+    }
+    let mut cut = MAX_PATCH_BYTES;
+    while !p.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n… diff truncated ({} bytes) …\n", &p[..cut], p.len())
+}
+
+/// Commit everything in the worktree.
+pub fn commit(wt: &Path, message: &str) -> Result<String> {
+    if changed_files(wt)? == 0 {
+        return Err(WorktreeError::Invalid("nothing to commit".into()));
+    }
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(WorktreeError::Invalid("commit message is empty".into()));
+    }
+    git(wt, &["add", "-A"])?;
+    git(wt, &["commit", "-q", "-m", message])?;
+    let sha = git(wt, &["rev-parse", "--short", "HEAD"])?;
+    Ok(format!("committed {sha}"))
+}
+
+/// Merge the worktree's branch into its base branch in the main checkout.
+pub fn merge(wt: &Path) -> Result<String> {
+    let info = info(wt)?;
+    if info.changed_files > 0 {
+        return Err(WorktreeError::Invalid(format!(
+            "the worktree has uncommitted changes ({} {}); commit them first",
+            info.changed_files,
+            plural(info.changed_files, "file")
+        )));
+    }
+    let base = info.base.clone().unwrap_or_default();
+    let checked_out = current_ref(&info.repo)?;
+    if checked_out != base {
+        return Err(WorktreeError::Invalid(format!(
+            "{} has {checked_out} checked out, not {base}; switch to {base} to merge",
+            info.repo.display()
+        )));
+    }
+    let dirty = git(
+        &info.repo,
+        &["status", "--porcelain", "--untracked-files=no"],
+    )?;
+    if !dirty.trim().is_empty() {
+        return Err(WorktreeError::Invalid(format!(
+            "{} has uncommitted changes; commit or stash them before merging",
+            info.repo.display()
+        )));
+    }
+    let ahead: u32 = git(
+        &info.repo,
+        &["rev-list", "--count", &format!("{base}..{}", info.branch)],
+    )?
+    .trim()
+    .parse()
+    .unwrap_or(0);
+    if ahead == 0 {
+        return Err(WorktreeError::Invalid(format!(
+            "nothing to merge: {} has no commits that {base} doesn't have",
+            info.branch
+        )));
+    }
+    let msg = format!("Merge {} (corral)", info.branch);
+    if let Err(e) = git(&info.repo, &["merge", "--no-ff", "-m", &msg, &info.branch]) {
+        let _ = git(&info.repo, &["merge", "--abort"]);
+        return Err(WorktreeError::Invalid(format!(
+            "merging {} into {base} conflicts; nothing was changed. Resolve it in the worktree (e.g. rebase onto {base}) and try again. ({e})",
+            info.branch
+        )));
+    }
+    Ok(format!(
+        "merged {} into {base} ({ahead} {})",
+        info.branch,
+        plural(ahead, "commit")
+    ))
+}
+
+/// Throw away uncommitted changes and untracked files in the worktree.
+pub fn discard(wt: &Path) -> Result<String> {
+    let n = changed_files(wt)?;
+    if n == 0 {
+        return Err(WorktreeError::Invalid("nothing to discard".into()));
+    }
+    git(wt, &["reset", "-q", "--hard", "HEAD"])?;
+    git(wt, &["clean", "-fdq"])?;
+    Ok(format!("discarded changes to {n} {}", plural(n, "file")))
 }
 
 /// Number of changed or untracked files (`git status --porcelain`).
@@ -236,11 +512,17 @@ pub fn unmerged_commits(repo: &Path, branch: &str) -> Result<u32> {
 pub fn info(path: &Path) -> Result<WorktreeInfo> {
     let repo = repo_root(path)?;
     let branch = git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let base = base_of(&repo, &branch);
+    let (diff_files, added, removed) = diff_stats(path, &base).unwrap_or_default();
     Ok(WorktreeInfo {
         path: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
         branch,
         repo,
+        base: Some(base),
         changed_files: changed_files(path)?,
+        diff_files,
+        added,
+        removed,
         pane: None,
     })
 }
@@ -350,6 +632,10 @@ mod tests {
         let repo = tmp.path().join("My Repo");
         std::fs::create_dir(&repo).unwrap();
         run(&repo, &["init", "-q"]);
+        // Local identity so commit()/merge() work anywhere (CI included).
+        run(&repo, &["config", "user.name", "corral-test"]);
+        run(&repo, &["config", "user.email", "test@corral.invalid"]);
+        run(&repo, &["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.join("a.txt"), "a\n").unwrap();
         run(&repo, &["add", "."]);
         run(&repo, &["commit", "-qm", "init"]);
@@ -465,6 +751,107 @@ mod tests {
         assert!(!branch_exists(&repo, &wt.branch));
         // Empty repo dir is cleaned up.
         assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn diff_commit_merge_discard() {
+        let (_tmp, repo, root) = repo();
+        let wt = create(&repo, &root, None, "claude").unwrap();
+        assert_eq!(wt.base.as_deref(), Some("main"));
+
+        // An edit, a new file and a binary file.
+        std::fs::write(wt.path.join("a.txt"), "a\nchanged\n").unwrap();
+        std::fs::write(wt.path.join("new.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(wt.path.join("blob.bin"), [0u8, 1, 2]).unwrap();
+        let d = diff(&wt.path).unwrap();
+        assert_eq!(d.base, "main");
+        assert_eq!(d.uncommitted, 3);
+        let names: Vec<(&str, &str)> = d
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.status.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("a.txt", "M"), ("blob.bin", "?"), ("new.txt", "?")]
+        );
+        let a = &d.files[0];
+        assert_eq!((a.added, a.removed), (1, 0));
+        assert!(a.patch.starts_with("@@"), "{}", a.patch);
+        assert!(a.patch.contains("+changed"));
+        assert!(d.files[1].binary);
+        assert!(d.files[2].patch.contains("+two"));
+        assert_eq!(diff_stats(&wt.path, "main").unwrap(), (3, 3, 0));
+
+        // Merging refuses uncommitted work; commit, then merge into main.
+        assert!(
+            merge(&wt.path)
+                .unwrap_err()
+                .to_string()
+                .contains("commit them first")
+        );
+        assert!(
+            commit(&wt.path, "agent work")
+                .unwrap()
+                .starts_with("committed")
+        );
+        assert_eq!(changed_files(&wt.path).unwrap(), 0);
+        // Committed work still shows in the diff against the base.
+        let d = diff(&wt.path).unwrap();
+        assert_eq!((d.commits, d.uncommitted, d.files.len()), (1, 0, 3));
+        let msg = merge(&wt.path).unwrap();
+        assert!(msg.contains("into main (1 commit)"), "{msg}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("new.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+        assert!(
+            merge(&wt.path)
+                .unwrap_err()
+                .to_string()
+                .contains("nothing to merge")
+        );
+
+        // Discard drops uncommitted edits and untracked files.
+        std::fs::write(wt.path.join("a.txt"), "oops").unwrap();
+        std::fs::write(wt.path.join("junk.txt"), "x").unwrap();
+        assert!(discard(&wt.path).unwrap().contains("2 files"));
+        assert!(!wt.path.join("junk.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(wt.path.join("a.txt")).unwrap(),
+            "a\nchanged\n"
+        );
+        assert!(discard(&wt.path).is_err());
+    }
+
+    #[test]
+    fn merge_refuses_when_checkout_is_elsewhere_or_conflicting() {
+        let (_tmp, repo, root) = repo();
+        let wt = create(&repo, &root, None, "x").unwrap();
+        std::fs::write(wt.path.join("a.txt"), "from agent\n").unwrap();
+        commit(&wt.path, "agent").unwrap();
+        // Conflicting change on main.
+        std::fs::write(repo.join("a.txt"), "from user\n").unwrap();
+        run(&repo, &["commit", "-qam", "user"]);
+        let err = merge(&wt.path).unwrap_err().to_string();
+        assert!(err.contains("conflicts"), "{err}");
+        // The user's checkout is left clean, not mid-merge.
+        assert_eq!(changed_files(&repo).unwrap(), 0);
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
+
+        run(&repo, &["checkout", "-qb", "other"]);
+        let err = merge(&wt.path).unwrap_err().to_string();
+        assert!(err.contains("has other checked out"), "{err}");
+    }
+
+    #[test]
+    fn split_patch_by_file() {
+        let p = "diff --git a/x y.txt b/x y.txt\nindex 1..2 100644\n--- a/x y.txt\n+++ b/x y.txt\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/z b/z\nnew file mode 100644\n--- /dev/null\n+++ b/z\n@@ -0,0 +1 @@\n+z\n";
+        let parts = split_patch(p);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].0, "x y.txt");
+        assert_eq!(parts[0].1, "@@ -1 +1 @@\n-a\n+b\n");
+        assert_eq!(parts[1].0, "z");
     }
 
     #[test]

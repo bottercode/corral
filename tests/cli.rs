@@ -293,3 +293,58 @@ fn worktree_outside_a_repo_warns_and_starts_anyway() {
     assert!(err.contains("not inside a git repository"), "{err}");
     assert!(s.panes()[0].worktree.is_none());
 }
+
+#[test]
+fn diff_commit_merge_via_cli() {
+    let s = TestServer::start();
+    let repo = s.dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t.invalid"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "init"]);
+    let repo_s = repo.to_str().unwrap().to_string();
+    s.ok(&[
+        "new",
+        "--worktree",
+        "--cwd",
+        &repo_s,
+        "--",
+        "sh",
+        "-c",
+        "echo b > b.txt; cat",
+    ]);
+    eventually("file written", || {
+        s.ok(&["diff", "p1", "--stat"]).contains("b.txt")
+    });
+
+    let out = s.ok(&["diff", "p1"]);
+    assert!(out.contains("? b.txt  +1 −0"), "{out}");
+    assert!(out.contains("+b"), "{out}");
+    let json: corral::protocol::DiffReport =
+        serde_json::from_str(&s.ok(&["diff", "p1", "--json"])).unwrap();
+    assert_eq!((json.base.as_str(), json.uncommitted), ("main", 1));
+
+    assert!(
+        !s.cli(&["merge", "p1"]).status.success(),
+        "merge refuses uncommitted work"
+    );
+    assert!(
+        !s.cli(&["discard", "p1"]).status.success(),
+        "discard needs --yes"
+    );
+    assert!(
+        s.ok(&["commit", "p1", "-m", "add b"])
+            .starts_with("committed")
+    );
+    assert!(s.ok(&["merge", "p1"]).contains("into main (1 commit)"));
+    assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "b\n");
+
+    // A pane without a worktree has no diff.
+    s.ok(&["new", "--cwd", &repo_s, "--", "sh", "-c", "read x"]);
+    let out = s.cli(&["diff", "p2"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("doesn't have a worktree"));
+}

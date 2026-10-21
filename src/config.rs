@@ -5,7 +5,6 @@
 //! default_command = "claude"        # prefilled in the new-agent dialog
 //! notifications = true              # bell + OSC 9 when an unfocused agent is blocked/done
 //! worktree_root = "~/.corral/worktrees"
-//! sidebar_width = 30
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -22,7 +21,6 @@ pub struct Config {
     pub default_command: String,
     pub notifications: bool,
     pub worktree_root: Option<String>,
-    pub sidebar_width: u16,
 }
 
 impl Default for Config {
@@ -32,7 +30,6 @@ impl Default for Config {
             default_command: "claude".into(),
             notifications: true,
             worktree_root: None,
-            sidebar_width: 30,
         }
     }
 }
@@ -123,12 +120,11 @@ mod tests {
     #[test]
     fn full_file() {
         let c = Config::parse(
-            "prefix = 'C-a'\ndefault_command = 'codex'\nnotifications = false\nworktree_root = '/w'\nsidebar_width = 24\n",
+            "prefix = 'C-a'\ndefault_command = 'codex'\nnotifications = false\nworktree_root = '/w'\n",
         )
         .unwrap();
         assert_eq!(c.prefix_byte().unwrap(), 1);
         assert_eq!(c.worktree_root(), PathBuf::from("/w"));
-        assert_eq!(c.sidebar_width, 24);
         assert!(!c.notifications);
     }
 

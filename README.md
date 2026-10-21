@@ -6,18 +6,17 @@ them running when you close the laptop or lose SSH. Optionally, give each
 agent its own git worktree so parallel agents never edit the same checkout.
 
 ```
- corral  ●1  ✓1                │> fix the failing test in parser.rs
-                               │
- api                           │⏺ I'll run the tests first.
-▌1 claude            ● blocked │
-   ⎇ corral/claude-3f9a +3     │ Bash(cargo test)
- 2 codex             ⠋ working │
-   ⎇ corral/codex-81c2         │ Do you want to proceed?
-                               │ ❯ 1. Yes
- website                       │   2. Yes, and don't ask again for cargo test
- 3 opencode            ✓ done  │   3. No, and tell Claude what to do differently
-                               │
- ^b n new · w worktree · j/k switch · b next blocked · x close · d detach · ? help
+ corral                                          ● 1 need you  ✓ 1 done  ⠋ 1 working
+┏ 1 ● claude · api ━━━━━━━━━━━━ blocked 4m ┓╭ 2 ⠋ codex · web ──────── working 30s ╮
+┃ Bash(cargo test)                         ┃│ test parser::ok ... ok               │
+┃ Do you want to proceed?                  ┃│ test lexer::ws ... ok                │
+┃ ❯ 1. Yes                                 ┃│ test lexer::strings ...              │
+┃   2. No                                  ┃│                                      │
+┗ ⎇ corral/fix-auth · 3 files +42 −7 ━━━━━━┛╰ ⎇ corral/codex-81c2 · 1 file +3 −0 ──╯
+╭ 3 ✓ opencode · api ──────────── done 2m ╮╭ 4 ○ claude · docs ─────────────── idle ╮
+│ All 214 tests pass. Updated README.     ││ ❯                                    │
+╰ ⎇ corral/opencode-77a0 · 2 files +18 −3 ╯╰──────────────────────────────────────╯
+ ←↓↑→ select · enter open · n new · w worktree · d diff · b next blocked · q detach · ? help
 ```
 
 ## Why
@@ -32,10 +31,15 @@ Running several agents in separate terminal tabs breaks down quickly:
   checkout overwrite each other's changes and confuse each other's builds.
 
 corral runs a small background server that owns every agent's terminal. The
-UI is a client that attaches and detaches; the agents don't notice. Each pane
-is watched for its state (working, blocked, done), and you get a bell and a
-desktop notification when an agent you aren't looking at needs you. With
-`--worktree`, an agent starts in a fresh git worktree on its own branch.
+UI is a client that attaches and detaches; the agents don't notice.
+
+- **An overview of every agent at once.** Each agent is a live card showing
+  its terminal, its state, and how long it has been waiting. Blocked agents
+  turn red, and you get a bell and a desktop notification.
+- **A worktree per agent, if you want one.** `--worktree` starts an agent in a
+  fresh git worktree on its own branch.
+- **Review and land agents' work without leaving corral.** Press `d` to see
+  the diff, then commit and merge it into your branch.
 
 ## Install
 
@@ -57,29 +61,43 @@ corral                      # open the UI (starts the server if needed)
 
 With no agents running, the new-agent dialog opens. Type a command
 (`claude` by default), pick a directory, tick **Worktree** if you want one, and
-press Enter. Everything you type goes to the focused agent. corral's own commands are
-**Ctrl-b, then a key** (the bottom line reminds you):
+press Enter. The new agent opens full screen.
+
+corral has two views.
+
+**The overview** is a grid of live cards, one per agent. Here keys drive
+corral, and nothing is typed into agents:
 
 | Keys | Action |
 |---|---|
-| `^b n` | new agent |
-| `^b w` | new agent in its own git worktree |
-| `^b j` / `^b k`, `^b ↑` / `^b ↓` | next / previous pane |
-| `^b 1` … `^b 9` | jump to a pane |
-| `^b b` | jump to the next blocked agent |
-| `^b x` | close the pane |
-| `^b r` | rename the pane |
-| `^b d` | detach (agents keep running) |
-| `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`) |
-| `^b ?` | help |
-| `^b ^b` | send a literal `Ctrl-b` to the pane |
+| `←↓↑→` / `hjkl`, `Tab` | select an agent (or click its card) |
+| `Enter`, `1` … `9` | open it full screen (or click the selected card) |
+| `n` / `w` | new agent / new agent in its own git worktree |
+| `d` | review the agent's diff ([below](#diff-review)) |
+| `b` | select the next agent that needs you |
+| `x` / `r` | close / rename |
+| `q` | detach (agents keep running) |
+| `?` | help |
 
-Click a sidebar row to focus that pane, and scroll the wheel for scrollback.
-corral captures the mouse, so hold Shift (Option in some terminals) to select
-text.
+**A zoomed agent** fills the screen, and everything you type goes to it.
+corral's commands are **Ctrl-b, then a key**:
 
-Detach with `^b d`, close the terminal, come back later (or from another
-machine over SSH) and run `corral` again: everything is where you left it.
+| Keys | Action |
+|---|---|
+| `^b g` | back to the overview (or click `‹` in the top bar) |
+| `^b j` / `^b k`, `^b 1` … `^b 9` | next / previous / numbered agent |
+| `^b b` | jump to the next agent that needs you |
+| `^b D` | diff · `^b n` new · `^b x` close · `^b r` rename |
+| `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`); the mouse wheel works too |
+| `^b d` | detach |
+| `^b ^b` | send a literal `Ctrl-b` to the agent |
+
+The top bar always shows how many other agents need you, so you don't have
+to go looking. corral captures the mouse, so hold Shift (Option in some
+terminals) to select text.
+
+Detach, close the terminal, and come back later (or from another machine over
+SSH): run `corral` again and everything is where you left it.
 
 ## Worktrees
 
@@ -95,8 +113,11 @@ Each worktree is created next to, not inside, your repository:
 ```
 
 - Your own checkout stays untouched, and each agent works on its own branch.
-- The sidebar shows the branch and how many files the agent has changed
-  (`⎇ corral/claude-3f9a +3`). This updates every few seconds.
+- Each card shows the branch and what the agent has changed so far,
+  committed and uncommitted (`⎇ corral/claude-3f9a · 3 files +42 −7`). This
+  updates every few seconds.
+- The branch's starting point is recorded (in `branch.<name>.corralBase`), so
+  diffs and merges know where to compare against.
 - `--branch` uses that branch, creating it from `HEAD` if it doesn't exist
   yet or checking it out if it does.
 - Closing a worktree pane asks whether to **keep** the worktree, **remove**
@@ -116,7 +137,42 @@ corral kill p3 --rm-worktree              # close a pane and remove its worktree
 corral kill p3 --delete-branch            # … and delete its branch
 ```
 
-Merging an agent's branch is up to you, with your usual git tools.
+## Diff review
+
+Select a worktree agent and press `d` (or `^b D` while zoomed) to see
+everything it changed since its branch started:
+- committed work
+- uncommitted edits
+- new untracked files
+
+On the left is the list of files; on the right, the selected file's coloured
+diff. From there:
+
+| Key | Action |
+|---|---|
+| `j` / `k` | previous / next file |
+| `space` / `K` | scroll the diff |
+| `c` | commit everything in the worktree (with an editable message) |
+| `m` | merge the branch into the branch it came from, in your checkout |
+| `x` | discard uncommitted changes, after confirming (committed work is kept) |
+| `r` | refresh |
+| `q` | back |
+
+Merging is careful. It refuses, and changes nothing, if any of these apply:
+- the worktree has uncommitted work (commit it first)
+- your checkout is on a different branch, or has uncommitted changes
+- the merge would conflict (it is aborted)
+
+It uses a merge commit (`Merge corral/<slug> (corral)`).
+
+The same is available from scripts:
+
+```sh
+corral diff p2 [--stat] [--json]
+corral commit p2 -m "Fix login redirect"
+corral merge p2
+corral discard p2 --yes
+```
 
 ## Agent state
 
@@ -190,6 +246,8 @@ name.
 | `corral report --state S [--pane P]` | report state (hooks use this) |
 | `corral integrate claude\|codex [--uninstall] [--yes]` | install agent hooks |
 | `corral worktree ls [--json]` / `corral worktree rm <pane\|path> [--force] [--delete-branch]` | worktrees |
+| `corral diff <pane> [--stat] [--json]` | what an agent changed in its worktree |
+| `corral commit <pane> -m MSG` / `corral merge <pane>` / `corral discard <pane> --yes` | land or drop an agent's work |
 | `corral server [--daemon]`, `corral kill-server` | run / stop the server (stopping ends every agent) |
 | `corral debug dump <pane> [-o FILE]` | save a pane's screen as replayable bytes (for rule fixtures) |
 
@@ -215,7 +273,6 @@ prefix = "C-b"                         # C-a … C-z or C-space
 default_command = "claude"             # prefilled in the new-agent dialog
 notifications = true
 worktree_root = "~/.corral/worktrees"
-sidebar_width = 30
 ```
 
 Environment variables:
@@ -241,8 +298,10 @@ agent hooks (report) ┘          │
 ```
 
 - The server owns every PTY, so agents survive clients coming and going.
-- Each pane's output feeds a terminal emulator (vt100) on the server. A
-  client attaching gets a snapshot (scrollback included) and then the live
+- Each pane's output feeds a terminal emulator (vt100) on the server.
+- On the overview, clients get a few times a second the bottom of each
+  agent's screen (formatting included, blank gaps collapsed) for the cards.
+- Opening an agent gets a snapshot (scrollback included) and then its live
   byte stream, rendered with Ratatui and tui-term.
 - The PTY size follows whichever client was used most recently, like tmux's
   `latest` policy.
@@ -260,21 +319,27 @@ about agents. You have to check each window for blocked prompts yourself, and
 setting up worktrees is up to you.
 
 **[Herdr](https://herdr.dev)** is the established tool in this space and the
-inspiration for corral's design: a server that owns the terminals, attachable
-clients, agent state detection and a CLI API. It is more mature and does more
-than corral, including features corral doesn't have, such as access from
-other devices. corral's main difference is built-in per-agent git worktrees:
-creating them, showing each one's changes, and cleaning them up safely.
-Herdr leaves worktrees to external tools.
+inspiration for corral's server design: a server that owns the terminals,
+attachable clients, agent state detection and a CLI API. It is more mature
+and has features corral doesn't, such as split panes, plugins, themes and
+access from other machines. The two differ in their focus:
+
+| | Herdr | corral |
+|---|---|---|
+| Layout | sidebar of agents + split panes | overview grid of live agent cards, one agent zoomed at a time |
+| "Who needs me?" | status dots in the sidebar | red cards with waiting timers, a count in the top bar while zoomed |
+| Worktrees | left to external tools | built in: one per agent, created, tracked and cleaned up safely |
+| Agent's changes | left to external tools | diff review in the UI, with commit, merge and discard |
 
 ## Limitations (v0.1)
 
 - macOS and Linux only.
-- One pane visible at a time (no splits).
+- One agent zoomed at a time (no split panes); the overview shows all of them.
 - Agents don't survive a reboot or `corral kill-server`.
 - Programs inside panes don't receive mouse events; the wheel scrolls
   corral's scrollback instead.
-- No diff review or merging of worktree branches inside corral.
+- Diff review merges with a merge commit only (no squash or rebase yet), and
+  conflicts must be resolved outside corral.
 
 ## Development
 

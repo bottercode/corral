@@ -44,6 +44,8 @@ struct Hook {
 #[derive(Debug, Clone)]
 pub struct Detector {
     state: AgentState,
+    /// When the current state began.
+    since: Instant,
     last_output: Option<Instant>,
     quiet_until: Option<Instant>,
     hook: Option<Hook>,
@@ -73,6 +75,7 @@ impl Detector {
     pub fn new() -> Self {
         Detector {
             state: AgentState::Idle,
+            since: Instant::now(),
             last_output: None,
             quiet_until: None,
             hook: None,
@@ -88,6 +91,11 @@ impl Detector {
 
     pub fn state(&self) -> AgentState {
         self.state
+    }
+
+    /// How long the pane has been in its current state.
+    pub fn state_age(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.since)
     }
 
     pub fn on_output(&mut self, now: Instant) {
@@ -170,6 +178,9 @@ impl Detector {
         let next = self.compute(now);
         let old = self.state;
         self.state = next;
+        if old != next {
+            self.since = now;
+        }
         (old != next).then_some((old, next))
     }
 
@@ -385,6 +396,17 @@ mod tests {
         d.evaluate(c.at(1));
         d.report(Done, c.at(100));
         assert_eq!(d.evaluate(c.at(101)), Some((Working, Idle)));
+    }
+
+    #[test]
+    fn tracks_time_in_state() {
+        let c = Clock::new();
+        let mut d = Detector::new();
+        d.report(Blocked, c.at(0));
+        d.evaluate(c.at(10));
+        assert_eq!(d.state_age(c.at(4010)), Duration::from_secs(4));
+        d.evaluate(c.at(5000));
+        assert_eq!(d.state_age(c.at(5010)), Duration::from_millis(5000));
     }
 
     #[test]

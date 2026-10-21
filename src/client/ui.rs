@@ -1,4 +1,8 @@
 //! Layout, dialogs and drawing for the TUI.
+//!
+//! The screen is a one-line top bar (corral's status at a glance), then
+//! either the overview grid of agent cards, one agent zoomed to full size,
+//! or a worktree diff.
 
 use std::path::Path;
 
@@ -10,32 +14,26 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use tui_term::widget::{Cursor, PseudoTerminal};
 use unicode_width::UnicodeWidthStr;
 
+use super::grid::{self, Grid, truncate};
 use super::input::Key;
-use super::sidebar::{Sidebar, truncate};
-use super::{App, Mode};
+use super::{App, Mode, diff};
 use crate::protocol::{AgentState, PaneInfo, WorktreeAction};
 
-/// Below this width the sidebar is hidden.
-const MIN_WIDTH_FOR_SIDEBAR: u16 = 60;
-
 pub struct Areas {
-    pub sidebar: Rect,
-    pub pane: Rect,
+    pub top: Rect,
+    pub body: Rect,
     pub hint: Rect,
 }
 
-pub fn layout(area: Rect, sidebar_width: u16) -> Areas {
-    let hint_h = u16::from(area.height > 2);
-    let body_h = area.height - hint_h;
-    let sw = if area.width >= MIN_WIDTH_FOR_SIDEBAR {
-        sidebar_width.min(area.width / 2)
-    } else {
-        0
-    };
+/// Top bar, body, and (on the overview) a key hint line at the bottom.
+pub fn layout(area: Rect, zoomed: bool) -> Areas {
+    let top_h = u16::from(area.height > 1);
+    let hint_h = u16::from(!zoomed && area.height > 3);
+    let body_h = area.height - top_h - hint_h;
     Areas {
-        sidebar: Rect::new(area.x, area.y, sw, body_h),
-        pane: Rect::new(area.x + sw, area.y, area.width - sw, body_h),
-        hint: Rect::new(area.x, area.y + body_h, area.width, hint_h),
+        top: Rect::new(area.x, area.y, area.width, top_h),
+        body: Rect::new(area.x, area.y + top_h, area.width, body_h),
+        hint: Rect::new(area.x, area.y + top_h + body_h, area.width, hint_h),
     }
 }
 
@@ -299,85 +297,169 @@ fn key_hint(keys: &[(&str, &str)]) -> Line<'static> {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let areas = layout(f.area(), app.sidebar_width);
-    app.sidebar_area = areas.sidebar;
-    app.pane_area = areas.pane;
+    let zoomed = app.focus.is_some() && !matches!(app.mode, Mode::Diff(_));
+    let areas = layout(f.area(), zoomed);
+    app.body_area = areas.body;
+    draw_top(f, app, areas.top, zoomed);
 
-    if areas.sidebar.width > 0 {
-        app.hits = Sidebar {
-            panes: &app.panes,
-            focus: app.focus.as_deref(),
-            frame: app.frame,
-        }
-        .render(areas.sidebar, f.buffer_mut());
+    if let Mode::Diff(v) = &mut app.mode {
+        diff::draw(f, v, areas.body);
+        return;
+    }
+    if zoomed {
+        draw_pane(f, app, areas.body);
     } else {
-        app.hits.clear();
+        draw_grid(f, app, areas.body);
+        draw_hint(f, app, areas.hint);
     }
 
-    draw_pane(f, app, areas.pane);
-    draw_hint(f, app, areas.hint);
-
     match &app.mode {
-        Mode::Normal | Mode::Scroll { .. } => {}
-        Mode::Help => draw_help(f, app, areas.pane),
+        Mode::Normal | Mode::Scroll { .. } | Mode::Diff(_) => {}
+        Mode::Help => draw_help(f, app, areas.body),
         Mode::New(d) => {
             let d = d.clone();
-            draw_new(f, &d, areas.pane);
+            draw_new(f, &d, areas.body);
         }
         Mode::Rename { pane, input } => {
             let (pane, input) = (pane.clone(), input.clone());
-            draw_rename(f, &pane, &input, areas.pane);
+            draw_rename(f, &pane, &input, areas.body);
         }
         Mode::Close { pane, step } => {
             let info = app.panes.iter().find(|p| &p.id == pane).cloned();
             if let Some(info) = info {
                 let step = step.clone();
-                draw_close(f, &info, &step, areas.pane);
+                draw_close(f, &info, &step, areas.body);
             }
         }
     }
 }
 
-fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
-    let focused = app
-        .focus
-        .as_ref()
-        .and_then(|id| app.panes.iter().find(|p| &p.id == id))
-        .cloned();
-    let scroll = match app.mode {
-        Mode::Scroll { offset } => offset,
-        _ => 0,
+fn brand() -> Span<'static> {
+    Span::styled(
+        " corral ",
+        Style::new()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn draw_top(f: &mut Frame, app: &App, area: Rect, zoomed: bool) {
+    if area.height == 0 {
+        return;
+    }
+    let mut left = vec![brand()];
+    let others: Vec<&PaneInfo>;
+    if let (true, Some(p)) = (zoomed, app.focused()) {
+        let color = grid::state_color(p.state);
+        left.push(Span::styled(" ‹ ", Style::new().fg(Color::DarkGray)));
+        left.push(Span::styled(
+            format!("{} ", grid::state_icon(p.state, app.frame)),
+            Style::new().fg(color),
+        ));
+        left.push(Span::styled(
+            p.name.clone(),
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+        left.push(Span::styled(
+            format!(" · {} · ", p.workspace),
+            Style::new().fg(Color::DarkGray),
+        ));
+        left.push(Span::styled(
+            grid::state_label(p, app.age(p)),
+            Style::new().fg(color),
+        ));
+        if let Some(w) = grid::worktree_label(p) {
+            left.push(Span::styled(
+                format!("  {w}"),
+                Style::new().fg(Color::Magenta),
+            ));
+        }
+        others = app.panes.iter().filter(|o| o.id != p.id).collect();
+    } else {
+        others = app.panes.iter().collect();
+        if app.panes.is_empty() {
+            left.push(Span::styled(
+                "  no agents yet",
+                Style::new().fg(Color::DarkGray),
+            ));
+        }
+    }
+
+    let right: Line = if let Some((msg, error)) = app.status() {
+        Line::styled(
+            format!("{msg} "),
+            Style::new().fg(if error { Color::Red } else { Color::Yellow }),
+        )
+    } else if app.awaiting_command {
+        let mut l = key_hint(&[
+            ("g", "grid"),
+            ("n", "new"),
+            ("w", "worktree"),
+            ("j/k", "next/prev"),
+            ("b", "blocked"),
+            ("D", "diff"),
+            ("x", "close"),
+            ("d", "detach"),
+            ("?", "help"),
+        ]);
+        l.spans.push(Span::raw(" "));
+        l
+    } else if let Mode::Scroll { offset } = app.mode {
+        Line::from(vec![
+            Span::styled(
+                format!(" scrollback {offset}/{} ", app.scroll_max),
+                Style::new().fg(Color::Black).bg(Color::Yellow),
+            ),
+            Span::styled(
+                " k/j PgUp/PgDn g/G · q exit ",
+                Style::new().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        let mut spans = grid::summary_spans(grid::counts(others), app.frame);
+        if zoomed {
+            if spans.is_empty() {
+                spans.push(Span::raw(""));
+            }
+            spans.push(Span::styled(
+                format!("   {} g grid ", app.prefix_label),
+                Style::new().fg(Color::DarkGray),
+            ));
+        } else {
+            spans.push(Span::raw(" "));
+        }
+        Line::from(spans)
     };
-    let Some(parser) = app.parser.as_mut() else {
+    let right_w = right.width() as u16;
+    f.render_widget(Paragraph::new(Line::from(left)), area);
+    if right_w < area.width {
+        let r = Rect::new(area.x + area.width - right_w, area.y, right_w, 1);
+        f.render_widget(Clear, r);
+        f.render_widget(Paragraph::new(right), r);
+    }
+}
+
+fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.panes.is_empty() {
         if !matches!(app.mode, Mode::Normal) {
             return;
         }
-        let text = if app.panes.is_empty() {
-            vec![
-                Line::styled("No agents yet.", Style::new().add_modifier(Modifier::BOLD)),
-                Line::default(),
-                Line::from(vec![
-                    Span::raw("Press "),
-                    Span::styled(
-                        format!("{} n", app.prefix_label),
-                        Style::new().fg(Color::Cyan),
-                    ),
-                    Span::raw(" to start one, "),
-                    Span::styled(
-                        format!("{} w", app.prefix_label),
-                        Style::new().fg(Color::Cyan),
-                    ),
-                    Span::raw(" for one in its own git worktree,"),
-                ]),
-                Line::from(vec![
-                    Span::raw("or run "),
-                    Span::styled("corral new -- claude", Style::new().fg(Color::Cyan)),
-                    Span::raw(" from any shell."),
-                ]),
-            ]
-        } else {
-            vec![Line::styled("…", Style::new().fg(Color::DarkGray))]
-        };
+        let text = vec![
+            Line::styled("No agents yet.", Style::new().add_modifier(Modifier::BOLD)),
+            Line::default(),
+            Line::from(vec![
+                Span::raw("Press "),
+                Span::styled("n", Style::new().fg(Color::Cyan)),
+                Span::raw(" to start one, or "),
+                Span::styled("w", Style::new().fg(Color::Cyan)),
+                Span::raw(" for one in its own git worktree."),
+            ]),
+            Line::from(vec![
+                Span::raw("From any shell: "),
+                Span::styled("corral new -- claude", Style::new().fg(Color::Cyan)),
+            ]),
+        ];
         let h = text.len() as u16;
         let r = Rect::new(
             area.x,
@@ -386,6 +468,38 @@ fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
             h.min(area.height),
         );
         f.render_widget(Paragraph::new(text).alignment(Alignment::Center), r);
+        app.card_hits.clear();
+        return;
+    }
+    app.keep_selection_visible();
+    let age_offset = app.state_at.elapsed();
+    app.card_hits = Grid {
+        panes: &app.panes,
+        selected: app.selected.as_deref(),
+        age_offset,
+        frame: app.frame,
+        scroll: app.grid_scroll,
+    }
+    .render(area, f.buffer_mut(), &mut app.previews);
+}
+
+fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focused().cloned();
+    let scroll = match app.mode {
+        Mode::Scroll { offset } => offset,
+        _ => 0,
+    };
+    let Some(parser) = app.parser.as_mut() else {
+        f.render_widget(
+            Paragraph::new(Line::styled("…", Style::new().fg(Color::DarkGray)))
+                .alignment(Alignment::Center),
+            Rect::new(
+                area.x,
+                area.y + area.height / 2,
+                area.width,
+                1.min(area.height),
+            ),
+        );
         return;
     };
 
@@ -431,105 +545,77 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
     }
-    let p = &app.prefix_label;
-    let line = if let Some((msg, error)) = app.status() {
-        let style = if error {
-            Style::new().fg(Color::Red)
-        } else {
-            Style::new().fg(Color::Yellow)
-        };
-        Line::styled(format!(" {msg}"), style)
-    } else if app.awaiting_command {
-        key_hint(&[
-            ("n", "new"),
-            ("w", "worktree"),
-            ("j/k", "switch"),
-            ("b", "blocked"),
-            ("x", "close"),
-            ("r", "rename"),
-            ("d", "detach"),
-            ("[", "scroll"),
-            ("?", "help"),
-        ])
-    } else {
-        match &app.mode {
-            Mode::Scroll { offset } => {
-                let mut spans = vec![
-                    Span::styled(
-                        format!(" scrollback {offset}/{} ", app.scroll_max),
-                        Style::new().fg(Color::Black).bg(Color::Yellow),
-                    ),
-                    Span::raw(" "),
-                ];
-                spans.extend(
-                    key_hint(&[
-                        ("k/j", "line"),
-                        ("PgUp/PgDn", "page"),
-                        ("g/G", "top/bottom"),
-                        ("q", "exit"),
-                    ])
-                    .spans,
-                );
-                Line::from(spans)
-            }
-            _ => {
-                let mut l = key_hint(&[
-                    ("n", "new"),
-                    ("w", "worktree"),
-                    ("j/k", "switch"),
-                    ("b", "next blocked"),
-                    ("x", "close"),
-                    ("d", "detach"),
-                    ("?", "help"),
-                ]);
-                let lead = vec![
-                    Span::raw(" "),
-                    Span::styled(
-                        p.clone(),
-                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" then  ", Style::new().fg(Color::DarkGray)),
-                ];
-                l.spans.splice(0..0, lead);
-                l
-            }
-        }
-    };
-    f.render_widget(Paragraph::new(line), area);
+    let mut keys = vec![
+        ("←↓↑→", "select"),
+        ("enter", "open"),
+        ("n", "new"),
+        ("w", "worktree"),
+    ];
+    if app.selected_pane().is_some_and(|p| p.worktree.is_some()) {
+        keys.push(("d", "diff"));
+    }
+    keys.extend([
+        ("b", "next blocked"),
+        ("x", "close"),
+        ("r", "rename"),
+        ("q", "detach"),
+        ("?", "help"),
+    ]);
+    let mut l = key_hint(&keys);
+    l.spans.insert(0, Span::raw(" "));
+    f.render_widget(Paragraph::new(l), area);
+}
+
+fn help_section(title: &str, rows: &[(&str, &str)]) -> Vec<Line<'static>> {
+    let mut out = vec![Line::styled(
+        title.to_string(),
+        Style::new().add_modifier(Modifier::BOLD),
+    )];
+    for (k, what) in rows {
+        out.push(Line::from(vec![
+            Span::styled(format!("  {k:<14}"), Style::new().fg(Color::Cyan)),
+            Span::raw(what.to_string()),
+        ]));
+    }
+    out.push(Line::default());
+    out
 }
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let p = &app.prefix_label;
-    let rows: Vec<(&str, &str)> = vec![
-        ("n", "start a new agent"),
-        ("w", "start a new agent in its own git worktree"),
-        ("j / k, ↑ / ↓", "next / previous pane"),
-        ("1 … 9", "jump to pane"),
-        ("b", "jump to the next blocked agent"),
-        ("x", "close the pane"),
-        ("r", "rename the pane"),
-        ("d", "detach (agents keep running)"),
-        ("[", "scrollback (mouse wheel works too)"),
-        ("?", "this help"),
-    ];
-    let mut text = vec![
-        Line::from(vec![
-            Span::raw("Press "),
-            Span::styled(p.clone(), Style::new().fg(Color::Cyan)),
-            Span::raw(", then:"),
-        ]),
-        Line::default(),
-    ];
-    for (k, what) in rows {
-        text.push(Line::from(vec![
-            Span::styled(format!("  {k:<14}"), Style::new().fg(Color::Cyan)),
-            Span::raw(what),
-        ]));
-    }
-    text.push(Line::default());
-    text.push(Line::styled(
-        format!("{p} {p} sends {p} to the pane. Click a sidebar row to focus it."),
-        Style::new().fg(Color::DarkGray),
+    let mut text = help_section(
+        "Overview",
+        &[
+            ("←↓↑→ hjkl tab", "select an agent (or click its card)"),
+            ("enter, 1 … 9", "open it full screen"),
+            ("n / w", "new agent / new agent in its own git worktree"),
+            ("d", "review the agent's worktree diff"),
+            ("b", "select the next agent that needs you"),
+            ("x / r", "close / rename"),
+            ("q", "detach (agents keep running)"),
+        ],
+    );
+    text.extend(help_section(
+        &format!("Inside an agent, press {p} then"),
+        &[
+            ("g", "back to the overview"),
+            ("j / k, 1 … 9", "next / previous / numbered agent"),
+            ("b", "next agent that needs you"),
+            ("D", "diff · n new · x close · r rename"),
+            ("[", "scrollback (mouse wheel works too)"),
+            ("d", "detach"),
+            (&p.to_string(), &format!("send {p} itself to the agent")),
+        ],
+    ));
+    text.extend(help_section(
+        "Diff",
+        &[
+            ("j / k", "file · space/K scroll"),
+            (
+                "c / m / x",
+                "commit · merge into base · discard uncommitted",
+            ),
+        ],
     ));
     text.push(Line::styled(
         "Hold Shift (Option in some terminals) to select text with the mouse.",
@@ -537,7 +623,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     ));
     text.push(Line::default());
     text.push(key_hint(&[("any key", "close")]));
-    let r = centered(area, 66, text.len() as u16 + 2);
+    let r = centered(area, 72, text.len() as u16 + 2);
     f.render_widget(Clear, r);
     f.render_widget(Paragraph::new(text).block(dialog_block("corral help")), r);
 }
@@ -724,14 +810,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_hides_sidebar_when_narrow() {
-        let a = layout(Rect::new(0, 0, 120, 40), 30);
-        assert_eq!(a.sidebar.width, 30);
-        assert_eq!(a.pane, Rect::new(30, 0, 90, 39));
+    fn layout_zoomed_and_overview() {
+        let a = layout(Rect::new(0, 0, 120, 40), false);
+        assert_eq!(a.top, Rect::new(0, 0, 120, 1));
+        assert_eq!(a.body, Rect::new(0, 1, 120, 38));
         assert_eq!(a.hint, Rect::new(0, 39, 120, 1));
-        let a = layout(Rect::new(0, 0, 50, 20), 30);
-        assert_eq!(a.sidebar.width, 0);
-        assert_eq!(a.pane.width, 50);
+        let a = layout(Rect::new(0, 0, 120, 40), true);
+        assert_eq!(a.body, Rect::new(0, 1, 120, 39));
+        assert_eq!(a.hint.height, 0);
     }
 
     #[test]

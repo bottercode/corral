@@ -24,7 +24,8 @@ use crate::detect::agents::Identifier;
 use crate::detect::rules::{Rules, View};
 use crate::paths;
 use crate::protocol::{
-    AgentState, NewPane, PaneId, PaneInfo, ServerMsg, WorktreeAction, WorktreeInfo,
+    AgentState, Command, DiffReport, NewPane, PaneId, PaneInfo, ServerMsg, WorktreeAction,
+    WorktreeInfo,
 };
 use crate::worktree::{self, RemoveOpts, WorktreeError};
 use pane::{Pane, SpawnSpec};
@@ -33,6 +34,8 @@ pub const DEFAULT_SIZE: (u16, u16) = (120, 36);
 const TICK: Duration = Duration::from_millis(250);
 const IDENTIFY_EVERY: Duration = Duration::from_secs(2);
 const WORKTREE_POLL_EVERY: Duration = Duration::from_secs(3);
+/// Rows of each pane sent for overview cards.
+pub const PREVIEW_ROWS: u16 = 40;
 
 pub type ClientId = u64;
 
@@ -199,22 +202,6 @@ impl Hub {
         g.refresh_focus_flags();
     }
 
-    /// The pane a newly attached client should look at.
-    pub fn initial_focus(&self, workspace: Option<&str>) -> Option<PaneId> {
-        let g = self.lock();
-        if let Some(ws) = workspace {
-            return g
-                .panes
-                .iter()
-                .find(|p| p.workspace == ws)
-                .map(|p| p.id.clone());
-        }
-        g.last_focus
-            .clone()
-            .filter(|id| g.panes.iter().any(|p| &p.id == id))
-            .or_else(|| g.panes.first().map(|p| p.id.clone()))
-    }
-
     pub fn workspace_exists(&self, ws: &str) -> bool {
         self.lock().panes.iter().any(|p| p.workspace == ws)
     }
@@ -238,16 +225,19 @@ impl Hub {
         None
     }
 
-    pub fn focus(&self, client: ClientId, pane: &str) -> Result<()> {
+    /// Look at `pane`, or at the overview when `None`.
+    pub fn focus(&self, client: ClientId, pane: Option<&str>) -> Result<()> {
         let ev = {
             let mut g = self.lock();
-            g.pane(pane)?;
-            if let Some(c) = g.clients.get_mut(&client) {
-                c.focus = Some(pane.to_string());
+            if let Some(p) = pane {
+                g.pane(p)?;
+                g.last_focus = Some(p.to_string());
             }
-            g.last_focus = Some(pane.to_string());
+            if let Some(c) = g.clients.get_mut(&client) {
+                c.focus = pane.map(str::to_string);
+            }
             g.refresh_focus_flags();
-            Self::touch_and_fit(&mut g, client, Some(pane))
+            Self::touch_and_fit(&mut g, client, pane)
         };
         if let Some(ev) = ev {
             self.emit(ev);
@@ -312,6 +302,27 @@ impl Hub {
             seq: p.seq,
             bytes: p.snapshot(),
         })
+    }
+
+    /// Previews of panes whose output changed since `sent` (pane → seq).
+    pub fn previews(&self, sent: &mut HashMap<PaneId, u64>) -> Vec<ServerMsg> {
+        let g = self.lock();
+        let mut out = Vec::new();
+        for p in &g.panes {
+            if sent.get(&p.id) == Some(&p.seq) {
+                continue;
+            }
+            sent.insert(p.id.clone(), p.seq);
+            let (cols, rows, bytes) = pane::preview(p.parser.screen(), PREVIEW_ROWS);
+            out.push(ServerMsg::Preview {
+                pane: p.id.clone(),
+                cols,
+                rows,
+                bytes,
+            });
+        }
+        sent.retain(|id, _| g.panes.iter().any(|p| &p.id == id));
+        out
     }
 
     pub fn read(&self, pane: &str, lines: Option<usize>, scrollback: bool) -> Result<String> {
@@ -769,26 +780,60 @@ impl Hub {
         if targets.is_empty() {
             return;
         }
-        let counts: Vec<(PaneId, u32)> = targets
+        let stats: Vec<(PaneId, u32, (u32, u32, u32))> = targets
             .into_iter()
-            .filter_map(|(id, path)| worktree::changed_files(&path).ok().map(|n| (id, n)))
+            .filter_map(|(id, path)| {
+                let w = worktree::info(&path).ok()?;
+                Some((id, w.changed_files, (w.diff_files, w.added, w.removed)))
+            })
             .collect();
         let mut changed = false;
         {
             let mut g = self.lock();
-            for (id, n) in counts {
+            for (id, n, (files, added, removed)) in stats {
                 if let Ok(p) = g.pane(&id)
                     && let Some(w) = p.worktree.as_mut()
-                    && w.changed_files != n
                 {
-                    w.changed_files = n;
-                    changed = true;
+                    let new = (n, files, added, removed);
+                    if (w.changed_files, w.diff_files, w.added, w.removed) != new {
+                        (w.changed_files, w.diff_files, w.added, w.removed) = new;
+                        changed = true;
+                    }
                 }
             }
         }
         if changed {
             self.emit(Event::State);
         }
+    }
+
+    fn worktree_path(&self, pane: &str) -> Result<PathBuf> {
+        let mut g = self.lock();
+        let p = g.pane(pane)?;
+        p.worktree.as_ref().map(|w| w.path.clone()).ok_or_else(|| {
+            anyhow!("pane {pane} doesn't have a worktree (start agents with --worktree)")
+        })
+    }
+
+    /// The pane's worktree diff. Blocking.
+    pub fn diff(&self, pane: &str) -> Result<DiffReport> {
+        let mut d = worktree::diff(&self.worktree_path(pane)?)?;
+        d.pane = Some(pane.to_string());
+        Ok(d)
+    }
+
+    /// Commit, merge or discard in a pane's worktree. Blocking.
+    pub fn worktree_action(&self, pane: &str, action: &Command) -> Result<String> {
+        let path = self.worktree_path(pane)?;
+        let msg = match action {
+            Command::Commit { message, .. } => worktree::commit(&path, message)?,
+            Command::Merge { .. } => worktree::merge(&path)?,
+            Command::Discard { .. } => worktree::discard(&path)?,
+            other => bail!("not a worktree action: {other:?}"),
+        };
+        tracing::info!(pane, %msg, "worktree action");
+        self.poll_worktrees();
+        Ok(msg)
     }
 
     pub fn request_shutdown(&self) {

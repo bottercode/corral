@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use corral::protocol::{ClientMsg, Command, Reply};
+use corral::protocol::{AgentState, ClientMsg, Command, Reply};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn attach_detach_reattach_keeps_the_screen() {
@@ -13,8 +13,7 @@ async fn attach_detach_reattach_keeps_the_screen() {
     assert_eq!(pane.id, "p1");
 
     let mut a = Headless::attach(&server, 80, 24).await;
-    a.until("focus on p1", |c| c.focus.as_deref() == Some("p1"))
-        .await;
+    a.focus_on("p1").await;
     a.until("hi on screen", |c| c.contents().contains("hi"))
         .await;
     let first = a.contents();
@@ -25,12 +24,8 @@ async fn attach_detach_reattach_keeps_the_screen() {
     assert!(server.panes()[0].exit_code.is_none());
 
     let mut b = Headless::attach(&server, 80, 24).await;
-    b.until("snapshot and state", |c| {
-        c.parser.is_some() && c.focus.is_some()
-    })
-    .await;
+    b.focus_on("p1").await;
     assert_eq!(b.contents(), first);
-    assert_eq!(b.focus.as_deref(), Some("p1"));
 
     // The pane is still interactive after reattaching.
     b.conn
@@ -58,6 +53,7 @@ async fn snapshot_includes_scrollback_and_resize_follows_latest_client() {
     .await;
 
     let mut a = Headless::attach(&server, 60, 10).await;
+    a.focus_on("p1").await;
     a.until("all lines", |c| c.contents().contains("line99"))
         .await;
     // History came along with the snapshot or the stream.
@@ -71,7 +67,7 @@ async fn snapshot_includes_scrollback_and_resize_follows_latest_client() {
 
     // A second, larger client becomes active by typing; the pane follows it.
     let mut b = Headless::attach(&server, 100, 30).await;
-    b.until("snapshot", |c| c.parser.is_some()).await;
+    b.focus_on("p1").await;
     b.conn
         .send(&ClientMsg::Input {
             pane: "p1".into(),
@@ -111,7 +107,7 @@ async fn panes_get_their_id_and_socket_in_the_environment() {
     let mut conn = server.conn().await;
     new_pane(
         &mut conn,
-        sh("echo id=$CORRAL_PANE; echo sock=$CORRAL_SOCKET; read x"),
+        sh("echo id=$CORRAL_PANE; echo sock=$CORRAL_SOCKET; echo cc=${CLAUDECODE:-unset}; read x"),
         server.dir.path(),
     )
     .await;
@@ -123,6 +119,8 @@ async fn panes_get_their_id_and_socket_in_the_environment() {
         text.contains(&format!("sock={}", server.socket.display())),
         "{text}"
     );
+    // Agent session markers from whoever started the server don't leak in.
+    assert!(text.contains("cc=unset"), "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -161,13 +159,13 @@ async fn notifications_only_for_unfocused_panes() {
     new_pane(&mut conn, sh("read x"), server.dir.path()).await;
 
     let mut a = Headless::attach(&server, 80, 24).await;
-    a.until("focus", |c| c.focus.as_deref() == Some("p1")).await;
+    a.focus_on("p1").await;
 
     // Blocked on the focused pane: no notification.
     let r = conn
         .request(Command::Report {
             pane: "p1".into(),
-            state: corral::protocol::AgentState::Blocked,
+            state: AgentState::Blocked,
         })
         .await
         .unwrap();
@@ -175,11 +173,47 @@ async fn notifications_only_for_unfocused_panes() {
     // Blocked on the other pane: notification.
     conn.request(Command::Report {
         pane: "p2".into(),
-        state: corral::protocol::AgentState::Blocked,
+        state: AgentState::Blocked,
     })
     .await
     .unwrap();
     a.until("notification", |c| !c.notes.is_empty()).await;
     assert_eq!(a.notes.len(), 1);
     assert!(a.notes[0].contains("p2"), "{:?}", a.notes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn overview_streams_previews_of_every_pane() {
+    let server = TestServer::start();
+    let mut conn = server.conn().await;
+    new_pane(&mut conn, sh("echo alpha-out; read x"), server.dir.path()).await;
+    new_pane(&mut conn, sh("echo beta-out; read x"), server.dir.path()).await;
+
+    // Clients start on the overview: no focus, previews for all panes.
+    let mut a = Headless::attach(&server, 80, 24).await;
+    a.until("previews", |c| {
+        c.previews
+            .get("p1")
+            .is_some_and(|t| t.contains("alpha-out"))
+            && c.previews.get("p2").is_some_and(|t| t.contains("beta-out"))
+    })
+    .await;
+    assert!(a.focus.is_none());
+
+    // New output shows up in the preview (sh echoes what `read` gets).
+    conn.request(Command::Send {
+        pane: "p2".into(),
+        bytes: b"typed\r".to_vec(),
+    })
+    .await
+    .unwrap();
+    a.until("updated preview", |c| {
+        c.previews.get("p2").is_some_and(|t| t.contains("typed"))
+    })
+    .await;
+
+    // Zoom in, then back to the overview.
+    a.focus_on("p1").await;
+    a.conn.send(&ClientMsg::Focus { pane: None }).await.unwrap();
+    a.until("back to overview", |c| c.focus.is_none()).await;
 }

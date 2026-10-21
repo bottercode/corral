@@ -5,7 +5,9 @@
 //! the pane's output sequence number: output chunks already contained in the
 //! snapshot are dropped. CLI clients just send commands.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use futures::{SinkExt, StreamExt};
@@ -60,7 +62,10 @@ pub async fn handle(hub: Arc<Hub>, stream: UnixStream) -> Result<()> {
         focus: None,
         focus_seq: 0,
         focus_size: (0, 0),
+        previews: HashMap::new(),
     };
+    let mut preview_tick = tokio::time::interval(PREVIEW_EVERY);
+    preview_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let result: Result<()> = async {
         loop {
@@ -77,7 +82,8 @@ pub async fn handle(hub: Arc<Hub>, stream: UnixStream) -> Result<()> {
                         return Ok(());
                     }
                 }
-                Some(pane) = internal_rx.recv() => s.set_focus(&pane),
+                Some(pane) = internal_rx.recv() => s.set_focus(Some(&pane)),
+                _ = preview_tick.tick(), if s.in_overview() => s.send_previews(),
             }
         }
     }
@@ -108,7 +114,12 @@ struct Session {
     focus: Option<PaneId>,
     focus_seq: u64,
     focus_size: (u16, u16),
+    /// Output seq of the last preview sent per pane (overview only).
+    previews: HashMap<PaneId, u64>,
 }
+
+/// How often the overview's previews are refreshed.
+const PREVIEW_EVERY: Duration = Duration::from_millis(250);
 
 impl Session {
     fn send(&self, msg: ServerMsg) {
@@ -138,13 +149,29 @@ impl Session {
         }
     }
 
-    fn set_focus(&mut self, pane: &str) {
+    fn in_overview(&self) -> bool {
+        self.events.is_some() && self.focus.is_none()
+    }
+
+    fn send_previews(&mut self) {
+        for msg in self.hub.previews(&mut self.previews) {
+            self.send(msg);
+        }
+    }
+
+    fn set_focus(&mut self, pane: Option<&str>) {
         if self.events.is_none() {
             return;
         }
         if self.hub.focus(self.client, pane).is_ok() {
-            self.focus = Some(pane.to_string());
-            self.send_screen();
+            self.focus = pane.map(str::to_string);
+            match pane {
+                Some(_) => self.send_screen(),
+                None => {
+                    self.previews.clear();
+                    self.send_previews();
+                }
+            }
             self.send_state();
         }
     }
@@ -160,17 +187,17 @@ impl Session {
                 self.hub.attach(self.client, cols, rows);
                 // Subscribe before any snapshot so no output falls in between.
                 self.events = Some(self.hub.subscribe());
-                match self.hub.initial_focus(workspace.as_deref()) {
-                    Some(p) => self.set_focus(&p),
-                    None => self.send_state(),
-                }
+                // Clients start on the overview; `workspace` is a hint for
+                // which card they select.
+                let _ = workspace;
+                self.set_focus(None);
             }
             ClientMsg::Detach => {
                 self.hub.detach(self.client);
                 self.events = None;
                 self.focus = None;
             }
-            ClientMsg::Focus { pane } => self.set_focus(&pane),
+            ClientMsg::Focus { pane } => self.set_focus(pane.as_deref()),
             ClientMsg::Input { pane, bytes } => {
                 let _ = self.hub.input(self.client, &pane, bytes);
             }
@@ -201,12 +228,11 @@ impl Session {
                 }
             }
             Ok(Event::Removed { pane }) => {
+                // The pane being looked at is gone: back to the overview.
                 if self.focus.as_ref() == Some(&pane) {
-                    self.focus = None;
-                    match self.hub.initial_focus(None) {
-                        Some(p) => self.set_focus(&p),
-                        None => self.send_state(),
-                    }
+                    self.set_focus(None);
+                } else {
+                    self.previews.remove(&pane);
                 }
             }
             Ok(Event::Notify {
@@ -311,6 +337,10 @@ fn run_blocking(hub: &Hub, cmd: Command) -> Result<Reply> {
             delete_branch,
         } => Reply::Text(hub.remove_worktree(&target, force, delete_branch)?),
         Command::DebugDump { pane } => Reply::Bytes(hub.dump(&pane)?),
+        Command::Diff { pane } => Reply::Diff(hub.diff(&pane)?),
+        Command::Commit { ref pane, .. }
+        | Command::Merge { ref pane }
+        | Command::Discard { ref pane } => Reply::Text(hub.worktree_action(pane, &cmd)?),
         Command::New(_) | Command::Wait { .. } | Command::KillServer => {
             unreachable!("handled asynchronously")
         }
