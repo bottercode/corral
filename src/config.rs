@@ -6,6 +6,7 @@
 //! notifications = true              # bell + OSC 9 when an unfocused agent is blocked/done
 //! worktree_root = "~/.corral/worktrees"
 //! sidebar_width = 30
+//! theme = "ranch"                  # ranch, ink or terminal
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ pub struct Config {
     pub notifications: bool,
     pub worktree_root: Option<String>,
     pub sidebar_width: u16,
+    pub theme: String,
 }
 
 impl Default for Config {
@@ -33,6 +35,7 @@ impl Default for Config {
             notifications: true,
             worktree_root: None,
             sidebar_width: 30,
+            theme: "ranch".into(),
         }
     }
 }
@@ -55,6 +58,7 @@ impl Config {
     pub fn parse(src: &str) -> Result<Self> {
         let cfg: Config = toml::from_str(src)?;
         cfg.prefix_byte()?;
+        crate::client::theme::by_name(&cfg.theme)?;
         Ok(cfg)
     }
 
@@ -123,12 +127,14 @@ mod tests {
     #[test]
     fn full_file() {
         let c = Config::parse(
-            "prefix = 'C-a'\ndefault_command = 'codex'\nnotifications = false\nworktree_root = '/w'\nsidebar_width = 24\n",
+            "prefix = 'C-a'\ndefault_command = 'codex'\nnotifications = false\nworktree_root = '/w'\nsidebar_width = 24\ntheme = 'ink'\n",
         )
         .unwrap();
         assert_eq!(c.prefix_byte().unwrap(), 1);
         assert_eq!(c.worktree_root(), PathBuf::from("/w"));
         assert_eq!(c.sidebar_width, 24);
+        assert_eq!(c.theme, "ink");
+        assert!(Config::parse("theme = 'neon'").is_err());
         assert!(!c.notifications);
     }
 

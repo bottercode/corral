@@ -1,10 +1,11 @@
 //! One client connection.
 //!
 //! Interactive clients `Attach` and then get the pane list, a snapshot of
-//! their focused pane and its live output. Snapshot and stream line up via
-//! the pane's output sequence number: output chunks already contained in the
-//! snapshot are dropped. CLI clients just send commands.
+//! every pane in their view and its live output. Snapshot and stream line up
+//! via the pane's output sequence number: output chunks already contained in
+//! the snapshot are dropped. CLI clients just send commands.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -58,8 +59,8 @@ pub async fn handle(hub: Arc<Hub>, stream: UnixStream) -> Result<()> {
         internal,
         events: None,
         focus: None,
-        focus_seq: 0,
-        focus_size: (0, 0),
+        shown: HashMap::new(),
+        view_generation: 0,
     };
 
     let result: Result<()> = async {
@@ -106,8 +107,9 @@ struct Session {
     internal: mpsc::UnboundedSender<PaneId>,
     events: Option<broadcast::Receiver<Event>>,
     focus: Option<PaneId>,
-    focus_seq: u64,
-    focus_size: (u16, u16),
+    /// Panes in view → (last output seq sent, size of the last snapshot).
+    shown: HashMap<PaneId, (u64, (u16, u16))>,
+    view_generation: u64,
 }
 
 impl Session {
@@ -119,23 +121,40 @@ impl Session {
         self.send(ServerMsg::State {
             panes: self.hub.infos(),
             focus: self.focus.clone(),
+            view_generation: self.view_generation,
         });
     }
 
-    fn send_screen(&mut self) {
-        let Some(pane) = self.focus.clone() else {
-            return;
-        };
-        if let Some(msg) = self.hub.screen_msg(&pane) {
+    fn send_screen(&mut self, pane: &str) {
+        if let Some(msg) = self.hub.screen_msg(pane) {
             if let ServerMsg::Screen {
                 seq, cols, rows, ..
             } = &msg
             {
-                self.focus_seq = *seq;
-                self.focus_size = (*cols, *rows);
+                self.shown.insert(pane.to_string(), (*seq, (*cols, *rows)));
             }
             self.send(msg);
         }
+    }
+
+    /// Bring `shown` in line with the hub's view of this client: snapshot
+    /// panes that just came into view or changed size, forget the rest.
+    fn sync_view(&mut self) {
+        let (focus, view) = self.hub.view_of(self.client);
+        self.focus = focus;
+        self.shown
+            .retain(|id, _| view.iter().any(|v| &v.pane == id));
+        for v in view {
+            let fresh = self.shown.get(&v.pane).is_none_or(|(_, size)| {
+                self.hub
+                    .pane_info(&v.pane)
+                    .is_some_and(|p| (p.cols, p.rows) != *size)
+            });
+            if fresh {
+                self.send_screen(&v.pane);
+            }
+        }
+        self.send_state();
     }
 
     fn set_focus(&mut self, pane: Option<&str>) {
@@ -143,9 +162,7 @@ impl Session {
             return;
         }
         if self.hub.focus(self.client, pane).is_ok() {
-            self.focus = pane.map(str::to_string);
-            self.send_screen();
-            self.send_state();
+            self.sync_view();
         }
     }
 
@@ -167,8 +184,19 @@ impl Session {
                 self.hub.detach(self.client);
                 self.events = None;
                 self.focus = None;
+                self.shown.clear();
             }
-            ClientMsg::Focus { pane } => self.set_focus(pane.as_deref()),
+            ClientMsg::View {
+                generation,
+                focus,
+                panes,
+            } => {
+                self.view_generation = generation;
+                if self.events.is_some() {
+                    self.hub.set_view(self.client, focus.as_deref(), panes);
+                    self.sync_view();
+                }
+            }
             ClientMsg::Input { pane, bytes } => {
                 let _ = self.hub.input(self.client, &pane, bytes);
             }
@@ -183,8 +211,10 @@ impl Session {
         use broadcast::error::RecvError;
         match ev {
             Ok(Event::Output { pane, seq, bytes }) => {
-                if self.focus.as_ref() == Some(&pane) && seq > self.focus_seq {
-                    self.focus_seq = seq;
+                if let Some((sent, _)) = self.shown.get_mut(&pane)
+                    && seq > *sent
+                {
+                    *sent = seq;
                     self.send(ServerMsg::Output {
                         pane,
                         seq,
@@ -201,14 +231,22 @@ impl Session {
                 }
             }
             Ok(Event::Resized { pane, cols, rows }) => {
-                if self.focus.as_ref() == Some(&pane) && self.focus_size != (cols, rows) {
-                    self.send_screen();
+                if self
+                    .shown
+                    .get(&pane)
+                    .is_some_and(|(_, size)| *size != (cols, rows))
+                {
+                    self.send_screen(&pane);
                 }
             }
             Ok(Event::Removed { pane }) => {
-                // The pane being looked at is gone: show another one.
-                if self.focus.as_ref() == Some(&pane) {
-                    let next = self.hub.initial_focus(None);
+                if self.shown.remove(&pane).is_some() || self.focus.as_ref() == Some(&pane) {
+                    // Keep the keyboard on something: the focus if it's still
+                    // there, else another pane in view, else the hub's pick.
+                    let (focus, view) = self.hub.view_of(self.client);
+                    let next = focus
+                        .or_else(|| view.first().map(|v| v.pane.clone()))
+                        .or_else(|| self.hub.initial_focus(None));
                     self.set_focus(next.as_deref());
                 }
             }
@@ -217,7 +255,7 @@ impl Session {
                 state,
                 message,
             }) => {
-                if self.focus.as_ref() != Some(&pane) {
+                if !self.shown.contains_key(&pane) {
                     self.send(ServerMsg::Notify {
                         pane,
                         state,
@@ -232,9 +270,9 @@ impl Session {
                 return false;
             }
             Err(RecvError::Lagged(_)) => {
-                // Missed output: resynchronise from a fresh snapshot.
-                self.send_screen();
-                self.send_state();
+                // Missed output: resynchronise from fresh snapshots.
+                self.shown.clear();
+                self.sync_view();
             }
         }
         true

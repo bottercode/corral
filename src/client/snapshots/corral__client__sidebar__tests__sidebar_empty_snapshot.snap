@@ -1,10 +1,12 @@
 ---
 source: src/client/sidebar.rs
+assertion_line: 552
 expression: text
 ---
- corral                ✕ exit  │
-                               │
+ corral                 ✕ exit │
+ ───────────────────────────── │
  no agents yet                 │
+ start one below               │
                                │
                                │
                                │
@@ -13,4 +15,13 @@ expression: text
                                │
                                │
                                │
-  + new agent   ⎇ worktree     │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+ ───────────────────────────── │
+ + new agent   ⎇ worktree      │

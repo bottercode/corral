@@ -6,18 +6,22 @@ them running when you close the laptop or lose SSH. Optionally, give each
 agent its own git worktree so parallel agents never edit the same checkout.
 
 ```
- corral  ●1  ✓1                │> fix the failing test in parser.rs
-                               │
- api                           │⏺ I'll run the tests first.
-▌1 claude         ● blocked 4m │
-   ⎇ corral/fix-auth +42 −7    │ Bash(cargo test)
- 2 codex           ⠋ working   │
-   ⎇ corral/codex-81c2 +3 −0   │ Do you want to proceed?
-                               │ ❯ 1. Yes
- website                       │   2. Yes, and don't ask again for cargo test
- 3 opencode         ✓ done 2m  │   3. No, and tell Claude what to do differently
-                               │
- ^b then  n new · w worktree · j/k switch · b next blocked · x close · d detach · ? help
+ corral               ✕ exit │ 2 fixer · Fix token refresh   ◆ blocked 4m│▍1 api · Add rate limiting         ⠋ 32s
+ ─────────────────────────── │⏺ I'll patch the refresh lock.             │⏺ Reading src/limits.rs
+ NEEDS YOU  2                │                                            │
+ 2 fixer       ◆ blocked 4m  │ Do you want to proceed?                    │  ⎿ Read 120 lines
+ 3 docs           ✓ done 1m  │ ❯ 1. Yes                                   │
+                             │   2. No                                    │⏺ Adding a token bucket
+ WORKING  1                  │                                            │
+▍1 api               ⠋ 32s   │                                            │
+▍  Add rate limiting         │                                            │
+▍  api · claude              │                                            │
+▍  ⎇ corral/api-81c2 +42 −7  │                                            │
+                             │                                            │
+ QUIET  1                    │                                            │
+ 4 tests               idle  │                                            │
+ ─────────────────────────── │                                            │
+ + new agent   ⎇ worktree    │                                            │          ^b ? keys
 ```
 
 ## Why
@@ -34,9 +38,12 @@ Running several agents in separate terminal tabs breaks down quickly:
 corral runs a small background server that owns every agent's terminal. The
 UI is a client that attaches and detaches; the agents don't notice.
 
-- **Every agent's state at a glance.** The sidebar lists agents by project
-  with their state and how long they've been waiting. Blocked agents turn
-  red, and you get a bell and a desktop notification.
+- **Who needs you, first.** The sidebar sorts agents by what they need:
+  blocked or finished agents on top, then the ones working, then the quiet
+  ones, each with how long it's been in that state. You also get a bell and a
+  desktop notification.
+- **Several agents on screen.** Show up to four agents side by side and type
+  into whichever one you click.
 - **A worktree per agent, if you want one.** `--worktree` starts an agent in a
   fresh git worktree on its own branch.
 - **Review and land agents' work without leaving corral.** Press `^b D` to
@@ -74,17 +81,22 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b j` / `^b k`, `^b ↑` / `^b ↓` | next / previous agent |
 | `^b 1` … `^b 9` | jump to an agent |
 | `^b b` | jump to the next blocked agent |
+| `^b s` | show another agent alongside (up to four on screen) |
+| `^b S` | take the focused agent off screen (it keeps running) |
+| `^b o` | only the focused agent on screen; again to bring the others back |
+| `^b h` / `^b l`, `^b Tab` | move between the agents on screen |
 | `^b D` | review the agent's worktree diff ([below](#diff-review)) |
 | `^b x` | close the agent's pane |
 | `^b r` | rename it |
 | `^b d` | detach (agents keep running) |
 | `^b q` | exit: detach, or stop corral and every agent (also the **✕ exit** button) |
 | `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`) |
-| `^b ?` | help |
+| `^b ?` | all the keys |
 | `^b ^b` | send a literal `Ctrl-b` to the agent |
 
-Click a sidebar row to focus that agent, or the **+ new agent** / **⎇ worktree**
-buttons at the bottom of the sidebar to start one. **✕ exit** (top of the
+Click an agent on screen to type into it, or a sidebar row to bring that agent
+into the focused spot; the **+ new agent** / **⎇ worktree** buttons at the
+bottom of the sidebar start one. **✕ exit** (top of the
 sidebar) asks whether to detach, leaving agents running, or stop corral and
 every agent; worktrees are kept either way. Scroll the wheel for
 scrollback. corral captures the mouse, so hold Shift (Option in some
@@ -172,11 +184,15 @@ corral discard p2 --yes
 
 | State | Meaning |
 |---|---|
-| ⠋ working | output in the last moment, or a spinner / "esc to interrupt" on screen |
-| ● blocked | a permission prompt or question is on screen |
+| ◆ blocked | a permission prompt or question is on screen |
 | ✓ done | it was working and stopped, and you haven't looked at it since |
-| ○ idle | you've seen it, or it hasn't started anything |
-| ✗ exit N | the process ended |
+| ⠋ working | output in the last moment, or a spinner / "esc to interrupt" on screen |
+| idle | you've seen it, or it hasn't started anything |
+| exited N | the process ended |
+
+Blocked and done agents are listed under **NEEDS YOU**, working ones under
+**WORKING**, the rest under **QUIET**. An agent counts as seen once it's on
+screen.
 
 corral recognises claude, codex, opencode, gemini, amp, cursor-agent, copilot,
 pi, droid and grok from the pane's foreground process. It then reads their
@@ -268,7 +284,17 @@ default_command = "claude"             # prefilled in the new-agent dialog
 notifications = true
 worktree_root = "~/.corral/worktrees"
 sidebar_width = 30
+theme = "ranch"                        # ranch, ink or terminal
 ```
+
+Themes:
+
+- **ranch** (default): warm field colours. Hay for corral's own marks, rust
+  for blocked agents, sage for finished work, creek blue for work in
+  progress, heather for branches. It draws on your terminal's background.
+- **ink**: greys, with one amber signal kept for agents that need you.
+- **terminal**: your terminal's own 16 colours, so it matches whatever
+  palette you already use.
 
 Environment variables:
 
@@ -294,9 +320,10 @@ agent hooks (report) ┘          │
 
 - The server owns every PTY, so agents survive clients coming and going.
 - Each pane's output feeds a terminal emulator (vt100) on the server.
-- A client looking at an agent gets a snapshot (scrollback included) and
-  then its live byte stream, rendered with Ratatui and tui-term.
-- The PTY size follows whichever client was used most recently, like tmux's
+- A client tells the server which agents it has on screen and at what size.
+  For each one it gets a snapshot (scrollback included) and then the live
+  byte stream, rendered with Ratatui and tui-term.
+- Each PTY's size follows whichever client used it most recently, like tmux's
   `latest` policy.
 - Keystrokes pass through to the pane untouched, apart from the prefix key,
   mouse events and bracketed pastes (which pass through whole).
@@ -313,21 +340,22 @@ setting up worktrees is up to you.
 
 **[Herdr](https://herdr.dev)** is the established tool in this space and the
 inspiration for corral's server design: a server that owns the terminals,
-attachable clients, agent state detection and a CLI API. It is more mature
-and has features corral doesn't, such as split panes, plugins, themes and
-access from other machines. The two differ in their focus:
+attachable clients, agent state detection and a CLI API. It is far more
+mature, with features corral doesn't have, such as tabs, plugins, session
+restore after a reboot and access from other machines. corral focuses on the
+loop of running agents in parallel and landing their work:
 
 | | Herdr | corral |
 |---|---|---|
-| Layout | sidebar of agents + split panes | sidebar of agents + one agent at a time |
-| "Who needs me?" | status dots in the sidebar | state badges with waiting timers (`● blocked 4m`), a counter, `^b b` to jump |
-| Worktrees | left to external tools | built in: one per agent, created, tracked and cleaned up safely |
-| Agent's changes | left to external tools | diff review in the UI, with commit, merge and discard |
+| Sidebar | workspaces and agents | agents sorted by what they need from you, with waiting timers |
+| Worktrees | create, open and remove worktree workspaces | one per agent on request, with change counts in the sidebar |
+| Agent's changes | left to other tools | diff review in the UI, with commit, merge and discard |
 
 ## Limitations (v0.1)
 
 - macOS and Linux only.
-- One agent visible at a time (no split panes).
+- At most four agents on screen at once, in fixed layouts (no free-form
+  splits or tabs).
 - Agents don't survive a reboot or `corral kill-server`.
 - Programs inside panes don't receive mouse events; the wheel scrolls
   corral's scrollback instead.

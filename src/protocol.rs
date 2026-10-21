@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Largest frame either side will accept (scrollback snapshots can be large).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -236,22 +236,34 @@ pub enum Reply {
     Diff(DiffReport),
 }
 
+/// One pane in a client's layout, at the size it's drawn.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Viewport {
+    pub pane: PaneId,
+    pub cols: u16,
+    pub rows: u16,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ClientMsg {
     Hello {
         protocol_version: u32,
     },
-    /// Become an interactive client: receive state, the focused pane's screen
-    /// and its live output. `cols`/`rows` is the area available for a pane.
+    /// Become an interactive client: receive state, the screens of the panes
+    /// in view and their live output. `cols`/`rows` is the area for panes.
     Attach {
         cols: u16,
         rows: u16,
         workspace: Option<String>,
     },
     Detach,
-    /// Look at one pane, or at none (`None`).
-    Focus {
-        pane: Option<PaneId>,
+    /// The panes this client shows (side by side) and which one gets the
+    /// keyboard. `generation` increases with every View; the server echoes the
+    /// last one it applied in `State` so stale focus can be told apart.
+    View {
+        generation: u64,
+        focus: Option<PaneId>,
+        panes: Vec<Viewport>,
     },
     Input {
         pane: PaneId,
@@ -278,6 +290,8 @@ pub enum ServerMsg {
     State {
         panes: Vec<PaneInfo>,
         focus: Option<PaneId>,
+        /// The last `View` generation applied when this was sent.
+        view_generation: u64,
     },
     /// A full redraw of a pane: scrollback history, screen contents and
     /// terminal modes. `seq` is the last output chunk it includes.
@@ -408,10 +422,27 @@ mod tests {
             workspace: Some("w".into()),
         });
         roundtrip(ClientMsg::Detach);
-        roundtrip(ClientMsg::Focus {
-            pane: Some("p2".into()),
+        roundtrip(ClientMsg::View {
+            generation: 3,
+            focus: Some("p2".into()),
+            panes: vec![
+                Viewport {
+                    pane: "p2".into(),
+                    cols: 60,
+                    rows: 20,
+                },
+                Viewport {
+                    pane: "p1".into(),
+                    cols: 59,
+                    rows: 20,
+                },
+            ],
         });
-        roundtrip(ClientMsg::Focus { pane: None });
+        roundtrip(ClientMsg::View {
+            generation: 0,
+            focus: None,
+            panes: vec![],
+        });
         roundtrip(ClientMsg::Input {
             pane: "p1".into(),
             bytes: b"\x1b[A\x00\xff\xe2\x9c\xb3".to_vec(),
@@ -489,6 +520,7 @@ mod tests {
         roundtrip(ServerMsg::State {
             panes: vec![pane()],
             focus: Some("p1".into()),
+            view_generation: 7,
         });
         roundtrip(ServerMsg::Screen {
             pane: "p1".into(),

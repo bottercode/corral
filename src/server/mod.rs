@@ -24,8 +24,8 @@ use crate::detect::agents::Identifier;
 use crate::detect::rules::{Rules, View};
 use crate::paths;
 use crate::protocol::{
-    AgentState, Command, DiffReport, NewPane, PaneId, PaneInfo, ServerMsg, WorktreeAction,
-    WorktreeInfo,
+    AgentState, Command, DiffReport, NewPane, PaneId, PaneInfo, ServerMsg, Viewport,
+    WorktreeAction, WorktreeInfo,
 };
 use crate::worktree::{self, RemoveOpts, WorktreeError};
 use pane::{Pane, SpawnSpec};
@@ -65,8 +65,26 @@ pub enum Event {
 #[derive(Debug, Default)]
 struct Client {
     attached: bool,
+    /// The whole area the client has for panes.
     size: Option<(u16, u16)>,
+    /// The pane that gets the keyboard; always one of `view`.
     focus: Option<PaneId>,
+    /// Panes on the client's screen, at the size each is drawn.
+    view: Vec<Viewport>,
+}
+
+impl Client {
+    fn shows(&self, id: &str) -> bool {
+        self.attached && self.view.iter().any(|v| v.pane == id)
+    }
+
+    fn size_for(&self, id: &str) -> Option<(u16, u16)> {
+        self.view
+            .iter()
+            .find(|v| v.pane == id)
+            .map(|v| (v.cols, v.rows))
+            .or(self.size)
+    }
 }
 
 #[derive(Default)]
@@ -88,17 +106,16 @@ impl Inner {
             .ok_or_else(|| anyhow!("no pane {id:?}"))
     }
 
-    fn focused_by_anyone(&self, id: &str) -> bool {
-        self.clients
-            .values()
-            .any(|c| c.attached && c.focus.as_deref() == Some(id))
+    /// On some client's screen (so a finished agent counts as seen).
+    fn shown_to_anyone(&self, id: &str) -> bool {
+        self.clients.values().any(|c| c.shows(id))
     }
 
     fn refresh_focus_flags(&mut self) {
         let focused: Vec<bool> = self
             .panes
             .iter()
-            .map(|p| self.focused_by_anyone(&p.id))
+            .map(|p| self.shown_to_anyone(&p.id))
             .collect();
         for (p, f) in self.panes.iter_mut().zip(focused) {
             p.detector.set_focused(f);
@@ -196,6 +213,7 @@ impl Hub {
         if let Some(c) = g.clients.get_mut(&client) {
             c.attached = false;
             c.focus = None;
+            c.view.clear();
         }
         g.refresh_focus_flags();
     }
@@ -219,77 +237,173 @@ impl Hub {
         self.lock().panes.iter().any(|p| p.workspace == ws)
     }
 
-    /// Mark `client` as the most recently active one and size `pane` to it
-    /// (tmux's "latest" policy).
-    fn touch_and_fit(g: &mut Inner, client: ClientId, pane: Option<&str>) -> Option<Event> {
+    /// Mark `client` as the most recently active one and size `panes` to
+    /// how it draws them (tmux's "latest" policy).
+    fn touch_and_fit(g: &mut Inner, client: ClientId, panes: &[&str]) -> Vec<Event> {
         g.active_client = Some(client);
-        let size = g.clients.get(&client).and_then(|c| c.size)?;
-        g.last_size = Some(size);
-        let id = pane?;
-        let p = g.pane(id).ok()?;
-        if p.resize(size.0, size.1) {
-            p.detector.on_resize(Instant::now());
-            return Some(Event::Resized {
-                pane: p.id.clone(),
-                cols: p.cols,
-                rows: p.rows,
-            });
+        let Some(c) = g.clients.get(&client) else {
+            return Vec::new();
+        };
+        if let Some(size) = c.size {
+            g.last_size = Some(size);
         }
-        None
+        let sizes: Vec<(String, (u16, u16))> = panes
+            .iter()
+            .filter_map(|id| Some((id.to_string(), c.size_for(id)?)))
+            .collect();
+        let mut events = Vec::new();
+        for (id, (cols, rows)) in sizes {
+            let Ok(p) = g.pane(&id) else { continue };
+            if p.resize(cols, rows) {
+                p.detector.on_resize(Instant::now());
+                events.push(Event::Resized {
+                    pane: p.id.clone(),
+                    cols: p.cols,
+                    rows: p.rows,
+                });
+            }
+        }
+        events
     }
 
-    /// Look at `pane`, or at the overview when `None`.
+    fn emit_all(&self, events: Vec<Event>) {
+        for ev in events {
+            self.emit(ev);
+        }
+    }
+
+    /// Show `pane` and give it the keyboard. If the client isn't showing it
+    /// yet, it takes the place of the focused pane in the client's layout
+    /// (the whole area when there's no layout). `None` shows nothing.
+    /// Clients make the same substitution on their side.
     pub fn focus(&self, client: ClientId, pane: Option<&str>) -> Result<()> {
-        let ev = {
+        let events = {
             let mut g = self.lock();
             if let Some(p) = pane {
                 g.pane(p)?;
                 g.last_focus = Some(p.to_string());
             }
-            if let Some(c) = g.clients.get_mut(&client) {
-                c.focus = pane.map(str::to_string);
+            let Some(c) = g.clients.get_mut(&client) else {
+                return Ok(());
+            };
+            match pane {
+                None => c.view.clear(),
+                Some(p) if c.view.iter().any(|v| v.pane == p) => {}
+                Some(p) => match c
+                    .view
+                    .iter_mut()
+                    .find(|v| Some(&v.pane) == c.focus.as_ref())
+                {
+                    Some(slot) => slot.pane = p.to_string(),
+                    None => {
+                        let (cols, rows) = c.size.unwrap_or(DEFAULT_SIZE);
+                        c.view = vec![Viewport {
+                            pane: p.to_string(),
+                            cols,
+                            rows,
+                        }];
+                    }
+                },
             }
+            c.focus = pane.map(str::to_string);
             g.refresh_focus_flags();
-            Self::touch_and_fit(&mut g, client, pane)
+            Self::touch_and_fit(&mut g, client, &pane.into_iter().collect::<Vec<_>>())
         };
-        if let Some(ev) = ev {
-            self.emit(ev);
-        }
+        self.emit_all(events);
         // The pane may have gone done → idle now that it's been seen.
         self.tick();
         Ok(())
     }
 
-    pub fn resize_client(&self, client: ClientId, cols: u16, rows: u16) {
-        let ev = {
+    /// The client's layout: which panes it shows, at what sizes, and which
+    /// one has the keyboard. Panes that no longer exist are dropped; if the
+    /// focus is one of them, the first remaining pane gets it.
+    pub fn set_view(
+        &self,
+        client: ClientId,
+        focus: Option<&str>,
+        panes: Vec<Viewport>,
+    ) -> Vec<Viewport> {
+        let (events, view) = {
             let mut g = self.lock();
-            let focus = match g.clients.get_mut(&client) {
+            let mut seen: Vec<String> = Vec::new();
+            let view: Vec<Viewport> = panes
+                .into_iter()
+                .filter(|v| g.panes.iter().any(|p| p.id == v.pane))
+                .filter(|v| {
+                    let new = !seen.contains(&v.pane);
+                    seen.push(v.pane.clone());
+                    new
+                })
+                .collect();
+            let focus = focus
+                .filter(|f| view.iter().any(|v| v.pane == *f))
+                .map(str::to_string)
+                .or_else(|| view.first().map(|v| v.pane.clone()));
+            if focus.is_some() {
+                g.last_focus = focus.clone();
+            }
+            let Some(c) = g.clients.get_mut(&client) else {
+                return Vec::new();
+            };
+            c.focus = focus;
+            c.view = view.clone();
+            g.refresh_focus_flags();
+            let ids: Vec<&str> = view.iter().map(|v| v.pane.as_str()).collect();
+            (Self::touch_and_fit(&mut g, client, &ids), view)
+        };
+        self.emit_all(events);
+        self.tick();
+        view
+    }
+
+    /// The client's layout as the server has it.
+    pub fn view_of(&self, client: ClientId) -> (Option<PaneId>, Vec<Viewport>) {
+        let g = self.lock();
+        g.clients
+            .get(&client)
+            .map(|c| (c.focus.clone(), c.view.clone()))
+            .unwrap_or_default()
+    }
+
+    /// The client's whole pane area changed size. A single pane fills it;
+    /// with several, the client follows up with a new `View`.
+    pub fn resize_client(&self, client: ClientId, cols: u16, rows: u16) {
+        let events = {
+            let mut g = self.lock();
+            let single = match g.clients.get_mut(&client) {
                 Some(c) => {
                     c.size = Some((cols, rows));
-                    c.focus.clone()
+                    match c.view.as_mut_slice() {
+                        [only] => {
+                            (only.cols, only.rows) = (cols, rows);
+                            Some(only.pane.clone())
+                        }
+                        _ => None,
+                    }
                 }
                 None => return,
             };
-            Self::touch_and_fit(&mut g, client, focus.as_deref())
+            Self::touch_and_fit(
+                &mut g,
+                client,
+                &single.as_deref().into_iter().collect::<Vec<_>>(),
+            )
         };
-        if let Some(ev) = ev {
-            self.emit(ev);
-        }
+        self.emit_all(events);
     }
 
     /// Keyboard input from an attached client.
     pub fn input(&self, client: ClientId, pane: &str, bytes: Vec<u8>) -> Result<()> {
-        let ev = {
+        let events = {
             let mut g = self.lock();
-            let ev = Self::touch_and_fit(&mut g, client, Some(pane));
+            let events = Self::touch_and_fit(&mut g, client, &[pane]);
             let p = g.pane(pane)?;
             p.detector.on_input(Instant::now());
             p.write(bytes);
-            ev
+            events
         };
-        if let Some(ev) = ev {
-            self.emit(ev);
-        }
+        self.emit_all(events);
         Ok(())
     }
 
@@ -417,9 +531,10 @@ impl Hub {
             let mut g = self.lock();
             let id = format!("p{}", g.next_pane);
             g.next_pane += 1;
+            // A focused new pane takes the place of the client's focused one.
             let size = client
                 .and_then(|c| g.clients.get(&c))
-                .and_then(|c| c.size)
+                .and_then(|c| c.focus.as_deref().and_then(|f| c.size_for(f)).or(c.size))
                 .or(g.last_size)
                 .unwrap_or(DEFAULT_SIZE);
             (id, size)
@@ -564,6 +679,7 @@ impl Hub {
                 g.last_focus = None;
             }
             for c in g.clients.values_mut() {
+                c.view.retain(|v| v.pane != id);
                 if c.focus.as_deref() == Some(id) {
                     c.focus = None;
                 }
@@ -685,7 +801,7 @@ impl Hub {
         let mut notes = Vec::new();
         {
             let mut g = self.lock();
-            let focus: Vec<bool> = g.panes.iter().map(|p| g.focused_by_anyone(&p.id)).collect();
+            let focus: Vec<bool> = g.panes.iter().map(|p| g.shown_to_anyone(&p.id)).collect();
             for (p, focused) in g.panes.iter_mut().zip(focus) {
                 if p.dirty {
                     p.dirty = false;

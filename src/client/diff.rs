@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use super::input::Key;
 use super::sidebar::truncate;
+use super::theme;
 use super::ui::TextInput;
 use crate::protocol::{DiffReport, FileDiff, PaneId};
 
@@ -163,23 +164,25 @@ impl DiffView {
 }
 
 fn status_style(status: &str) -> (Color, &'static str) {
+    let t = theme::get();
     match status {
-        "A" => (Color::Green, "added"),
-        "D" => (Color::Red, "deleted"),
-        "?" => (Color::Green, "new, untracked"),
-        _ => (Color::Yellow, "modified"),
+        "A" => (t.added, "added"),
+        "D" => (t.removed, "deleted"),
+        "?" => (t.added, "new, untracked"),
+        _ => (t.accent, "modified"),
     }
 }
 
 fn patch_line(line: &str) -> Line<'static> {
+    let t = theme::get();
     let style = if line.starts_with("@@") {
-        Style::new().fg(Color::Cyan)
+        t.fg(t.working)
     } else if line.starts_with('+') {
-        Style::new().fg(Color::Green)
+        t.fg(t.added)
     } else if line.starts_with('-') {
-        Style::new().fg(Color::Red)
+        t.fg(t.removed)
     } else if line.starts_with('\\') || line.starts_with('…') {
-        Style::new().fg(Color::DarkGray)
+        theme::get().muted()
     } else {
         Style::new()
     };
@@ -190,13 +193,10 @@ fn hint(keys: &[(&str, &str)]) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
     for (i, (k, what)) in keys.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" · ", Style::new().fg(Color::DarkGray)));
+            spans.push(Span::styled("  ", theme::get().muted()));
         }
-        spans.push(Span::styled(k.to_string(), Style::new().fg(Color::Cyan)));
-        spans.push(Span::styled(
-            format!(" {what}"),
-            Style::new().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled(k.to_string(), theme::get().key()));
+        spans.push(Span::styled(format!(" {what}"), theme::get().muted()));
     }
     Line::from(spans)
 }
@@ -206,7 +206,7 @@ pub fn draw(f: &mut Frame, v: &mut DiffView, area: Rect) {
     let Some(report) = v.report.clone() else {
         let msg = if v.busy { "loading diff…" } else { "no diff" };
         f.render_widget(
-            Paragraph::new(Line::styled(msg, Style::new().fg(Color::DarkGray)))
+            Paragraph::new(Line::styled(msg, theme::get().muted()))
                 .block(frame_block(&v.name, None)),
             area,
         );
@@ -232,7 +232,7 @@ pub fn draw(f: &mut Frame, v: &mut DiffView, area: Rect) {
                 },
                 report.uncommitted
             ),
-            Style::new().fg(Color::DarkGray),
+            theme::get().muted(),
         )])
         .right_aligned(),
     );
@@ -253,7 +253,7 @@ pub fn draw(f: &mut Frame, v: &mut DiffView, area: Rect) {
                         "  No changes on {} compared with {}.",
                         report.branch, report.base
                     ),
-                    Style::new().fg(Color::DarkGray),
+                    theme::get().muted(),
                 ),
             ]),
             body,
@@ -271,7 +271,7 @@ pub fn draw(f: &mut Frame, v: &mut DiffView, area: Rect) {
         f.render_widget(
             Block::new()
                 .borders(Borders::LEFT)
-                .border_style(Style::new().fg(Color::DarkGray)),
+                .border_style(theme::get().muted()),
             sep,
         );
 
@@ -296,9 +296,7 @@ pub fn draw(f: &mut Frame, v: &mut DiffView, area: Rect) {
             let pad = (list_w as usize).saturating_sub(2 + name.chars().count() + 1 + counts.len());
             let sel = i == v.file;
             let row_style = if sel {
-                Style::new()
-                    .bg(Color::Indexed(237))
-                    .add_modifier(Modifier::BOLD)
+                theme::get().selected().add_modifier(Modifier::BOLD)
             } else {
                 Style::new()
             };
@@ -307,7 +305,7 @@ pub fn draw(f: &mut Frame, v: &mut DiffView, area: Rect) {
                     Span::styled(format!("{} ", file.status), Style::new().fg(color)),
                     Span::raw(name),
                     Span::raw(" ".repeat(pad + 1)),
-                    Span::styled(counts, Style::new().fg(Color::DarkGray)),
+                    Span::styled(counts, theme::get().muted()),
                 ])
                 .style(row_style),
             );
@@ -328,10 +326,7 @@ pub fn draw(f: &mut Frame, v: &mut DiffView, area: Rect) {
                 Line::default(),
             ];
             if file.binary {
-                lines.push(Line::styled(
-                    "binary file",
-                    Style::new().fg(Color::DarkGray),
-                ));
+                lines.push(Line::styled("binary file", theme::get().muted()));
             } else {
                 lines.extend(file.patch.lines().skip(v.scroll).map(patch_line));
             }
@@ -386,10 +381,7 @@ fn frame_block(name: &str, report: Option<&DiffReport>) -> Block<'static> {
     let mut title = vec![
         Span::styled(
             " diff ",
-            Style::new()
-                .fg(Color::Black)
-                .bg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
+            theme::get().on_accent_style().add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(name.to_string(), Style::new().add_modifier(Modifier::BOLD)),
@@ -397,13 +389,13 @@ fn frame_block(name: &str, report: Option<&DiffReport>) -> Block<'static> {
     if let Some(r) = report {
         title.push(Span::styled(
             format!("  ⎇ {} → {} ", r.branch, r.base),
-            Style::new().fg(Color::Magenta),
+            theme::get().fg(theme::get().git),
         ));
     }
     Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Color::Magenta))
+        .border_style(theme::get().fg(theme::get().git))
         .title(Line::from(title))
 }
 
@@ -440,7 +432,7 @@ fn draw_prompt(f: &mut Frame, p: &Prompt, report: &DiffReport, area: Rect) {
                 )),
                 Line::styled(
                     "Uses a merge commit; refuses (and changes nothing) on conflicts.",
-                    Style::new().fg(Color::DarkGray),
+                    theme::get().muted(),
                 ),
             ],
             None,
@@ -458,11 +450,11 @@ fn draw_prompt(f: &mut Frame, p: &Prompt, report: &DiffReport, area: Rect) {
                             "changes"
                         }
                     ),
-                    Style::new().fg(Color::Red),
+                    theme::get().fg(theme::get().error),
                 ),
                 Line::styled(
                     "This can't be undone. Committed work is kept.",
-                    Style::new().fg(Color::DarkGray),
+                    theme::get().muted(),
                 ),
             ],
             None,
@@ -483,7 +475,7 @@ fn draw_prompt(f: &mut Frame, p: &Prompt, report: &DiffReport, area: Rect) {
             Block::new()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::new().fg(Color::Magenta))
+                .border_style(theme::get().fg(theme::get().git))
                 .title(format!(" {title} ")),
         ),
         r,

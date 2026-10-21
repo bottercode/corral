@@ -2,13 +2,16 @@
 //!
 //! Stdin goes to the terminal in raw mode and is forwarded byte-for-byte to
 //! the focused pane, except for the prefix key, mouse events and corral's
-//! dialogs. The focused pane is mirrored locally in a vt100 parser (snapshot
-//! plus live output) and drawn with tui-term next to the sidebar.
+//! dialogs. Up to four panes are on screen at once, tiled next to the
+//! sidebar; each is mirrored locally in a vt100 parser (snapshot plus live
+//! output) and drawn with tui-term. The layout is the client's: it tells the
+//! server which panes it shows, at what size, with `View`.
 
 pub mod conn;
 pub mod diff;
 pub mod input;
 pub mod sidebar;
+pub mod theme;
 pub mod ui;
 
 use std::collections::HashMap;
@@ -26,7 +29,7 @@ use tokio::sync::mpsc;
 use crate::config::{Config, prefix_label};
 use crate::paths;
 use crate::protocol::{
-    self, AgentState, ClientMsg, Command, NewPane, PaneId, PaneInfo, Reply, ServerMsg,
+    self, AgentState, ClientMsg, Command, NewPane, PaneId, PaneInfo, Reply, ServerMsg, Viewport,
     WorktreeAction,
 };
 use conn::Conn;
@@ -36,6 +39,8 @@ use ui::{CloseStep, NewDialog, TextInput};
 
 const STATUS_FOR: Duration = Duration::from_secs(6);
 const WHEEL_LINES: usize = 3;
+/// Most panes on screen at once.
+pub const MAX_TILES: usize = 4;
 
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -79,9 +84,17 @@ pub struct App {
     pub panes: Vec<PaneInfo>,
     /// When `panes` arrived (their `state_secs` count from then).
     pub state_at: Instant,
+    /// The pane with the keyboard; always one of `tiles`.
     pub focus: Option<PaneId>,
-    pub parser: Option<vt100::Parser>,
-    parser_pane: Option<PaneId>,
+    /// Panes on screen, in layout order.
+    pub tiles: Vec<PaneId>,
+    /// The layout before `^b o` kept only the focused pane.
+    others: Vec<PaneId>,
+    /// Local copies of the panes on screen.
+    pub screens: HashMap<PaneId, vt100::Parser>,
+    /// Generation of the last `View` sent, and what it said.
+    view_generation: u64,
+    sent_view: Option<(Option<PaneId>, Vec<Viewport>)>,
     pub mode: Mode,
     status: Option<(String, Instant, bool)>,
     pub prefix_label: String,
@@ -115,8 +128,11 @@ impl App {
             panes: Vec::new(),
             state_at: Instant::now(),
             focus: None,
-            parser: None,
-            parser_pane: None,
+            tiles: Vec::new(),
+            others: Vec::new(),
+            screens: HashMap::new(),
+            view_generation: 0,
+            sent_view: None,
             mode: Mode::Normal,
             status: None,
             prefix_label: prefix_label(prefix),
@@ -172,16 +188,164 @@ impl App {
             .collect()
     }
 
-    fn set_focus(&mut self, pane: PaneId) {
-        if self.focus.as_ref() != Some(&pane) {
-            self.outbox.push(ClientMsg::Focus {
-                pane: Some(pane.clone()),
-            });
-            self.focus = Some(pane);
+    /// The focused pane's local screen.
+    pub fn screen(&self) -> Option<&vt100::Parser> {
+        self.screens.get(self.focus.as_ref()?)
+    }
+
+    fn screen_mut(&mut self) -> Option<&mut vt100::Parser> {
+        self.screens.get_mut(self.focus.as_ref()?)
+    }
+
+    /// Show `pane` with the keyboard. A pane already on screen just gets
+    /// the focus; otherwise it takes the focused tile's place. The server
+    /// makes the same substitution when it moves the focus itself.
+    fn show(&mut self, pane: Option<PaneId>) {
+        match pane {
+            None => self.tiles.clear(),
+            Some(ref p) if self.tiles.contains(p) => {}
+            Some(ref p) => match self
+                .focus
+                .as_ref()
+                .and_then(|f| self.tiles.iter().position(|t| t == f))
+            {
+                Some(i) => self.tiles[i] = p.clone(),
+                None => self.tiles = vec![p.clone()],
+            },
         }
+        self.focus = pane;
+    }
+
+    fn set_focus(&mut self, pane: PaneId) {
+        self.show(Some(pane));
         if matches!(self.mode, Mode::Scroll { .. }) {
             self.mode = Mode::Normal;
         }
+    }
+
+    /// The tiles' areas: `(pane, whole tile, terminal part)`.
+    pub fn tile_rects(&self) -> Vec<(PaneId, Rect, Rect)> {
+        let n = self.tiles.len();
+        ui::tiles(self.pane_area, n)
+            .into_iter()
+            .zip(&self.tiles)
+            .map(|(r, id)| (id.clone(), r, ui::tile_body(r, n)))
+            .collect()
+    }
+
+    /// Tell the server about layout changes (new panes on screen, sizes,
+    /// focus). Called after every input and server message.
+    pub fn sync_view(&mut self) {
+        if !self.seen_state || self.pane_area.is_empty() {
+            return;
+        }
+        let view: Vec<Viewport> = self
+            .tile_rects()
+            .into_iter()
+            .map(|(pane, _, body)| Viewport {
+                pane,
+                cols: body.width.max(2),
+                rows: body.height.max(1),
+            })
+            .collect();
+        let now = (self.focus.clone(), view);
+        if self.sent_view.as_ref() == Some(&now) {
+            return;
+        }
+        self.view_generation += 1;
+        self.outbox.push(ClientMsg::View {
+            generation: self.view_generation,
+            focus: now.0.clone(),
+            panes: now.1.clone(),
+        });
+        self.sent_view = Some(now);
+    }
+
+    /// `^b s`: show another agent next to the ones on screen, preferring
+    /// the ones that need you.
+    fn split(&mut self) {
+        if self.tiles.len() >= MAX_TILES {
+            self.set_status(format!("up to {MAX_TILES} agents fit side by side"), false);
+            return;
+        }
+        let next = self.order().into_iter().find(|id| !self.tiles.contains(id));
+        let Some(next) = next else {
+            self.set_status(
+                format!(
+                    "every agent is on screen; start another with {} n",
+                    self.prefix_label
+                ),
+                false,
+            );
+            return;
+        };
+        let at = self
+            .focus
+            .as_ref()
+            .and_then(|f| self.tiles.iter().position(|t| t == f))
+            .map_or(self.tiles.len(), |i| i + 1);
+        self.tiles.insert(at, next.clone());
+        self.others.clear();
+        self.set_focus(next);
+    }
+
+    /// `^b S`: take the focused pane off screen (the agent keeps running).
+    fn hide(&mut self) {
+        if self.tiles.len() < 2 {
+            self.set_status("this is the only pane on screen", false);
+            return;
+        }
+        let Some(i) = self
+            .focus
+            .as_ref()
+            .and_then(|f| self.tiles.iter().position(|t| t == f))
+        else {
+            return;
+        };
+        self.tiles.remove(i);
+        self.screens.retain(|id, _| self.tiles.contains(id));
+        let next = self.tiles[i.min(self.tiles.len() - 1)].clone();
+        self.set_focus(next);
+    }
+
+    /// `^b o`: only the focused pane on screen; again to bring the others
+    /// back.
+    fn only(&mut self) {
+        if self.tiles.len() > 1 {
+            self.others = std::mem::take(&mut self.tiles);
+            self.tiles = self.focus.clone().into_iter().collect();
+            self.screens.retain(|id, _| self.tiles.contains(id));
+        } else if !self.others.is_empty() {
+            let mut back = std::mem::take(&mut self.others);
+            back.retain(|id| self.panes.iter().any(|p| &p.id == id));
+            if let Some(f) = &self.focus
+                && !back.contains(f)
+            {
+                back.insert(0, f.clone());
+            }
+            back.truncate(MAX_TILES);
+            self.tiles = back;
+        } else {
+            self.set_status(
+                format!("one pane on screen; {} s shows another", self.prefix_label),
+                false,
+            );
+        }
+    }
+
+    /// `^b h` / `^b l` / `^b Tab`: move the keyboard between tiles.
+    fn cycle_tile(&mut self, delta: isize) {
+        let n = self.tiles.len();
+        if n < 2 {
+            return;
+        }
+        let cur = self
+            .focus
+            .as_ref()
+            .and_then(|f| self.tiles.iter().position(|t| t == f))
+            .unwrap_or(0) as isize;
+        let next = self.tiles[(cur + delta).rem_euclid(n as isize) as usize].clone();
+        self.set_focus(next);
     }
 
     fn cycle_focus(&mut self, delta: isize) {
@@ -341,7 +505,7 @@ impl App {
         let Some(pane) = self.focus.clone() else {
             return;
         };
-        let (bp, app_cursor) = self.parser.as_ref().map_or((false, false), |p| {
+        let (bp, app_cursor) = self.screen().map_or((false, false), |p| {
             let s = p.screen();
             (s.bracketed_paste(), s.application_cursor())
         });
@@ -359,11 +523,17 @@ impl App {
             Key::Char('k') | Key::Up => self.cycle_focus(-1),
             Key::Char(c @ '1'..='9') => {
                 let i = c as usize - '1' as usize;
-                if let Some(id) = self.order().get(i).cloned() {
+                if let Some(p) = self.panes.get(i) {
+                    let id = p.id.clone();
                     self.set_focus(id);
                 }
             }
             Key::Char('b') => self.focus_next_blocked(),
+            Key::Char('s') => self.split(),
+            Key::Char('S') => self.hide(),
+            Key::Char('o') => self.only(),
+            Key::Char('h') | Key::Left | Key::BackTab => self.cycle_tile(-1),
+            Key::Char('l') | Key::Right | Key::Tab => self.cycle_tile(1),
             Key::Char('x') => self.open_close(),
             Key::Char('r') => {
                 if let Some(p) = self.focused() {
@@ -383,7 +553,7 @@ impl App {
     }
 
     fn scroll_limit(&mut self) -> usize {
-        let Some(p) = self.parser.as_mut() else {
+        let Some(p) = self.screen_mut() else {
             return 0;
         };
         let s = p.screen_mut();
@@ -397,7 +567,7 @@ impl App {
 
     fn enter_scroll(&mut self, offset: usize) {
         let max = self.scroll_limit();
-        if max == 0 && offset == 0 && self.parser.is_some() {
+        if max == 0 && offset == 0 && self.screen().is_some() {
             self.set_status("no scrollback in this pane", false);
             return;
         }
@@ -434,8 +604,27 @@ impl App {
         }
     }
 
+    /// The pane drawn at a screen position.
+    fn tile_at(&self, x: u16, y: u16) -> Option<PaneId> {
+        self.tile_rects()
+            .into_iter()
+            .find(|(_, r, _)| r.contains((x, y).into()))
+            .map(|(id, ..)| id)
+    }
+
     fn on_mouse(&mut self, m: Mouse) {
         let in_sidebar = m.x < self.sidebar_area.x + self.sidebar_area.width;
+        // Clicking or scrolling over another tile moves the keyboard there.
+        if !in_sidebar
+            && matches!(
+                m.kind,
+                MouseKind::LeftDown | MouseKind::WheelUp | MouseKind::WheelDown
+            )
+            && let Some(id) = self.tile_at(m.x, m.y)
+            && self.focus.as_ref() != Some(&id)
+        {
+            self.set_focus(id);
+        }
         match m.kind {
             MouseKind::LeftDown if in_sidebar => {
                 let click = self
@@ -629,19 +818,30 @@ impl App {
                 }
             }
         }
+        self.sync_view();
     }
 
     pub fn on_server(&mut self, msg: ServerMsg) {
         self.dirty = true;
         match msg {
-            ServerMsg::State { panes, focus } => {
+            ServerMsg::State {
+                panes,
+                focus,
+                view_generation,
+            } => {
                 self.panes = panes;
                 self.state_at = Instant::now();
-                if focus.is_none() {
-                    self.parser = None;
-                    self.parser_pane = None;
+                let exists = |id: &PaneId| self.panes.iter().any(|p| &p.id == id);
+                self.tiles.retain(|id| exists(id));
+                if view_generation == self.view_generation {
+                    // The server has seen our latest layout, so its focus is
+                    // current (it may have moved it: a new or closed pane).
+                    self.show(focus);
+                } else if self.focus.as_ref().is_none_or(|f| !self.tiles.contains(f)) {
+                    // Stale; the server will catch up with what we sent.
+                    self.focus = self.tiles.first().cloned();
                 }
-                self.focus = focus;
+                self.screens.retain(|id, _| self.tiles.contains(id));
                 if !self.seen_state {
                     self.seen_state = true;
                     if self.panes.is_empty() {
@@ -658,16 +858,13 @@ impl App {
             } => {
                 let mut p = vt100::Parser::new(rows, cols, crate::server::pane::SCROLLBACK);
                 p.process(&bytes);
-                self.parser = Some(p);
-                self.parser_pane = Some(pane);
-                if matches!(self.mode, Mode::Scroll { .. }) {
+                if self.focus.as_ref() == Some(&pane) && matches!(self.mode, Mode::Scroll { .. }) {
                     self.mode = Mode::Normal;
                 }
+                self.screens.insert(pane, p);
             }
             ServerMsg::Output { pane, bytes, .. } => {
-                if self.parser_pane.as_ref() == Some(&pane)
-                    && let Some(p) = self.parser.as_mut()
-                {
+                if let Some(p) = self.screens.get_mut(&pane) {
                     p.process(&bytes);
                 }
             }
@@ -690,6 +887,7 @@ impl App {
             }
             ServerMsg::Hello { .. } => {}
         }
+        self.sync_view();
     }
 
     fn on_reply(&mut self, kind: Pending, result: Result<Reply, String>) {
@@ -807,10 +1005,14 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn pane_size(app: &App) -> Result<(u16, u16)> {
+/// Lay out the screen for the terminal's current size; returns the size of
+/// the area for panes.
+fn fit_terminal(app: &mut App) -> Result<(u16, u16)> {
     let (w, h) = crossterm::terminal::size()?;
-    let a = ui::layout(Rect::new(0, 0, w, h), app.sidebar_width).pane;
-    Ok((a.width.max(2), a.height.max(1)))
+    let areas = ui::layout(Rect::new(0, 0, w, h), app.sidebar_width);
+    app.sidebar_area = areas.sidebar;
+    app.pane_area = areas.pane;
+    Ok((areas.pane.width.max(2), areas.pane.height.max(1)))
 }
 
 pub async fn run(workspace: Option<String>) -> Result<()> {
@@ -826,6 +1028,7 @@ pub async fn run(workspace: Option<String>) -> Result<()> {
         );
     }
     let config = Config::load()?;
+    theme::set(theme::by_name(&config.theme)?);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let mut app = App::new(&config, cwd)?;
     let conn = Conn::connect_or_start(&paths::socket_path()).await?;
@@ -870,7 +1073,7 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
         })?;
 
     let (mut sink, mut stream) = conn.transport.split();
-    let mut size = pane_size(app)?;
+    let mut size = fit_terminal(app)?;
     let attach = ClientMsg::Attach {
         cols: size.0,
         rows: size.1,
@@ -909,10 +1112,11 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
             },
             _ = winch.recv() => {
                 app.dirty = true;
-                let new = pane_size(app)?;
+                let new = fit_terminal(app)?;
                 if new != size {
                     size = new;
                     app.outbox.push(ClientMsg::Resize { cols: size.0, rows: size.1 });
+                    app.sync_view();
                 }
             }
             _ = redraw.tick() => {
@@ -965,6 +1169,8 @@ mod tests {
 
     fn app() -> App {
         let mut a = App::new(&Config::default(), "/tmp".into()).unwrap();
+        a.sidebar_area = Rect::new(0, 0, 30, 39);
+        a.pane_area = Rect::new(30, 0, 121, 39);
         a.on_server(ServerMsg::State {
             panes: vec![
                 pane("p1", AgentState::Idle),
@@ -972,15 +1178,44 @@ mod tests {
                 pane("p3", AgentState::Working),
             ],
             focus: Some("p1".into()),
+            view_generation: 0,
         });
         a.on_server(ServerMsg::Screen {
             pane: "p1".into(),
-            cols: 80,
-            rows: 24,
+            cols: 121,
+            rows: 39,
             seq: 0,
             bytes: vec![],
         });
+        // The first layout went out once the state arrived.
+        assert!(matches!(
+            a.outbox[..],
+            [ClientMsg::View { generation: 1, .. }]
+        ));
+        a.outbox.clear();
         a
+    }
+
+    /// The layout in the last `View` sent: focus, then `(pane, cols, rows)`.
+    fn sent_view(a: &App) -> (Option<String>, Vec<(String, u16, u16)>) {
+        a.outbox
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                ClientMsg::View { focus, panes, .. } => Some((
+                    focus.clone(),
+                    panes
+                        .iter()
+                        .map(|v| (v.pane.clone(), v.cols, v.rows))
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no View in {:?}", a.outbox))
+    }
+
+    fn sent_focus(a: &App) -> String {
+        sent_view(a).0.unwrap()
     }
 
     #[test]
@@ -999,31 +1234,19 @@ mod tests {
     #[test]
     fn prefix_commands() {
         let mut a = app();
+        // Sidebar order is blocked p2, working p3, idle p1: after p1 comes p2.
         a.on_stdin(b"\x02j");
-        assert_eq!(
-            a.outbox,
-            vec![ClientMsg::Focus {
-                pane: Some("p2".into())
-            }]
-        );
+        assert_eq!(sent_focus(&a), "p2");
         a.outbox.clear();
         a.on_stdin(b"\x023");
-        assert_eq!(
-            a.outbox,
-            vec![ClientMsg::Focus {
-                pane: Some("p3".into())
-            }]
-        );
+        assert_eq!(sent_focus(&a), "p3");
         a.outbox.clear();
         // Prefix split from its key across reads.
         a.on_stdin(b"\x02");
         a.on_stdin(b"b");
-        assert_eq!(
-            a.outbox,
-            vec![ClientMsg::Focus {
-                pane: Some("p2".into())
-            }]
-        );
+        assert_eq!(sent_focus(&a), "p2");
+        // One pane on screen, so switching replaces it.
+        assert_eq!(a.tiles, vec!["p2"]);
         a.outbox.clear();
         // Prefix twice sends a literal prefix byte.
         a.on_stdin(b"\x02\x02");
@@ -1108,6 +1331,7 @@ mod tests {
         a.on_server(ServerMsg::State {
             panes,
             focus: Some("p1".into()),
+            view_generation: a.view_generation,
         });
         a.on_stdin(b"\x02D");
         assert!(matches!(a.mode, Mode::Diff(_)));
@@ -1162,6 +1386,7 @@ mod tests {
         a.on_server(ServerMsg::State {
             panes: vec![],
             focus: None,
+            view_generation: 0,
         });
         assert!(matches!(a.mode, Mode::New(_)));
     }
@@ -1233,11 +1458,114 @@ mod tests {
         };
         a.hits = vec![row(3, "p1"), row(4, "p3")];
         a.on_stdin(b"\x1b[<0;5;5M");
-        assert_eq!(
-            a.outbox,
-            vec![ClientMsg::Focus {
-                pane: Some("p3".into())
-            }]
-        );
+        assert_eq!(sent_focus(&a), "p3");
+    }
+
+    #[test]
+    fn split_shows_agents_side_by_side() {
+        let mut a = app();
+        // ^b s brings in the agent that needs you most: blocked p2.
+        a.on_stdin(b"\x02s");
+        assert_eq!(a.tiles, vec!["p1", "p2"]);
+        let (focus, view) = sent_view(&a);
+        assert_eq!(focus.as_deref(), Some("p2"));
+        // Two columns with a divider; each tile loses a row to its header.
+        assert_eq!(view, vec![("p1".into(), 60, 38), ("p2".into(), 60, 38)]);
+
+        // Picking an agent in the sidebar swaps it into the focused tile.
+        a.outbox.clear();
+        a.on_stdin(b"\x023");
+        assert_eq!(a.tiles, vec!["p1", "p3"]);
+        assert_eq!(sent_focus(&a), "p3");
+        // An agent already on screen just gets the keyboard.
+        a.on_stdin(b"\x021");
+        assert_eq!(a.tiles, vec!["p1", "p3"]);
+        assert_eq!(sent_focus(&a), "p1");
+        a.on_stdin(b"\x02l");
+        assert_eq!(a.focus.as_deref(), Some("p3"));
+
+        // Clicking a tile focuses it; the click doesn't reach the agent.
+        a.outbox.clear();
+        a.on_stdin(b"\x1b[<0;35;10M\x1b[<0;35;10m");
+        assert_eq!(a.focus.as_deref(), Some("p1"));
+        assert!(a.outbox.iter().all(|m| matches!(m, ClientMsg::View { .. })));
+
+        // ^b o keeps only the focused one, and brings the others back.
+        a.on_stdin(b"\x02o");
+        assert_eq!(a.tiles, vec!["p1"]);
+        assert_eq!(sent_view(&a).1, vec![("p1".into(), 121, 39)]);
+        a.on_stdin(b"\x02o");
+        assert_eq!(a.tiles, vec!["p1", "p3"]);
+        // ^b S takes the focused one off screen.
+        a.on_stdin(b"\x02S");
+        assert_eq!(a.tiles, vec!["p3"]);
+        assert_eq!(a.focus.as_deref(), Some("p3"));
+    }
+
+    #[test]
+    fn at_most_four_tiles() {
+        let mut a = app();
+        let mut panes = a.panes.clone();
+        for i in 4..=6 {
+            panes.push(pane(&format!("p{i}"), AgentState::Idle));
+        }
+        a.on_server(ServerMsg::State {
+            panes,
+            focus: Some("p1".into()),
+            view_generation: a.view_generation,
+        });
+        for _ in 0..5 {
+            a.on_stdin(b"\x02s");
+        }
+        assert_eq!(a.tiles.len(), MAX_TILES);
+        assert!(a.status().unwrap().0.contains("up to 4"));
+        // A 2×2 grid.
+        let rects: Vec<Rect> = a.tile_rects().into_iter().map(|(_, r, _)| r).collect();
+        assert_eq!(rects[0].y, rects[1].y);
+        assert_eq!(rects[0].x, rects[2].x);
+        assert!(rects[2].y > rects[0].y);
+    }
+
+    #[test]
+    fn stale_server_focus_is_ignored() {
+        let mut a = app();
+        a.on_stdin(b"\x02s");
+        let generation = a.view_generation;
+        // State sent before the server saw our layout still names p1.
+        a.on_server(ServerMsg::State {
+            panes: a.panes.clone(),
+            focus: Some("p1".into()),
+            view_generation: generation - 1,
+        });
+        assert_eq!(a.focus.as_deref(), Some("p2"));
+        assert_eq!(a.tiles, vec!["p1", "p2"]);
+        // Once it has, the server's focus counts: here it moved the
+        // keyboard to a new agent, which takes the focused tile.
+        let mut panes = a.panes.clone();
+        panes.push(pane("p4", AgentState::Working));
+        a.on_server(ServerMsg::State {
+            panes,
+            focus: Some("p4".into()),
+            view_generation: generation,
+        });
+        assert_eq!(a.tiles, vec!["p1", "p4"]);
+        assert_eq!(a.focus.as_deref(), Some("p4"));
+    }
+
+    #[test]
+    fn closed_agents_leave_the_screen() {
+        let mut a = app();
+        a.on_stdin(b"\x02s");
+        a.outbox.clear();
+        // p2 (focused) closed; the server moved the keyboard to p1.
+        let panes: Vec<PaneInfo> = a.panes.iter().filter(|p| p.id != "p2").cloned().collect();
+        a.on_server(ServerMsg::State {
+            panes,
+            focus: Some("p1".into()),
+            view_generation: a.view_generation,
+        });
+        assert_eq!(a.tiles, vec!["p1"]);
+        // p1 grows back to the whole area.
+        assert_eq!(sent_view(&a).1, vec![("p1".into(), 121, 39)]);
     }
 }

@@ -4,19 +4,21 @@ use std::path::Path;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use tui_term::widget::{Cursor, PseudoTerminal};
 use unicode_width::UnicodeWidthStr;
 
 use super::input::Key;
-use super::sidebar::{Sidebar, truncate};
-use super::{App, Mode, diff};
+use super::sidebar::{Sidebar, badge, clean_title, truncate};
+use super::{App, Mode, diff, theme};
 use crate::protocol::{AgentState, PaneInfo, WorktreeAction};
 
 /// Below this width the sidebar is hidden.
 const MIN_WIDTH_FOR_SIDEBAR: u16 = 60;
+/// Narrowest a tile gets before tiles stack instead of sitting side by side.
+const MIN_TILE_WIDTH: u16 = 40;
 
 pub struct Areas {
     pub sidebar: Rect,
@@ -36,6 +38,54 @@ pub fn layout(area: Rect, sidebar_width: u16) -> Areas {
         sidebar: Rect::new(area.x, area.y, sw, body_h),
         pane: Rect::new(area.x + sw, area.y, area.width - sw, body_h),
         hint: Rect::new(area.x, area.y + body_h, area.width, hint_h),
+    }
+}
+
+/// Areas for `n` tiles in `area`. One fills it; two sit side by side; three
+/// are one tall tile and two stacked; four make a grid. When side by side
+/// would be too narrow, tiles stack. Side-by-side tiles leave a one-column
+/// gap for a divider.
+pub fn tiles(area: Rect, n: usize) -> Vec<Rect> {
+    let stack = |area: Rect, n: usize| -> Vec<Rect> {
+        let n = n as u16;
+        (0..n)
+            .map(|i| {
+                let y0 = area.y + area.height * i / n;
+                let y1 = area.y + area.height * (i + 1) / n;
+                Rect::new(area.x, y0, area.width, y1 - y0)
+            })
+            .collect()
+    };
+    if n <= 1 {
+        return if n == 1 { vec![area] } else { Vec::new() };
+    }
+    if area.width < MIN_TILE_WIDTH * 2 + 1 {
+        return stack(area, n);
+    }
+    let left_w = (area.width - 1) / 2;
+    let left = Rect::new(area.x, area.y, left_w, area.height);
+    let right = Rect::new(
+        area.x + left_w + 1,
+        area.y,
+        area.width - left_w - 1,
+        area.height,
+    );
+    match n {
+        2 => vec![left, right],
+        3 => [vec![left], stack(right, 2)].concat(),
+        _ => {
+            let (l, r) = (stack(left, 2), stack(right, 2));
+            vec![l[0], r[0], l[1], r[1]]
+        }
+    }
+}
+
+/// The terminal part of a tile: all of it when alone, else below a header.
+pub fn tile_body(tile: Rect, n: usize) -> Rect {
+    if n > 1 && tile.height > 1 {
+        Rect::new(tile.x, tile.y + 1, tile.width, tile.height - 1)
+    } else {
+        tile
     }
 }
 
@@ -123,7 +173,7 @@ impl TextInput {
             return (
                 vec![Span::styled(
                     truncate(placeholder, width),
-                    Style::new().fg(Color::DarkGray),
+                    theme::get().muted(),
                 )],
                 0,
             );
@@ -163,7 +213,7 @@ impl TextInput {
         if self.text.is_empty() {
             spans = vec![Span::styled(
                 truncate(placeholder, width),
-                Style::new().fg(Color::DarkGray),
+                theme::get().muted(),
             )];
         }
         (spans, cur)
@@ -273,27 +323,23 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn dialog_block(title: &str) -> Block<'static> {
+    let t = theme::get();
     Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Color::Cyan))
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::new().add_modifier(Modifier::BOLD),
-        ))
+        .border_style(t.accent())
+        .title(Span::styled(format!(" {title} "), t.bold()))
 }
 
 fn key_hint(keys: &[(&str, &str)]) -> Line<'static> {
+    let t = theme::get();
     let mut spans = Vec::new();
     for (i, (k, what)) in keys.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" · ", Style::new().fg(Color::DarkGray)));
+            spans.push(Span::styled("  ", t.muted()));
         }
-        spans.push(Span::styled(k.to_string(), Style::new().fg(Color::Cyan)));
-        spans.push(Span::styled(
-            format!(" {what}"),
-            Style::new().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled(k.to_string(), t.key()));
+        spans.push(Span::styled(format!(" {what}"), t.muted()));
     }
     Line::from(spans)
 }
@@ -304,9 +350,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.pane_area = areas.pane;
 
     if areas.sidebar.width > 0 {
+        let shown = app.tiles.clone();
         app.hits = Sidebar {
             panes: &app.panes,
             focus: app.focus.as_deref(),
+            shown: &shown,
             frame: app.frame,
             age_offset: app.state_at.elapsed(),
         }
@@ -327,7 +375,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         diff::draw(f, v, body);
         return;
     }
-    draw_pane(f, app, areas.pane);
+    draw_tiles(f, app, areas.pane);
 
     match &app.mode {
         Mode::Normal | Mode::Scroll { .. } | Mode::Diff(_) => {}
@@ -351,219 +399,291 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
-    let focused = app
-        .focus
-        .as_ref()
-        .and_then(|id| app.panes.iter().find(|p| &p.id == id))
-        .cloned();
+fn draw_empty(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::get();
+    let p = &app.prefix_label;
+    let text = if app.panes.is_empty() {
+        vec![
+            Line::styled("No agents yet.", t.bold()),
+            Line::default(),
+            Line::from(vec![
+                Span::raw("Press "),
+                Span::styled(format!("{p} n"), t.key()),
+                Span::raw(" to start one, "),
+                Span::styled(format!("{p} w"), t.key()),
+                Span::raw(" for one in its own git worktree (or click the buttons),"),
+            ]),
+            Line::from(vec![
+                Span::raw("or run "),
+                Span::styled("corral new -- claude", t.accent()),
+                Span::raw(" from any shell."),
+            ]),
+        ]
+    } else {
+        vec![Line::styled("…", t.muted())]
+    };
+    let h = text.len() as u16;
+    let r = Rect::new(
+        area.x,
+        area.y + area.height.saturating_sub(h) / 2,
+        area.width,
+        h.min(area.height),
+    );
+    f.render_widget(Paragraph::new(text).alignment(Alignment::Center), r);
+}
+
+fn draw_tiles(f: &mut Frame, app: &mut App, area: Rect) {
+    let t = theme::get();
+    let rects = app.tile_rects();
+    if rects.is_empty() {
+        if matches!(app.mode, Mode::Normal) {
+            draw_empty(f, app, area);
+        }
+        return;
+    }
+    // Dividers in the gaps between side-by-side tiles.
+    let buf = f.buffer_mut();
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            if !rects.iter().any(|(_, r, _)| r.contains((x, y).into())) {
+                buf[(x, y)].set_symbol("│").set_style(t.faint());
+            }
+        }
+    }
+    let n = rects.len();
     let scroll = match app.mode {
         Mode::Scroll { offset } => offset,
         _ => 0,
     };
-    let Some(parser) = app.parser.as_mut() else {
-        if !matches!(app.mode, Mode::Normal) {
-            return;
+    for (id, tile, body) in rects {
+        let focused = app.focus.as_ref() == Some(&id);
+        let info = app.panes.iter().find(|p| p.id == id).cloned();
+        if n > 1
+            && let Some(p) = &info
+        {
+            draw_tile_header(f, app, p, Rect::new(tile.x, tile.y, tile.width, 1), focused);
         }
-        let text = if app.panes.is_empty() {
-            vec![
-                Line::styled("No agents yet.", Style::new().add_modifier(Modifier::BOLD)),
-                Line::default(),
-                Line::from(vec![
-                    Span::raw("Press "),
-                    Span::styled(
-                        format!("{} n", app.prefix_label),
-                        Style::new().fg(Color::Cyan),
-                    ),
-                    Span::raw(" to start one, "),
-                    Span::styled(
-                        format!("{} w", app.prefix_label),
-                        Style::new().fg(Color::Cyan),
-                    ),
-                    Span::raw(" for one in its own git worktree (or click the buttons),"),
-                ]),
-                Line::from(vec![
-                    Span::raw("or run "),
-                    Span::styled("corral new -- claude", Style::new().fg(Color::Cyan)),
-                    Span::raw(" from any shell."),
-                ]),
-            ]
-        } else {
-            vec![Line::styled("…", Style::new().fg(Color::DarkGray))]
+        let Some(parser) = app.screens.get_mut(&id) else {
+            let r = Rect::new(body.x, body.y + body.height / 2, body.width, 1);
+            f.render_widget(
+                Paragraph::new(Line::styled("…", t.muted())).alignment(Alignment::Center),
+                r,
+            );
+            continue;
         };
-        let h = text.len() as u16;
-        let r = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(h) / 2,
-            area.width,
-            h.min(area.height),
-        );
-        f.render_widget(Paragraph::new(text).alignment(Alignment::Center), r);
-        return;
-    };
-
-    parser.screen_mut().set_scrollback(scroll);
-    let screen = parser.screen();
-    f.render_widget(
-        PseudoTerminal::new(screen).cursor(Cursor::default().visibility(false)),
-        area,
-    );
-    let (row, col) = screen.cursor_position();
-    if scroll == 0
-        && matches!(app.mode, Mode::Normal)
-        && !screen.hide_cursor()
-        && row < area.height
-        && col < area.width
-    {
-        f.set_cursor_position((area.x + col, area.y + row));
-    }
-
-    if let Some(p) = focused
-        && p.state == AgentState::Exited
-    {
-        let msg = match p.exit_code {
-            Some(c) => format!(" process exited ({c}) · {} x to close ", app.prefix_label),
-            None => format!(" process exited · {} x to close ", app.prefix_label),
-        };
-        let w = (msg.width() as u16).min(area.width);
-        let r = Rect::new(
-            area.x + area.width.saturating_sub(w),
-            area.y + area.height.saturating_sub(1),
-            w,
-            1,
-        );
-        f.render_widget(Clear, r);
+        let scroll = if focused { scroll } else { 0 };
+        parser.screen_mut().set_scrollback(scroll);
+        let screen = parser.screen();
         f.render_widget(
-            Paragraph::new(msg).style(Style::new().fg(Color::Black).bg(Color::DarkGray)),
-            r,
+            PseudoTerminal::new(screen).cursor(Cursor::default().visibility(false)),
+            body,
         );
+        let (row, col) = screen.cursor_position();
+        if focused
+            && scroll == 0
+            && matches!(app.mode, Mode::Normal)
+            && !screen.hide_cursor()
+            && row < body.height
+            && col < body.width
+        {
+            f.set_cursor_position((body.x + col, body.y + row));
+        }
+
+        if let Some(p) = info
+            && p.state == AgentState::Exited
+        {
+            let msg = match p.exit_code {
+                Some(c) => format!(" process exited ({c}) · {} x to close ", app.prefix_label),
+                None => format!(" process exited · {} x to close ", app.prefix_label),
+            };
+            let w = (msg.width() as u16).min(body.width);
+            let r = Rect::new(
+                body.x + body.width.saturating_sub(w),
+                body.y + body.height.saturating_sub(1),
+                w,
+                1,
+            );
+            f.render_widget(Clear, r);
+            f.render_widget(
+                Paragraph::new(msg).style(Style::new().fg(t.on_accent).bg(t.muted)),
+                r,
+            );
+        }
     }
+}
+
+/// One row above each tile: number, name and title on the left, state on
+/// the right. The focused tile's header carries the accent.
+fn draw_tile_header(f: &mut Frame, app: &App, p: &PaneInfo, row: Rect, focused: bool) {
+    let t = theme::get();
+    let (badge, badge_style) = badge(p, app.age(p), app.frame);
+    let num = super::sidebar::number(&app.panes, &p.id)
+        .filter(|n| *n <= 9)
+        .map_or(String::new(), |n| format!("{n} "));
+    let (mark, name_style, base) = if focused {
+        ("▍", t.bold(), t.selected())
+    } else {
+        (" ", t.muted(), Style::new())
+    };
+    let mut left = vec![
+        Span::styled(mark, t.accent()),
+        Span::styled(num, t.muted()),
+        Span::styled(p.name.clone(), name_style),
+    ];
+    let used: usize = left.iter().map(|s| s.content.width()).sum();
+    let room = (row.width as usize).saturating_sub(used + badge.width() + 4);
+    if let Some(title) = p
+        .title
+        .as_deref()
+        .map(clean_title)
+        .filter(|s| !s.is_empty())
+        && room > 6
+    {
+        left.push(Span::styled(
+            format!(" · {}", truncate(title, room)),
+            t.muted(),
+        ));
+    }
+    let used: usize = left.iter().map(|s| s.content.width()).sum();
+    let pad = (row.width as usize).saturating_sub(used + badge.width() + 1);
+    left.push(Span::raw(" ".repeat(pad)));
+    left.push(Span::styled(badge, badge_style));
+    f.buffer_mut().set_style(row, base);
+    f.render_widget(Line::from(left), row);
 }
 
 fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
     if area.height == 0 {
         return;
     }
+    let t = theme::get();
     let p = &app.prefix_label;
     let line = if let Some((msg, error)) = app.status() {
-        let style = if error {
-            Style::new().fg(Color::Red)
-        } else {
-            Style::new().fg(Color::Yellow)
-        };
+        let style = if error { t.fg(t.error) } else { t.accent() };
         Line::styled(format!(" {msg}"), style)
     } else if matches!(app.mode, Mode::Diff(_)) {
         // The diff view lists its own keys.
         Line::default()
     } else if app.awaiting_command {
-        key_hint(&[
+        let mut l = key_hint(&[
             ("n", "new"),
             ("w", "worktree"),
             ("j/k", "switch"),
             ("b", "blocked"),
+            ("s", "split"),
+            ("o", "only"),
             ("D", "diff"),
             ("x", "close"),
             ("r", "rename"),
-            ("d", "detach"),
             ("q", "quit"),
-            ("[", "scroll"),
             ("?", "help"),
-        ])
+        ]);
+        l.spans
+            .insert(0, Span::styled(format!(" {p} "), t.on_accent_style()));
+        l.spans.insert(1, Span::raw(" "));
+        l
+    } else if let Mode::Scroll { offset } = &app.mode {
+        let mut spans = vec![
+            Span::styled(
+                format!(" scrollback {offset}/{} ", app.scroll_max),
+                t.on_accent_style(),
+            ),
+            Span::raw(" "),
+        ];
+        spans.extend(
+            key_hint(&[
+                ("k/j", "line"),
+                ("PgUp/PgDn", "page"),
+                ("g/G", "top/bottom"),
+                ("q", "exit"),
+            ])
+            .spans,
+        );
+        Line::from(spans)
     } else {
-        match &app.mode {
-            Mode::Scroll { offset } => {
-                let mut spans = vec![
-                    Span::styled(
-                        format!(" scrollback {offset}/{} ", app.scroll_max),
-                        Style::new().fg(Color::Black).bg(Color::Yellow),
-                    ),
-                    Span::raw(" "),
-                ];
-                spans.extend(
-                    key_hint(&[
-                        ("k/j", "line"),
-                        ("PgUp/PgDn", "page"),
-                        ("g/G", "top/bottom"),
-                        ("q", "exit"),
-                    ])
-                    .spans,
-                );
-                Line::from(spans)
-            }
-            _ => {
-                let mut l = key_hint(&[
-                    ("n", "new"),
-                    ("w", "worktree"),
-                    ("j/k", "switch"),
-                    ("b", "next blocked"),
-                    ("x", "close"),
-                    ("d", "detach"),
-                    ("?", "help"),
-                ]);
-                let lead = vec![
-                    Span::raw(" "),
-                    Span::styled(
-                        p.clone(),
-                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" then  ", Style::new().fg(Color::DarkGray)),
-                ];
-                l.spans.splice(0..0, lead);
-                l
-            }
-        }
+        // Quiet by default: one pointer to the help, on the right.
+        let hint = Line::from(vec![
+            Span::styled(p.clone(), t.key()),
+            Span::styled(" ? keys ", t.muted()),
+        ]);
+        f.render_widget(Paragraph::new(hint).alignment(Alignment::Right), area);
+        return;
     };
     f.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::get();
     let p = &app.prefix_label;
-    let rows: Vec<(&str, &str)> = vec![
-        ("n", "start a new agent"),
-        ("w", "start a new agent in its own git worktree"),
-        ("j / k, ↑ / ↓", "next / previous pane"),
-        ("1 … 9", "jump to pane"),
-        ("b", "jump to the next blocked agent"),
+    let sections: Vec<(&str, Vec<(&str, &str)>)> = vec![
         (
-            "D",
-            "review the agent's worktree diff (commit, merge, discard)",
+            "agents",
+            vec![
+                ("n", "start a new agent"),
+                ("w", "start a new agent in its own git worktree"),
+                ("j / k, ↑ / ↓", "next / previous agent"),
+                ("1 … 9", "jump to agent by number"),
+                ("b", "jump to the next blocked agent"),
+                (
+                    "D",
+                    "review the agent's worktree diff (commit, merge, discard)",
+                ),
+                ("x", "close the agent"),
+                ("r", "rename the agent"),
+            ],
         ),
-        ("x", "close the pane"),
-        ("r", "rename the pane"),
-        ("d", "detach (agents keep running)"),
-        ("q", "exit: detach, or stop corral and every agent"),
-        ("[", "scrollback (mouse wheel works too)"),
-        ("?", "this help"),
+        (
+            "screen",
+            vec![
+                ("s", "show another agent alongside (up to 4)"),
+                ("S", "take this one off screen (it keeps running)"),
+                ("o", "only this one; again to bring the others back"),
+                ("h / l, Tab", "move between agents on screen"),
+                ("[", "scrollback (mouse wheel works too)"),
+            ],
+        ),
+        (
+            "corral",
+            vec![
+                ("d", "detach (agents keep running)"),
+                ("q", "exit: detach, or stop corral and every agent"),
+                ("?", "this help"),
+            ],
+        ),
     ];
-    let mut text = vec![
-        Line::from(vec![
-            Span::raw("Press "),
-            Span::styled(p.clone(), Style::new().fg(Color::Cyan)),
-            Span::raw(", then:"),
-        ]),
-        Line::default(),
-    ];
-    for (k, what) in rows {
-        text.push(Line::from(vec![
-            Span::styled(format!("  {k:<14}"), Style::new().fg(Color::Cyan)),
-            Span::raw(what),
-        ]));
+    let mut text = vec![Line::from(vec![
+        Span::raw("Press "),
+        Span::styled(p.clone(), t.key()),
+        Span::raw(", then:"),
+    ])];
+    for (title, rows) in sections {
+        text.push(Line::default());
+        text.push(Line::styled(
+            title.to_uppercase(),
+            t.muted().add_modifier(Modifier::BOLD),
+        ));
+        for (k, what) in rows {
+            text.push(Line::from(vec![
+                Span::styled(format!("  {k:<14}"), t.key()),
+                Span::raw(what),
+            ]));
+        }
     }
     text.push(Line::default());
     text.push(Line::styled(
-        format!("{p} {p} sends {p} to the pane. Click a sidebar row to focus it."),
-        Style::new().fg(Color::DarkGray),
+        format!("{p} {p} sends {p} to the agent. Click an agent in the sidebar or on screen to focus it."),
+        t.muted(),
     ));
     text.push(Line::styled(
         "Hold Shift (Option in some terminals) to select text with the mouse.",
-        Style::new().fg(Color::DarkGray),
+        t.muted(),
     ));
     text.push(Line::default());
     text.push(key_hint(&[("any key", "close")]));
     let width = text.iter().map(Line::width).max().unwrap_or(0) as u16 + 2;
     let r = centered(area, width, text.len() as u16 + 2);
     f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(text).block(dialog_block("corral help")), r);
+    f.render_widget(Paragraph::new(text).block(dialog_block("corral keys")), r);
 }
 
 fn field_line(
@@ -578,10 +698,10 @@ fn field_line(
     let (spans, cur) = input.spans(active, placeholder, room);
     let marker = if active { "›" } else { " " };
     let mut all = vec![
-        Span::styled(marker.to_string(), Style::new().fg(Color::Cyan)),
+        Span::styled(marker.to_string(), theme::get().accent()),
         Span::styled(
             format!("{label:<w$}", w = label_w - 1),
-            Style::new().fg(Color::DarkGray),
+            theme::get().muted(),
         ),
     ];
     all.extend(spans);
@@ -597,12 +717,9 @@ fn draw_new(f: &mut Frame, d: &NewDialog, area: Rect) {
     let wt = Line::from(vec![
         Span::styled(
             if d.field == 2 { "›" } else { " " }.to_string(),
-            Style::new().fg(Color::Cyan),
+            theme::get().accent(),
         ),
-        Span::styled(
-            format!("{:<9}", "Worktree"),
-            Style::new().fg(Color::DarkGray),
-        ),
+        Span::styled(format!("{:<9}", "Worktree"), theme::get().muted()),
         Span::styled(
             format!("{check} own git worktree and branch"),
             if d.field == 2 {
@@ -677,7 +794,7 @@ fn draw_quit(f: &mut Frame, running: usize, area: Rect) {
         text.push(Line::default());
         text.push(Line::styled(
             "Stopping ends the agents' processes; worktrees and their changes stay on disk.",
-            Style::new().fg(Color::DarkGray),
+            theme::get().muted(),
         ));
     }
     let width = 78u16.min(area.width.saturating_sub(2));
@@ -731,16 +848,13 @@ fn draw_close(f: &mut Frame, p: &PaneInfo, step: &CloseStep, area: Rect) {
             }
             text.push(Line::from(vec![
                 Span::raw("Worktree "),
-                Span::styled(w.branch.clone(), Style::new().fg(Color::Magenta)),
+                Span::styled(w.branch.clone(), theme::get().fg(theme::get().git)),
                 Span::raw(match w.changed_files {
                     0 => " · clean".to_string(),
                     n => format!(" · {n} changed {}", crate::worktree::plural(n, "file")),
                 }),
             ]));
-            text.push(Line::styled(
-                home_relative(&w.path),
-                Style::new().fg(Color::DarkGray),
-            ));
+            text.push(Line::styled(home_relative(&w.path), theme::get().muted()));
             text.push(Line::default());
             text.extend(options(&[
                 ("k", "close, keep the worktree"),
@@ -750,7 +864,10 @@ fn draw_close(f: &mut Frame, p: &PaneInfo, step: &CloseStep, area: Rect) {
             ]));
         }
         (CloseStep::Force { message, .. }, _) => {
-            text.push(Line::styled(message.clone(), Style::new().fg(Color::Red)));
+            text.push(Line::styled(
+                message.clone(),
+                theme::get().fg(theme::get().error),
+            ));
             text.push(Line::default());
             text.extend(options(&[
                 ("f", "force it (that work is lost)"),
@@ -778,7 +895,7 @@ fn options(items: &[(&str, &str)]) -> Vec<Line<'static>> {
         .iter()
         .map(|(k, what)| {
             Line::from(vec![
-                Span::styled(format!(" {k:<4}"), Style::new().fg(Color::Cyan)),
+                Span::styled(format!(" {k:<4}"), theme::get().accent()),
                 Span::raw(what.to_string()),
             ])
         })

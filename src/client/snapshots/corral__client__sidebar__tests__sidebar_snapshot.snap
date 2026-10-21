@@ -1,16 +1,27 @@
 ---
 source: src/client/sidebar.rs
+assertion_line: 522
 expression: text
 ---
- corral  ●1  ✓1        ✕ exit  │
+ corral                 ✕ exit │
+ ───────────────────────────── │
+ NEEDS YOU  2                  │
+▍1 claude         ◆ blocked 4m │
+▍  Fix token refresh           │
+▍  corral · claude             │
+▍  ⎇ corral/claude-3f9a +42 −7 │
+ 3 a-very-long-agen… ✓ done 4m │
                                │
- corral                        │
-▌1 claude          ● blocked 4m│
-   ⎇ corral/claude-3f9a +42 −7 │
- 2 a-very-long-agent… ✓ done 4m│
+ WORKING  1                    │
+▏2 codex                  ⠋ 4m │
                                │
- website                       │
- 3 codex              ⠋ working│
- 4 zsh                 ✗ exit 1│
+ QUIET  2                      │
+ 5 docs                   idle │
+ 4 zsh                exited 1 │
                                │
-  + new agent   ⎇ worktree     │
+                               │
+                               │
+                               │
+                               │
+ ───────────────────────────── │
+ + new agent   ⎇ worktree      │

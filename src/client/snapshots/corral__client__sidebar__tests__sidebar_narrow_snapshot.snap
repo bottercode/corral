@@ -1,16 +1,27 @@
 ---
 source: src/client/sidebar.rs
+assertion_line: 561
 expression: text
 ---
- corral  ●1  ✓1 ✕  │
+ corral          ✕ │
+ ───────────────── │
+ NEEDS YOU  2      │
+ 1 claude     ◆ 4m │
+ 3 a-very-lo… ✓ 4m │
                    │
- corral            │
- 1 cl… ● blocked 4m│
-   ⎇ corral/claude…│
- 2 a-ver… ✓ done 4m│
+ WORKING  1        │
+▍2 codex      ⠋ 4m │
+▍  website · codex │
                    │
- website           │
-▌3 codex  ⠋ working│
- 4 zsh     ✗ exit 1│
+ QUIET  2          │
+ 5 docs       idle │
+ 4 zsh    exited 1 │
                    │
-  + new   ⎇ wt     │
+                   │
+                   │
+                   │
+                   │
+                   │
+                   │
+ ───────────────── │
+ + new   ⎇ wt      │

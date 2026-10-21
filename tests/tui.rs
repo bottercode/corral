@@ -125,6 +125,27 @@ fn tui_shows_panes_forwards_input_and_detaches() {
     t.type_(b"\x02j");
     t.wait_for("second pane", |x| x.contains("second-pane"));
 
+    // Prefix s shows the other agent alongside: both on screen (stacked, as
+    // 80 columns is too narrow for side by side), each sized to its half,
+    // and typing goes to the focused one.
+    t.type_(b"\x02s");
+    t.wait_for("side by side", |x| {
+        x.contains("second-pane") && x.contains("hello-from-pane") && x.contains("typed-in-tui")
+    });
+    eventually("panes sized to their tiles", || {
+        s.panes().iter().all(|p| p.cols == 80 && p.rows < 15)
+    });
+    println!("{}", t.screen());
+    t.type_(b"in-split\r");
+    eventually("typed into the focused tile", || {
+        s.ok(&["read", "p1"]).matches("in-split").count() >= 2
+    });
+    // Prefix o: back to one pane.
+    t.type_(b"\x02o");
+    eventually("pane fills the screen again", || {
+        s.panes().iter().any(|p| p.rows > 25)
+    });
+
     // Prefix n opens the new-agent dialog; Esc closes it.
     t.type_(b"\x02n");
     t.wait_for("dialog", |x| {
@@ -143,9 +164,9 @@ fn tui_shows_panes_forwards_input_and_detaches() {
 
     // Help overlay.
     t.type_(b"\x02?");
-    t.wait_for("help", |x| x.contains("corral help"));
+    t.wait_for("help", |x| x.contains("corral keys"));
     t.type_(b"q");
-    t.wait_for("help closed", |x| !x.contains("corral help"));
+    t.wait_for("help closed", |x| !x.contains("corral keys"));
 
     // Close the focused pane with prefix x, confirm with y.
     t.type_(b"\x02x");

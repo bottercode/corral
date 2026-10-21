@@ -196,3 +196,65 @@ async fn client_attached_to_an_empty_server_shows_the_first_new_pane() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn several_panes_on_screen_stream_side_by_side() {
+    let server = TestServer::start();
+    let mut conn = server.conn().await;
+    new_pane(
+        &mut conn,
+        sh("read x; echo left-$x; read y"),
+        server.dir.path(),
+    )
+    .await;
+    new_pane(
+        &mut conn,
+        sh("read x; echo right-$x; read y"),
+        server.dir.path(),
+    )
+    .await;
+
+    let mut a = Headless::attach(&server, 121, 30).await;
+    a.view("p1", &[("p1", 60, 29), ("p2", 60, 29)]).await;
+    // Each pane is sized to its tile.
+    a.until("tile sizes", |c| {
+        c.panes.iter().all(|p| (p.cols, p.rows) == (60, 29))
+    })
+    .await;
+
+    // Output from both arrives live.
+    server.ok(&["send", "p1", "a", "--enter"]);
+    server.ok(&["send", "p2", "b", "--enter"]);
+    a.until("both outputs", |c| {
+        c.contents().contains("left-a") && c.others["p2"].screen().contents().contains("right-b")
+    })
+    .await;
+
+    // Neither is notified about: both are on screen.
+    for pane in ["p1", "p2"] {
+        conn.request(Command::Report {
+            pane: pane.into(),
+            state: AgentState::Blocked,
+        })
+        .await
+        .unwrap();
+    }
+    a.until("blocked shown", |c| {
+        c.panes.iter().all(|p| p.state == AgentState::Blocked)
+    })
+    .await;
+    assert!(a.notes.is_empty(), "{:?}", a.notes);
+
+    // Closing the focused pane moves the keyboard to the other one.
+    server.ok(&["kill", "p1"]);
+    a.until("focus moves to p2", |c| c.focus.as_deref() == Some("p2"))
+        .await;
+    assert!(
+        a.parser
+            .as_ref()
+            .unwrap()
+            .screen()
+            .contents()
+            .contains("right-b")
+    );
+}

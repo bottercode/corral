@@ -1,12 +1,13 @@
 //! Shared helpers: a real `corral server` on a private socket.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use corral::client::conn::Conn;
-use corral::protocol::{ClientMsg, Command as Cmd, NewPane, PaneInfo, Reply, ServerMsg};
+use corral::protocol::{ClientMsg, Command as Cmd, NewPane, PaneInfo, Reply, ServerMsg, Viewport};
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_corral");
 
@@ -149,7 +150,13 @@ pub async fn new_pane(conn: &mut Conn, command: Vec<String>, cwd: &Path) -> Pane
 /// A headless interactive client: attaches and mirrors its focused pane.
 pub struct Headless {
     pub conn: Conn,
+    /// The focused pane's screen.
     pub parser: Option<vt100::Parser>,
+    parser_pane: Option<String>,
+    /// Other panes on screen.
+    pub others: HashMap<String, vt100::Parser>,
+    pub size: (u16, u16),
+    pub generation: u64,
     pub focus: Option<String>,
     pub panes: Vec<PaneInfo>,
     pub notes: Vec<String>,
@@ -169,6 +176,10 @@ impl Headless {
         Headless {
             conn,
             parser: None,
+            parser_pane: None,
+            others: HashMap::new(),
+            size: (cols, rows),
+            generation: 0,
             focus: None,
             panes: vec![],
             notes: vec![],
@@ -176,38 +187,79 @@ impl Headless {
         }
     }
 
-    /// Look at one pane (clients start on the overview).
+    /// Show one pane, filling the client.
     pub async fn focus_on(&mut self, pane: &str) {
+        let (cols, rows) = self.size;
+        self.view(pane, &[(pane, cols, rows)]).await;
+    }
+
+    /// Show several panes at the given sizes, with the keyboard on `focus`.
+    pub async fn view(&mut self, focus: &str, panes: &[(&str, u16, u16)]) {
         self.parser = None;
+        self.parser_pane = None;
+        self.others.clear();
+        self.focus = Some(focus.into());
+        self.generation += 1;
         self.conn
-            .send(&ClientMsg::Focus {
-                pane: Some(pane.into()),
+            .send(&ClientMsg::View {
+                generation: self.generation,
+                focus: Some(focus.into()),
+                panes: panes
+                    .iter()
+                    .map(|(p, cols, rows)| Viewport {
+                        pane: p.to_string(),
+                        cols: *cols,
+                        rows: *rows,
+                    })
+                    .collect(),
             })
             .await
             .unwrap();
-        let p = pane.to_string();
-        self.until("focus", move |c| {
-            c.focus.as_deref() == Some(p.as_str()) && c.parser.is_some()
+        let (f, n) = (focus.to_string(), panes.len() - 1);
+        self.until("view", move |c| {
+            c.focus.as_deref() == Some(f.as_str()) && c.parser.is_some() && c.others.len() == n
         })
         .await;
     }
 
     pub fn apply(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::State { panes, focus } => {
+            ServerMsg::State { panes, focus, .. } => {
                 self.panes = panes;
+                if focus.is_some() && self.parser_pane != focus {
+                    // The server moved the keyboard (e.g. to a new pane).
+                    if let (Some(old), Some(p)) = (self.parser_pane.take(), self.parser.take()) {
+                        self.others.insert(old, p);
+                    }
+                    self.parser = focus.as_ref().and_then(|f| self.others.remove(f));
+                    self.parser_pane = focus.clone().filter(|_| self.parser.is_some());
+                }
                 self.focus = focus;
             }
             ServerMsg::Screen {
-                cols, rows, bytes, ..
+                pane,
+                cols,
+                rows,
+                bytes,
+                ..
             } => {
                 let mut p = vt100::Parser::new(rows, cols, 10_000);
                 p.process(&bytes);
-                self.parser = Some(p);
-                self.last_screen = Some(bytes);
+                if self.focus.is_none() || self.focus.as_ref() == Some(&pane) {
+                    self.parser = Some(p);
+                    self.parser_pane = Some(pane);
+                    self.last_screen = Some(bytes);
+                } else {
+                    self.others.insert(pane, p);
+                }
             }
-            ServerMsg::Output { bytes, .. } => {
-                if let Some(p) = self.parser.as_mut() {
+            ServerMsg::Output { pane, bytes, .. } => {
+                let target = if self.parser_pane.as_ref() == Some(&pane) {
+                    self.parser.as_mut()
+                } else {
+                    self.others.get_mut(&pane)
+                };
+                if let Some(p) = target {
                     p.process(&bytes);
                 }
             }
