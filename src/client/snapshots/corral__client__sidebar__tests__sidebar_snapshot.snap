@@ -1,10 +1,10 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 522
+assertion_line: 674
 expression: text
 ---
- corral                 ✕ exit │
- ───────────────────────────── │
+ corral        ≡ menu   ✕ exit │
+ ────────────────── ⇅ by need  │
  NEEDS YOU  2                  │
 ▍1 claude         ◆ blocked 4m │
 ▍  Fix token refresh           │
@@ -24,4 +24,4 @@ expression: text
                                │
                                │
  ───────────────────────────── │
- + new agent   ⎇ worktree      │
+ + new shell   ⎇ worktree      │

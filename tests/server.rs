@@ -258,3 +258,30 @@ async fn several_panes_on_screen_stream_side_by_side() {
             .contains("right-b")
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_can_hand_over_to_the_shell() {
+    use corral::protocol::NewPane;
+    let server = TestServer::start();
+    let mut conn = server.conn().await;
+    let r = conn
+        .request(Command::New(NewPane {
+            command: vec!["echo ran-$((1+2))".into()],
+            shell: true,
+            then_shell: true,
+            cwd: Some(server.dir.path().to_path_buf()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(r, Reply::Created { .. }), "{r:?}");
+    eventually("command ran", || {
+        server.ok(&["read", "p1"]).contains("ran-3")
+    });
+    // The command is done but the pane isn't: a shell took over.
+    server.ok(&["send", "p1", "echo still-$((3+3))", "--enter"]);
+    eventually("shell answers", || {
+        server.ok(&["read", "p1"]).contains("still-6")
+    });
+    assert!(server.panes()[0].exit_code.is_none());
+}

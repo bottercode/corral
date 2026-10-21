@@ -9,7 +9,7 @@
 //! - **terminal**: the terminal's 16 ANSI colours, so it matches whatever
 //!   palette the terminal already has.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
 use ratatui::style::{Color, Modifier, Style};
@@ -97,7 +97,8 @@ pub const TERMINAL: Theme = Theme {
 
 pub const ALL: [Theme; 3] = [RANCH, INK, TERMINAL];
 
-static CURRENT: OnceLock<Theme> = OnceLock::new();
+/// Index into `ALL` of the theme in use.
+static CURRENT: AtomicUsize = AtomicUsize::new(0);
 
 pub fn by_name(name: &str) -> Result<Theme> {
     match ALL
@@ -112,14 +113,21 @@ pub fn by_name(name: &str) -> Result<Theme> {
     }
 }
 
-/// Choose the theme for this process (first call wins).
+/// Switch the theme; the next frame draws with it.
 pub fn set(theme: Theme) {
-    let _ = CURRENT.set(theme);
+    let i = ALL.iter().position(|t| t.name == theme.name).unwrap_or(0);
+    CURRENT.store(i, Ordering::Relaxed);
 }
 
 /// The theme in use; ranch until `set` is called.
 pub fn get() -> &'static Theme {
-    CURRENT.get().unwrap_or(&RANCH)
+    &ALL[CURRENT.load(Ordering::Relaxed).min(ALL.len() - 1)]
+}
+
+/// The theme after (or before, for a negative step) the current one.
+pub fn cycle(step: isize) -> Theme {
+    let i = CURRENT.load(Ordering::Relaxed) as isize;
+    ALL[(i + step).rem_euclid(ALL.len() as isize) as usize]
 }
 
 impl Theme {

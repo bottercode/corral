@@ -1,11 +1,12 @@
-//! The sidebar, organised for triage: agents that need you (blocked, or
-//! finished and unseen) on top, then the ones working, then the quiet ones.
-//! The focused agent opens up to show its title, project and worktree.
-//! Rendering returns what each row does when clicked.
+//! The sidebar. By default it's organised for triage: agents that need you
+//! (blocked, or finished and unseen) on top, then the ones working, then the
+//! quiet ones. It can list them by project instead. The focused agent opens
+//! up to show its title, project and worktree. Rendering returns what each
+//! row does when clicked.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::time::Duration;
@@ -17,52 +18,145 @@ use crate::protocol::{AgentState, PaneId, PaneInfo};
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// How the sidebar lists agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Order {
+    /// NEEDS YOU, WORKING, QUIET.
+    #[default]
+    Need,
+    /// One section per project (workspace), in the order they started.
+    Project,
+}
+
+impl Order {
+    /// From the config's `sidebar_order`.
+    pub fn from_config(s: &str) -> Order {
+        match s {
+            "project" => Order::Project,
+            _ => Order::Need,
+        }
+    }
+
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Order::Need => "need",
+            Order::Project => "project",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Order::Need => "by need",
+            Order::Project => "by project",
+        }
+    }
+
+    pub fn toggled(self) -> Order {
+        match self {
+            Order::Need => Order::Project,
+            Order::Project => Order::Need,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Group {
+enum Need {
     NeedsYou,
     Working,
     Quiet,
 }
 
-impl Group {
-    fn of(s: AgentState) -> Group {
+impl Need {
+    fn of(s: AgentState) -> Need {
         match s {
-            AgentState::Blocked | AgentState::Done => Group::NeedsYou,
-            AgentState::Working => Group::Working,
-            AgentState::Idle | AgentState::Exited => Group::Quiet,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Group::NeedsYou => "NEEDS YOU",
-            Group::Working => "WORKING",
-            Group::Quiet => "QUIET",
+            AgentState::Blocked | AgentState::Done => Need::NeedsYou,
+            AgentState::Working => Need::Working,
+            AgentState::Idle | AgentState::Exited => Need::Quiet,
         }
     }
 }
 
-/// Non-empty groups in sidebar order. Within a group, blocked comes before
-/// done and exited after idle; otherwise agents keep their creation order.
-pub fn groups(panes: &[PaneInfo]) -> Vec<(Group, Vec<&PaneInfo>)> {
-    let rank = |s: AgentState| match s {
-        AgentState::Blocked | AgentState::Working | AgentState::Idle => 0,
-        AgentState::Done | AgentState::Exited => 1,
-    };
-    [Group::NeedsYou, Group::Working, Group::Quiet]
-        .into_iter()
-        .filter_map(|g| {
-            let mut members: Vec<&PaneInfo> =
-                panes.iter().filter(|p| Group::of(p.state) == g).collect();
-            members.sort_by_key(|p| rank(p.state));
-            (!members.is_empty()).then_some((g, members))
-        })
-        .collect()
+/// A titled run of agents in the sidebar.
+pub struct Section<'a> {
+    pub title: String,
+    /// Colour of the count next to the title.
+    pub color: Color,
+    pub members: Vec<&'a PaneInfo>,
+}
+
+/// Non-empty sections in sidebar order.
+///
+/// By need, blocked comes before done and exited after idle within a
+/// section; otherwise agents keep their creation order. By project, each
+/// project lists its agents in creation order.
+pub fn sections(panes: &[PaneInfo], order: Order) -> Vec<Section<'_>> {
+    let t = theme::get();
+    match order {
+        Order::Need => {
+            let rank = |s: AgentState| match s {
+                AgentState::Blocked | AgentState::Working | AgentState::Idle => 0,
+                AgentState::Done | AgentState::Exited => 1,
+            };
+            [
+                (Need::NeedsYou, "NEEDS YOU"),
+                (Need::Working, "WORKING"),
+                (Need::Quiet, "QUIET"),
+            ]
+            .into_iter()
+            .filter_map(|(need, title)| {
+                let mut members: Vec<&PaneInfo> =
+                    panes.iter().filter(|p| Need::of(p.state) == need).collect();
+                members.sort_by_key(|p| rank(p.state));
+                let color = match need {
+                    Need::NeedsYou if members.iter().any(|p| p.state == AgentState::Blocked) => {
+                        t.blocked
+                    }
+                    Need::NeedsYou => t.done,
+                    Need::Working => t.working,
+                    Need::Quiet => t.muted,
+                };
+                (!members.is_empty()).then(|| Section {
+                    title: title.into(),
+                    color,
+                    members,
+                })
+            })
+            .collect()
+        }
+        Order::Project => {
+            let mut projects: Vec<&str> = Vec::new();
+            for p in panes {
+                if !projects.contains(&p.workspace.as_str()) {
+                    projects.push(&p.workspace);
+                }
+            }
+            projects
+                .into_iter()
+                .map(|w| {
+                    let members: Vec<&PaneInfo> =
+                        panes.iter().filter(|p| p.workspace == w).collect();
+                    // The count takes the colour of the most pressing agent.
+                    let color = [AgentState::Blocked, AgentState::Done, AgentState::Working]
+                        .into_iter()
+                        .find(|s| members.iter().any(|p| p.state == *s))
+                        .map_or(t.muted, |s| t.state(s));
+                    Section {
+                        title: w.to_string(),
+                        color,
+                        members,
+                    }
+                })
+                .collect()
+        }
+    }
 }
 
 /// Panes in the order the sidebar lists them; j/k follow this order.
-pub fn display_order(panes: &[PaneInfo]) -> Vec<&PaneInfo> {
-    groups(panes).into_iter().flat_map(|(_, m)| m).collect()
+pub fn display_order(panes: &[PaneInfo], order: Order) -> Vec<&PaneInfo> {
+    sections(panes, order)
+        .into_iter()
+        .flat_map(|s| s.members)
+        .collect()
 }
 
 /// A pane's number for `^b 1`…`^b 9`: its position by creation, so it stays
@@ -146,16 +240,29 @@ pub fn clean_title(t: &str) -> &str {
         .trim_end()
 }
 
+/// The task an agent is on, from the title it gives its terminal. Shells'
+/// own titles (`user@host: ~/dir`) aren't tasks, so plain shells have none.
+pub fn task_title(p: &PaneInfo) -> Option<&str> {
+    p.agent.as_ref()?;
+    let t = clean_title(p.title.as_deref()?);
+    let looks_like_prompt = t.split_whitespace().next().is_some_and(|w| w.contains('@'));
+    (!t.is_empty() && !looks_like_prompt).then_some(t)
+}
+
 /// What clicking somewhere in the sidebar does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Click {
     Focus(PaneId),
-    /// The "+ new agent" / "⎇ worktree" buttons.
+    /// The "+ new" / "⎇ worktree" buttons.
     New {
         worktree: bool,
     },
-    /// The "exit" button.
+    /// The "≡ menu" button.
+    Menu,
+    /// The "✕ exit" button.
     Exit,
+    /// The "⇅ by need" / "⇅ by project" switch.
+    Order,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +283,7 @@ pub struct Sidebar<'a> {
     pub focus: Option<&'a str>,
     /// Panes on screen next to the focused one.
     pub shown: &'a [PaneId],
+    pub order: Order,
     pub frame: usize,
     /// Time since `panes` arrived, added to each pane's `state_secs`.
     pub age_offset: Duration,
@@ -217,6 +325,7 @@ impl Sidebar<'_> {
                 " corral",
                 t.accent().add_modifier(Modifier::BOLD),
             ))),
+            // The rule; the order switch is drawn over its right end.
             Row::plain(Line::styled(
                 format!(" {}", "─".repeat(width.saturating_sub(2))),
                 t.faint(),
@@ -228,26 +337,17 @@ impl Sidebar<'_> {
             rows.push(Row::plain(Line::styled(" start one below", t.faint())));
         }
 
-        for (i, (group, members)) in groups(self.panes).into_iter().enumerate() {
+        for (i, section) in sections(self.panes, self.order).into_iter().enumerate() {
             if i > 0 {
                 rows.push(Row::plain(Line::default()));
             }
-            let count_color = match group {
-                Group::NeedsYou if members.iter().any(|p| p.state == AgentState::Blocked) => {
-                    t.blocked
-                }
-                Group::NeedsYou => t.done,
-                Group::Working => t.working,
-                Group::Quiet => t.muted,
-            };
+            let count = format!("  {}", section.members.len());
+            let title = truncate(&section.title, width.saturating_sub(count.width() + 1));
             rows.push(Row::plain(Line::from(vec![
-                Span::styled(
-                    format!(" {}", group.label()),
-                    t.muted().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("  {}", members.len()), t.fg(count_color)),
+                Span::styled(format!(" {title}"), t.muted().add_modifier(Modifier::BOLD)),
+                Span::styled(count, t.fg(section.color)),
             ])));
-            for p in members {
+            for p in section.members {
                 self.agent_rows(p, width, &mut rows);
             }
         }
@@ -273,10 +373,17 @@ impl Sidebar<'_> {
                 });
             }
         }
-        hits.push(render_exit_button(
+        hits.extend(render_title_buttons(
             Rect::new(inner.x, inner.y, inner.width, 1),
             buf,
         ));
+        if !self.panes.is_empty() {
+            hits.push(render_order_switch(
+                Rect::new(inner.x, inner.y + 1, inner.width, 1),
+                self.order,
+                buf,
+            ));
+        }
         if show_buttons {
             let y = inner.y + inner.height - 2;
             Line::styled(
@@ -350,12 +457,7 @@ impl Sidebar<'_> {
             })
         };
         let marker = || Span::styled("▍", t.accent());
-        if let Some(title) = p
-            .title
-            .as_deref()
-            .map(clean_title)
-            .filter(|s| !s.is_empty())
-        {
+        if let Some(title) = task_title(p) {
             detail(Line::from(vec![
                 marker(),
                 Span::raw("  "),
@@ -367,13 +469,15 @@ impl Sidebar<'_> {
             .clone()
             .or_else(|| p.command.first().cloned())
             .unwrap_or_else(|| "shell".into());
+        // By project, the section title already names the project.
+        let place = match self.order {
+            Order::Need => format!("{} · {what}", p.workspace),
+            Order::Project => what,
+        };
         detail(Line::from(vec![
             marker(),
             Span::raw("  "),
-            Span::styled(
-                truncate(&format!("{} · {what}", p.workspace), room),
-                t.muted(),
-            ),
+            Span::styled(truncate(&place, room), t.muted()),
         ]));
         if let Some(w) = &p.worktree {
             let stats = if w.diff_files > 0 {
@@ -395,24 +499,55 @@ impl Sidebar<'_> {
     }
 }
 
-/// `✕ exit`, right-aligned on the title row (`✕` alone when narrow).
-fn render_exit_button(row: Rect, buf: &mut Buffer) -> Hit {
+/// `≡ menu   ✕ exit`, right-aligned on the title row (`≡  ✕` when narrow).
+fn render_title_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
-    let label = if row.width >= 24 { "✕ exit" } else { "✕" };
-    let w = label.width() as u16;
+    let (menu, exit) = if row.width >= 26 {
+        ("≡ menu", "✕ exit")
+    } else {
+        ("≡", "✕")
+    };
+    let exit_w = exit.width() as u16;
+    let exit_area = Rect::new(
+        row.x + row.width.saturating_sub(exit_w + 1),
+        row.y,
+        exit_w,
+        1,
+    );
+    let menu_w = menu.width() as u16;
+    let menu_area = Rect::new(exit_area.x.saturating_sub(menu_w + 3), row.y, menu_w, 1);
+    Line::styled(menu, t.accent()).render(menu_area, buf);
+    Line::styled(exit, t.muted()).render(exit_area, buf);
+    vec![
+        Hit {
+            area: menu_area,
+            click: Click::Menu,
+        },
+        Hit {
+            area: exit_area,
+            click: Click::Exit,
+        },
+    ]
+}
+
+/// ` ⇅ by need ` over the right end of the rule under the title.
+fn render_order_switch(row: Rect, order: Order, buf: &mut Buffer) -> Hit {
+    let t = theme::get();
+    let label = format!(" ⇅ {} ", order.label());
+    let w = (label.width() as u16).min(row.width.saturating_sub(2));
     let area = Rect::new(row.x + row.width.saturating_sub(w + 1), row.y, w, 1);
     Line::styled(label, t.muted()).render(area, buf);
     Hit {
         area,
-        click: Click::Exit,
+        click: Click::Order,
     }
 }
 
-/// `+ new agent   ⎇ worktree`, shortened when the sidebar is narrow.
+/// `+ new shell   ⎇ worktree`, shortened when the sidebar is narrow.
 fn render_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
-    let (new, wt) = if row.width >= 26 {
-        ("+ new agent", "⎇ worktree")
+    let (new, wt) = if row.width >= 24 {
+        ("+ new shell", "⎇ worktree")
     } else {
         ("+ new", "⎇ wt")
     };
@@ -469,6 +604,16 @@ mod tests {
         shown: &[PaneId],
         width: u16,
     ) -> (String, Vec<Hit>) {
+        render_in(panes, focus, shown, width, Order::Need)
+    }
+
+    fn render_in(
+        panes: &[PaneInfo],
+        focus: Option<&str>,
+        shown: &[PaneId],
+        width: u16,
+        order: Order,
+    ) -> (String, Vec<Hit>) {
         let mut term = Terminal::new(TestBackend::new(width, 22)).unwrap();
         let mut hits = Vec::new();
         term.draw(|f| {
@@ -476,6 +621,7 @@ mod tests {
                 panes,
                 focus,
                 shown,
+                order,
                 frame: 0,
                 age_offset: Duration::ZERO,
             }
@@ -515,14 +661,18 @@ mod tests {
     }
 
     #[test]
-    fn triage_order() {
+    fn orders() {
         let panes = sample();
-        let order: Vec<&str> = display_order(&panes)
-            .iter()
-            .map(|p| p.id.as_str())
-            .collect();
+        let ids = |order| -> Vec<&str> {
+            display_order(&panes, order)
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect()
+        };
         // Needs you (blocked, done), working, quiet (idle, exited).
-        assert_eq!(order, vec!["p1", "p3", "p2", "p5", "p4"]);
+        assert_eq!(ids(Order::Need), vec!["p1", "p3", "p2", "p5", "p4"]);
+        // By project, in creation order.
+        assert_eq!(ids(Order::Project), vec!["p1", "p3", "p2", "p4", "p5"]);
         // Numbers follow creation, not position.
         assert_eq!(number(&panes, "p4"), Some(4));
     }
@@ -545,25 +695,35 @@ mod tests {
                 f("p2"),
                 f("p5"),
                 f("p4"),
+                Click::Menu,
                 Click::Exit,
+                Click::Order,
                 Click::New { worktree: false },
                 Click::New { worktree: true },
             ]
         );
-        // Exit is on the title row; the new buttons on the last row.
-        assert_eq!(hits[8].area.y, 0);
-        let (a, b) = (hits[9].area, hits[10].area);
+        // Menu and exit on the title row, the order switch on the rule
+        // under it, the new buttons on the last row.
+        assert_eq!((hits[8].area.y, hits[9].area.y, hits[10].area.y), (0, 0, 1));
+        assert!(hits[8].area.x + hits[8].area.width < hits[9].area.x);
+        let (a, b) = (hits[11].area, hits[12].area);
         assert_eq!((a.y, b.y), (21, 21));
         assert!(a.x + a.width < b.x);
+    }
+
+    #[test]
+    fn sidebar_by_project_snapshot() {
+        let (text, _) = render_in(&sample(), Some("p1"), &[], 32, Order::Project);
+        insta::assert_snapshot!(text);
     }
 
     #[test]
     fn sidebar_empty_snapshot() {
         let (text, hits) = render(&[], None, &[], 32);
         insta::assert_snapshot!(text);
-        // Only the buttons are clickable.
+        // Only the buttons are clickable (no order switch with no agents).
         assert!(hits.iter().all(|h| !matches!(h.click, Click::Focus(_))));
-        assert_eq!(hits.len(), 3);
+        assert_eq!(hits.len(), 4);
     }
 
     #[test]
@@ -585,6 +745,18 @@ mod tests {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 6), "hello…");
         assert_eq!(truncate("日本語", 5), "日本…");
+    }
+
+    #[test]
+    fn only_agents_have_task_titles() {
+        let mut p = pane("p1", "claude", "w", AgentState::Working);
+        p.title = Some("✳ Fix token refresh".into());
+        assert_eq!(task_title(&p), Some("Fix token refresh"));
+        p.title = Some("me@laptop: ~/src".into());
+        assert_eq!(task_title(&p), None);
+        p.title = Some("✳ Fix token refresh".into());
+        p.agent = None;
+        assert_eq!(task_title(&p), None);
     }
 
     #[test]

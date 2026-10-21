@@ -152,6 +152,10 @@ pub struct NewPane {
     pub command: Vec<String>,
     /// Run `command[0]` through `$SHELL -c` (used for command lines typed in the TUI).
     pub shell: bool,
+    /// With `shell`: when the command exits, the pane carries on as an
+    /// interactive shell instead of ending.
+    #[serde(default)]
+    pub then_shell: bool,
     pub worktree: bool,
     pub branch: Option<String>,
     /// Make the new pane the focus of the requesting client.
@@ -460,6 +464,7 @@ mod tests {
                 workspace: Some("w".into()),
                 command: vec!["sh".into(), "-c".into(), "echo hi".into()],
                 shell: false,
+                then_shell: true,
                 worktree: true,
                 branch: Some("feature/x".into()),
                 focus: true,

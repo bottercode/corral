@@ -1,10 +1,10 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 561
+assertion_line: 723
 expression: text
 ---
- corral          ✕ │
- ───────────────── │
+ corral      ≡   ✕ │
+ ────── ⇅ by need  │
  NEEDS YOU  2      │
  1 claude     ◆ 4m │
  3 a-very-lo… ✓ 4m │

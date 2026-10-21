@@ -27,6 +27,7 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use crate::config::{Config, prefix_label};
+use crate::integrate::{self, Agent, HookStatus};
 use crate::paths;
 use crate::protocol::{
     self, AgentState, ClientMsg, Command, NewPane, PaneId, PaneInfo, Reply, ServerMsg, Viewport,
@@ -35,9 +36,33 @@ use crate::protocol::{
 use conn::Conn;
 use diff::DiffView;
 use input::{Chunk, Key, Mouse, MouseKind, Splitter, decode_keys};
-use ui::{CloseStep, NewDialog, TextInput};
+use sidebar::Order;
+use ui::{CloseStep, TextInput, WorktreeDialog};
 
 const STATUS_FOR: Duration = Duration::from_secs(6);
+
+/// The menu's rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuItem {
+    Keys,
+    Theme,
+    Order,
+    Notifications,
+    Hooks(Agent),
+    Detach,
+    Exit,
+}
+
+pub const MENU: [MenuItem; 8] = [
+    MenuItem::Keys,
+    MenuItem::Theme,
+    MenuItem::Order,
+    MenuItem::Notifications,
+    MenuItem::Hooks(Agent::Claude),
+    MenuItem::Hooks(Agent::Codex),
+    MenuItem::Detach,
+    MenuItem::Exit,
+];
 const WHEEL_LINES: usize = 3;
 /// Most panes on screen at once.
 pub const MAX_TILES: usize = 4;
@@ -49,7 +74,14 @@ pub enum Mode {
     Scroll {
         offset: usize,
     },
-    New(NewDialog),
+    /// New worktree: where, and on which branch.
+    Worktree(WorktreeDialog),
+    /// The menu, with the selected row.
+    Menu {
+        selected: usize,
+    },
+    /// Confirm installing an agent's hooks.
+    Hooks(Agent),
     Rename {
         pane: PaneId,
         input: TextInput,
@@ -107,7 +139,18 @@ pub struct App {
     pub frame: usize,
     pub scroll_max: usize,
     splitter: Splitter,
+    /// Run in each new shell; empty for just the shell.
     default_command: String,
+    pub order: Order,
+    /// Ring the bell and send desktop notifications.
+    pub notifications: bool,
+    /// Hook status per agent, read when the menu opens.
+    pub hooks: Vec<(Agent, HookStatus)>,
+    /// Where the menu's rows were drawn, for clicks.
+    pub menu_hits: Vec<(Rect, usize)>,
+    /// The config file settings changed in the menu are saved to (none in
+    /// tests).
+    save_to: Option<PathBuf>,
     cwd: PathBuf,
     next_id: u64,
     pending: HashMap<u64, Pending>,
@@ -145,7 +188,12 @@ impl App {
             frame: 0,
             scroll_max: 0,
             splitter: Splitter::new(prefix),
-            default_command: config.default_command.clone(),
+            default_command: config.default_command.trim().to_string(),
+            order: Order::from_config(&config.sidebar_order),
+            notifications: config.notifications,
+            hooks: Vec::new(),
+            menu_hits: Vec::new(),
+            save_to: None,
             cwd,
             next_id: 1,
             pending: HashMap::new(),
@@ -182,7 +230,7 @@ impl App {
     }
 
     fn order(&self) -> Vec<PaneId> {
-        sidebar::display_order(&self.panes)
+        sidebar::display_order(&self.panes, self.order)
             .into_iter()
             .map(|p| p.id.clone())
             .collect()
@@ -398,12 +446,40 @@ impl App {
         }
     }
 
-    fn open_new(&mut self, worktree: bool) {
-        let dir = self.default_dir();
-        self.mode = Mode::New(NewDialog::new(&self.default_command, &dir, worktree));
+    /// A request for a new pane in `cwd`: your shell, running the
+    /// configured default command first if there is one.
+    fn new_pane_request(&self, cwd: PathBuf) -> NewPane {
+        let cmd = &self.default_command;
+        NewPane {
+            name: None,
+            cwd: Some(cwd),
+            workspace: None,
+            command: if cmd.is_empty() {
+                Vec::new()
+            } else {
+                vec![cmd.clone()]
+            },
+            shell: true,
+            then_shell: true,
+            worktree: false,
+            branch: None,
+            focus: true,
+        }
     }
 
-    fn submit_new(&mut self, d: NewDialog) {
+    /// `^b n` / "+ new shell": a shell next to the focused agent's work.
+    fn new_shell(&mut self) {
+        let req = self.new_pane_request(self.default_dir());
+        self.request(Command::New(req), Pending::New);
+    }
+
+    /// `^b w` / "⎇ worktree": ask where and on which branch.
+    fn open_worktree(&mut self) {
+        let dir = self.default_dir();
+        self.mode = Mode::Worktree(WorktreeDialog::new(&dir));
+    }
+
+    fn submit_worktree(&mut self, d: WorktreeDialog) {
         let cwd = paths::expand_tilde(d.cwd.text.trim());
         let cwd = if cwd.is_relative() {
             self.cwd.join(cwd)
@@ -411,30 +487,142 @@ impl App {
             cwd
         };
         let branch = d.branch.text.trim().to_string();
-        let line = d.command.text.trim().to_string();
         let req = NewPane {
-            name: None,
-            cwd: Some(cwd),
-            workspace: None,
-            command: if line.is_empty() {
-                Vec::new()
-            } else {
-                vec![line]
-            },
-            shell: true,
-            worktree: d.worktree,
-            branch: (d.worktree && !branch.is_empty()).then_some(branch),
-            focus: true,
+            worktree: true,
+            branch: (!branch.is_empty()).then_some(branch),
+            ..self.new_pane_request(cwd)
         };
-        self.set_status(
-            if d.worktree {
-                "creating worktree…"
-            } else {
-                "starting…"
-            },
-            false,
-        );
+        self.set_status("creating worktree…", false);
         self.request(Command::New(req), Pending::New);
+    }
+
+    fn save_setting(&mut self, key: &str, value: impl Into<toml_edit::Value>) {
+        if let Some(path) = &self.save_to
+            && let Err(e) = crate::config::save_to(path, key, value)
+        {
+            self.set_status(format!("couldn't save {key}: {e:#}"), true);
+        }
+    }
+
+    fn open_menu(&mut self) {
+        self.hooks = [Agent::Claude, Agent::Codex]
+            .map(|a| (a, integrate::status(a)))
+            .to_vec();
+        self.mode = Mode::Menu { selected: 0 };
+    }
+
+    /// The menu row's current value, as shown on the right.
+    pub fn menu_value(&self, item: MenuItem) -> String {
+        let p = &self.prefix_label;
+        match item {
+            MenuItem::Keys => format!("{p} ?"),
+            MenuItem::Theme => format!("‹ {} ›", theme::get().name),
+            MenuItem::Order => format!("‹ {} ›", self.order.label()),
+            MenuItem::Notifications => {
+                format!("‹ {} ›", if self.notifications { "on" } else { "off" })
+            }
+            MenuItem::Hooks(a) => match self.hooks.iter().find(|(x, _)| *x == a) {
+                Some((_, HookStatus::Installed)) => "installed".into(),
+                Some((_, HookStatus::Missing)) => "install…".into(),
+                Some((_, HookStatus::NotFound)) | None => "not found".into(),
+            },
+            MenuItem::Detach => format!("{p} d"),
+            MenuItem::Exit => format!("{p} q"),
+        }
+    }
+
+    fn toggle_order(&mut self) {
+        self.order = self.order.toggled();
+        self.save_setting("sidebar_order", self.order.config_value());
+    }
+
+    /// Activate a menu row; `step` is -1/+1 for ←/→ on a setting.
+    fn menu_activate(&mut self, selected: usize, step: isize) {
+        let stay = Mode::Menu { selected };
+        match MENU[selected] {
+            MenuItem::Keys => self.mode = Mode::Help,
+            MenuItem::Theme => {
+                let next = theme::cycle(step);
+                theme::set(next);
+                self.save_setting("theme", next.name);
+                self.mode = stay;
+            }
+            MenuItem::Order => {
+                self.toggle_order();
+                self.mode = stay;
+            }
+            MenuItem::Notifications => {
+                self.notifications = !self.notifications;
+                self.save_setting("notifications", self.notifications);
+                self.mode = stay;
+            }
+            MenuItem::Hooks(a) => match self.hooks.iter().find(|(x, _)| *x == a) {
+                Some((_, HookStatus::Missing)) => self.mode = Mode::Hooks(a),
+                Some((_, HookStatus::Installed)) => {
+                    self.set_status(
+                        format!(
+                            "{} hooks are installed; `corral integrate {} --uninstall` removes them",
+                            a.label(),
+                            a.label()
+                        ),
+                        false,
+                    );
+                    self.mode = stay;
+                }
+                _ => {
+                    self.set_status(
+                        format!("{} isn't installed on this machine", a.label()),
+                        false,
+                    );
+                    self.mode = stay;
+                }
+            },
+            MenuItem::Detach => self.detach(),
+            MenuItem::Exit => self.mode = Mode::Quit,
+        }
+    }
+
+    fn menu_key(&mut self, selected: usize, key: Key) {
+        let n = MENU.len();
+        let is_setting = matches!(
+            MENU[selected],
+            MenuItem::Theme | MenuItem::Order | MenuItem::Notifications
+        );
+        match key {
+            Key::Esc | Key::Ctrl('c') | Key::Char('q' | 'm') => {}
+            Key::Up | Key::Char('k') | Key::BackTab => {
+                self.mode = Mode::Menu {
+                    selected: (selected + n - 1) % n,
+                }
+            }
+            Key::Down | Key::Char('j') | Key::Tab => {
+                self.mode = Mode::Menu {
+                    selected: (selected + 1) % n,
+                }
+            }
+            Key::Left | Key::Char('h') if is_setting => self.menu_activate(selected, -1),
+            Key::Right | Key::Char('l') if is_setting => self.menu_activate(selected, 1),
+            Key::Enter | Key::Char(' ') => self.menu_activate(selected, 1),
+            _ => self.mode = Mode::Menu { selected },
+        }
+    }
+
+    /// A click while a dialog is open: the menu's rows work, and clicking
+    /// elsewhere closes the menu.
+    fn dialog_mouse(&mut self, m: Mouse) {
+        if !matches!(m.kind, MouseKind::LeftDown) {
+            return;
+        }
+        if let Mode::Menu { .. } = self.mode {
+            match self
+                .menu_hits
+                .iter()
+                .find(|(r, _)| r.contains((m.x, m.y).into()))
+            {
+                Some(&(_, i)) => self.menu_activate(i, 1),
+                None => self.mode = Mode::Normal,
+            }
+        }
     }
 
     fn open_close(&mut self) {
@@ -517,8 +705,9 @@ impl App {
 
     fn prefix_command(&mut self, key: Key) {
         match key {
-            Key::Char('n') => self.open_new(false),
-            Key::Char('w') => self.open_new(true),
+            Key::Char('n') => self.new_shell(),
+            Key::Char('w') => self.open_worktree(),
+            Key::Char('m') => self.open_menu(),
             Key::Char('j') | Key::Down => self.cycle_focus(1),
             Key::Char('k') | Key::Up => self.cycle_focus(-1),
             Key::Char(c @ '1'..='9') => {
@@ -634,8 +823,11 @@ impl App {
                     .map(|h| h.click.clone());
                 match click {
                     Some(sidebar::Click::Focus(id)) => self.set_focus(id),
-                    Some(sidebar::Click::New { worktree }) => self.open_new(worktree),
+                    Some(sidebar::Click::New { worktree: false }) => self.new_shell(),
+                    Some(sidebar::Click::New { worktree: true }) => self.open_worktree(),
+                    Some(sidebar::Click::Menu) => self.open_menu(),
                     Some(sidebar::Click::Exit) => self.mode = Mode::Quit,
+                    Some(sidebar::Click::Order) => self.toggle_order(),
                     None => {}
                 }
             }
@@ -667,10 +859,19 @@ impl App {
                 Key::Esc | Key::Ctrl('c') => {}
                 _ => self.mode = Mode::Quit,
             },
-            Mode::New(mut d) => match d.handle(key) {
-                Some(true) => self.submit_new(d),
+            Mode::Worktree(mut d) => match d.handle(key) {
+                Some(true) => self.submit_worktree(d),
                 Some(false) => {}
-                None => self.mode = Mode::New(d),
+                None => self.mode = Mode::Worktree(d),
+            },
+            Mode::Menu { selected } => self.menu_key(selected, key),
+            Mode::Hooks(agent) => match key {
+                Key::Char('y' | 'Y') | Key::Enter => match integrate::install_quietly(agent) {
+                    Ok(msg) => self.set_status(msg, false),
+                    Err(e) => self.set_status(format!("{e:#}"), true),
+                },
+                Key::Esc | Key::Ctrl('c') | Key::Char('n' | 'N' | 'q') => {}
+                _ => self.mode = Mode::Hooks(agent),
             },
             Mode::Rename { pane, mut input } => match key {
                 Key::Esc | Key::Ctrl('c') => {}
@@ -745,7 +946,7 @@ impl App {
             .trim_end_matches("\x1b[201~")
             .replace(['\r', '\n'], " ");
         match &mut self.mode {
-            Mode::New(d) => d.paste(&text),
+            Mode::Worktree(d) => d.paste(&text),
             Mode::Rename { input, .. } => input.insert_str(&text),
             Mode::Diff(v) => v.paste(&text),
             _ => {}
@@ -758,7 +959,9 @@ impl App {
             let in_dialog = !matches!(self.mode, Mode::Normal | Mode::Scroll { .. });
             match chunk {
                 Chunk::Mouse(m) => {
-                    if !in_dialog {
+                    if in_dialog {
+                        self.dialog_mouse(m);
+                    } else {
                         self.on_mouse(m);
                     }
                 }
@@ -844,8 +1047,9 @@ impl App {
                 self.screens.retain(|id, _| self.tiles.contains(id));
                 if !self.seen_state {
                     self.seen_state = true;
+                    // Nothing running yet: start with a shell.
                     if self.panes.is_empty() {
-                        self.open_new(false);
+                        self.new_shell();
                     }
                 }
             }
@@ -869,10 +1073,12 @@ impl App {
                 }
             }
             ServerMsg::Notify { message, .. } => {
-                self.term_writes.push(0x07);
-                let clean: String = message.chars().filter(|c| !c.is_control()).collect();
-                self.term_writes
-                    .extend_from_slice(format!("\x1b]9;corral: {clean}\x07").as_bytes());
+                if self.notifications {
+                    self.term_writes.push(0x07);
+                    let clean: String = message.chars().filter(|c| !c.is_control()).collect();
+                    self.term_writes
+                        .extend_from_slice(format!("\x1b]9;corral: {clean}\x07").as_bytes());
+                }
                 self.set_status(message, false);
             }
             ServerMsg::Reply { id, result } => {
@@ -1031,6 +1237,7 @@ pub async fn run(workspace: Option<String>) -> Result<()> {
     theme::set(theme::by_name(&config.theme)?);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let mut app = App::new(&config, cwd)?;
+    app.save_to = Some(paths::config_path());
     let conn = Conn::connect_or_start(&paths::socket_path()).await?;
 
     let exit = {
@@ -1263,22 +1470,46 @@ mod tests {
         assert_eq!(a.exit, Some(Exit::Detached));
     }
 
+    /// The `New` request in the outbox.
+    fn sent_new(a: &App) -> NewPane {
+        a.outbox
+            .iter()
+            .find_map(|m| match m {
+                ClientMsg::Command {
+                    cmd: Command::New(req),
+                    ..
+                } => Some(req.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no New in {:?}", a.outbox))
+    }
+
     #[test]
-    fn new_dialog_sends_a_shell_command() {
+    fn new_opens_a_shell_and_worktree_asks_for_a_branch() {
+        // ^b n: a plain shell next to the focused agent, no dialog.
+        let mut a = app();
+        a.on_stdin(b"\x02n");
+        assert!(matches!(a.mode, Mode::Normal));
+        let req = sent_new(&a);
+        assert!(req.command.is_empty() && req.focus && !req.worktree);
+        assert_eq!(req.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+
+        // With a default command it runs first, and the shell stays after.
+        let mut a = app();
+        a.default_command = "claude".into();
+        a.on_stdin(b"\x02n");
+        let req = sent_new(&a);
+        assert_eq!(req.command, vec!["claude"]);
+        assert!(req.shell && req.then_shell);
+
+        // ^b w: the worktree dialog starts on the branch field.
         let mut a = app();
         a.on_stdin(b"\x02w");
-        assert!(matches!(&a.mode, Mode::New(d) if d.worktree));
-        a.on_stdin(b" --resume\r");
-        let Some(ClientMsg::Command {
-            cmd: Command::New(req),
-            ..
-        }) = a.outbox.first()
-        else {
-            panic!("{:?}", a.outbox);
-        };
-        assert_eq!(req.command, vec!["claude --resume"]);
-        assert!(req.shell && req.worktree && req.focus);
-        assert_eq!(req.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+        assert!(matches!(&a.mode, Mode::Worktree(d) if d.field == 1));
+        a.on_stdin(b"fix-login\r");
+        let req = sent_new(&a);
+        assert!(req.worktree && req.command.is_empty());
+        assert_eq!(req.branch.as_deref(), Some("fix-login"));
         assert!(matches!(a.mode, Mode::Normal));
     }
 
@@ -1381,14 +1612,15 @@ mod tests {
     }
 
     #[test]
-    fn opens_new_dialog_when_empty() {
+    fn starts_a_shell_when_empty() {
         let mut a = App::new(&Config::default(), "/tmp".into()).unwrap();
         a.on_server(ServerMsg::State {
             panes: vec![],
             focus: None,
             view_generation: 0,
         });
-        assert!(matches!(a.mode, Mode::New(_)));
+        assert!(matches!(a.mode, Mode::Normal));
+        assert!(sent_new(&a).command.is_empty());
     }
 
     #[test]
@@ -1430,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn new_agent_buttons_open_the_dialog() {
+    fn new_buttons() {
         let mut a = app();
         a.sidebar_area = Rect::new(0, 0, 30, 20);
         let button = |x, worktree| sidebar::Hit {
@@ -1438,14 +1670,70 @@ mod tests {
             click: sidebar::Click::New { worktree },
         };
         a.hits = vec![button(1, false), button(14, true)];
-        // Click "+ new agent".
+        // Click "+ new shell".
         a.on_stdin(b"\x1b[<0;3;19M\x1b[<0;3;19m");
-        assert!(matches!(&a.mode, Mode::New(d) if !d.worktree));
-        assert!(a.outbox.is_empty());
-        a.on_stdin(b"\x1b");
+        assert!(sent_new(&a).command.is_empty());
+        assert!(matches!(a.mode, Mode::Normal));
         // Click "⎇ worktree".
         a.on_stdin(b"\x1b[<0;16;19M");
-        assert!(matches!(&a.mode, Mode::New(d) if d.worktree));
+        assert!(matches!(&a.mode, Mode::Worktree(_)));
+    }
+
+    #[test]
+    fn menu_changes_settings() {
+        let mut a = app();
+        let before = theme::get().name;
+        a.on_stdin(b"\x02m");
+        assert!(matches!(a.mode, Mode::Menu { selected: 0 }));
+        // Down to the theme, → to the next one.
+        a.on_stdin(b"j\x1b[C");
+        assert!(matches!(a.mode, Mode::Menu { selected: 1 }));
+        assert_ne!(theme::get().name, before);
+        assert!(a.menu_value(MenuItem::Theme).contains(theme::get().name));
+        a.on_stdin(b"\x1b[D");
+        assert_eq!(theme::get().name, before);
+        // The sidebar order flips, and so does j/k's order.
+        a.on_stdin(b"j\r");
+        assert_eq!(a.order, Order::Project);
+        a.on_stdin(b"\x1b");
+        assert!(matches!(a.mode, Mode::Normal));
+        a.on_stdin(b"\x02j");
+        assert_eq!(sent_focus(&a), "p2");
+
+        // Notifications off: the status line still says it, no bell.
+        a.on_stdin(b"\x02m");
+        a.on_stdin(b"jjj ");
+        assert!(!a.notifications);
+        a.on_stdin(b"q");
+        a.on_server(ServerMsg::Notify {
+            pane: "p2".into(),
+            state: AgentState::Blocked,
+            message: "p2 needs your input".into(),
+        });
+        assert!(a.term_writes.is_empty());
+        assert!(a.status().unwrap().0.contains("p2"));
+
+        // Clicking a row works; clicking elsewhere closes the menu.
+        a.on_stdin(b"\x02m");
+        a.menu_hits = vec![(Rect::new(10, 3, 20, 1), 0)];
+        a.on_stdin(b"\x1b[<0;12;4M");
+        assert!(matches!(a.mode, Mode::Help));
+        a.on_stdin(b"q\x02m");
+        a.on_stdin(b"\x1b[<0;80;30M");
+        assert!(matches!(a.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn order_switch_in_the_sidebar() {
+        let mut a = app();
+        a.hits = vec![sidebar::Hit {
+            area: Rect::new(15, 1, 12, 1),
+            click: sidebar::Click::Order,
+        }];
+        a.on_stdin(b"\x1b[<0;17;2M");
+        assert_eq!(a.order, Order::Project);
+        a.on_stdin(b"\x1b[<0;17;2M");
+        assert_eq!(a.order, Order::Need);
     }
 
     #[test]

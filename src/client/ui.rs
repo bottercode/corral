@@ -11,8 +11,8 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 use unicode_width::UnicodeWidthStr;
 
 use super::input::Key;
-use super::sidebar::{Sidebar, badge, clean_title, truncate};
-use super::{App, Mode, diff, theme};
+use super::sidebar::{Sidebar, badge, task_title, truncate};
+use super::{App, MENU, MenuItem, Mode, diff, theme};
 use crate::protocol::{AgentState, PaneInfo, WorktreeAction};
 
 /// Below this width the sidebar is hidden.
@@ -220,38 +220,22 @@ impl TextInput {
     }
 }
 
+/// New worktree: the repo directory and an optional branch name.
 #[derive(Debug, Clone)]
-pub struct NewDialog {
-    pub command: TextInput,
+pub struct WorktreeDialog {
     pub cwd: TextInput,
-    pub worktree: bool,
     pub branch: TextInput,
     pub field: usize,
 }
 
-impl NewDialog {
-    pub const FIELDS: usize = 4;
-
-    pub fn new(command: &str, cwd: &Path, worktree: bool) -> Self {
-        NewDialog {
-            command: TextInput::new(command),
+impl WorktreeDialog {
+    pub fn new(cwd: &Path) -> Self {
+        WorktreeDialog {
             cwd: TextInput::new(&home_relative(cwd)),
-            worktree,
             branch: TextInput::default(),
-            field: 0,
+            // Usually the directory is right; start on the branch.
+            field: 1,
         }
-    }
-
-    fn next_field(&mut self, delta: isize) {
-        let mut f = self.field as isize;
-        loop {
-            f = (f + delta).rem_euclid(Self::FIELDS as isize);
-            // The branch field only matters with a worktree.
-            if f != 3 || self.worktree {
-                break;
-            }
-        }
-        self.field = f as usize;
     }
 
     /// Returns Some(true) to submit, Some(false) to cancel.
@@ -259,17 +243,11 @@ impl NewDialog {
         match key {
             Key::Esc | Key::Ctrl('c') => return Some(false),
             Key::Enter => return Some(true),
-            Key::Tab | Key::Down => self.next_field(1),
-            Key::BackTab | Key::Up => self.next_field(-1),
-            Key::Char(' ') if self.field == 2 => self.worktree = !self.worktree,
-            Key::Char('x' | 'y') if self.field == 2 => self.worktree = true,
-            Key::Char('n') if self.field == 2 => self.worktree = false,
+            Key::Tab | Key::BackTab | Key::Down | Key::Up => self.field = 1 - self.field,
             k => {
                 match self.field {
-                    0 => self.command.handle(k),
-                    1 => self.cwd.handle(k),
-                    3 => self.branch.handle(k),
-                    _ => false,
+                    0 => self.cwd.handle(k),
+                    _ => self.branch.handle(k),
                 };
             }
         }
@@ -278,10 +256,8 @@ impl NewDialog {
 
     pub fn paste(&mut self, text: &str) {
         match self.field {
-            0 => self.command.insert_str(text),
-            1 => self.cwd.insert_str(text),
-            3 => self.branch.insert_str(text),
-            _ => {}
+            0 => self.cwd.insert_str(text),
+            _ => self.branch.insert_str(text),
         }
     }
 }
@@ -355,6 +331,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             panes: &app.panes,
             focus: app.focus.as_deref(),
             shown: &shown,
+            order: app.order,
             frame: app.frame,
             age_offset: app.state_at.elapsed(),
         }
@@ -381,10 +358,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Normal | Mode::Scroll { .. } | Mode::Diff(_) => {}
         Mode::Quit => draw_quit(f, app.running_agents(), areas.pane),
         Mode::Help => draw_help(f, app, areas.pane),
-        Mode::New(d) => {
+        Mode::Worktree(d) => {
             let d = d.clone();
-            draw_new(f, &d, areas.pane);
+            draw_worktree(f, &d, areas.pane);
         }
+        Mode::Menu { selected } => {
+            let selected = *selected;
+            draw_menu(f, app, selected);
+        }
+        Mode::Hooks(agent) => draw_hooks(f, *agent, areas.pane),
         Mode::Rename { pane, input } => {
             let (pane, input) = (pane.clone(), input.clone());
             draw_rename(f, &pane, &input, areas.pane);
@@ -409,7 +391,7 @@ fn draw_empty(f: &mut Frame, app: &App, area: Rect) {
             Line::from(vec![
                 Span::raw("Press "),
                 Span::styled(format!("{p} n"), t.key()),
-                Span::raw(" to start one, "),
+                Span::raw(" for a shell to start one in, "),
                 Span::styled(format!("{p} w"), t.key()),
                 Span::raw(" for one in its own git worktree (or click the buttons),"),
             ]),
@@ -532,11 +514,7 @@ fn draw_tile_header(f: &mut Frame, app: &App, p: &PaneInfo, row: Rect, focused: 
     ];
     let used: usize = left.iter().map(|s| s.content.width()).sum();
     let room = (row.width as usize).saturating_sub(used + badge.width() + 4);
-    if let Some(title) = p
-        .title
-        .as_deref()
-        .map(clean_title)
-        .filter(|s| !s.is_empty())
+    if let Some(title) = task_title(p)
         && room > 6
     {
         left.push(Span::styled(
@@ -568,6 +546,7 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
         let mut l = key_hint(&[
             ("n", "new"),
             ("w", "worktree"),
+            ("m", "menu"),
             ("j/k", "switch"),
             ("b", "blocked"),
             ("s", "split"),
@@ -619,8 +598,8 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         (
             "agents",
             vec![
-                ("n", "start a new agent"),
-                ("w", "start a new agent in its own git worktree"),
+                ("n", "new shell (then run claude, codex, …)"),
+                ("w", "new shell in its own git worktree"),
                 ("j / k, ↑ / ↓", "next / previous agent"),
                 ("1 … 9", "jump to agent by number"),
                 ("b", "jump to the next blocked agent"),
@@ -645,6 +624,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         (
             "corral",
             vec![
+                (
+                    "m",
+                    "menu: theme, sidebar order, notifications, agent hooks",
+                ),
                 ("d", "detach (agents keep running)"),
                 ("q", "exit: detach, or stop corral and every agent"),
                 ("?", "this help"),
@@ -708,64 +691,147 @@ fn field_line(
     (Line::from(all), active.then_some(label_w as u16 + cur))
 }
 
-fn draw_new(f: &mut Frame, d: &NewDialog, area: Rect) {
-    let r = centered(area, 64, 8);
+fn draw_worktree(f: &mut Frame, d: &WorktreeDialog, area: Rect) {
+    let r = centered(area, 64, 7);
     let inner_w = r.width.saturating_sub(2);
-    let (cmd, c0) = field_line("Command", &d.command, d.field == 0, "your shell", inner_w);
-    let (cwd, c1) = field_line("Dir", &d.cwd, d.field == 1, "~", inner_w);
-    let check = if d.worktree { "[x]" } else { "[ ]" };
-    let wt = Line::from(vec![
-        Span::styled(
-            if d.field == 2 { "›" } else { " " }.to_string(),
-            theme::get().accent(),
-        ),
-        Span::styled(format!("{:<9}", "Worktree"), theme::get().muted()),
-        Span::styled(
-            format!("{check} own git worktree and branch"),
-            if d.field == 2 {
-                Style::new().add_modifier(Modifier::BOLD)
-            } else {
-                Style::new()
-            },
-        ),
-    ]);
-    let (branch, c3) = if d.worktree {
-        field_line(
-            "Branch",
-            &d.branch,
-            d.field == 3,
-            "corral/<agent>-xxxx",
-            inner_w,
-        )
-    } else {
-        (Line::default(), None)
-    };
+    let (cwd, c0) = field_line("Repo", &d.cwd, d.field == 0, "~", inner_w);
+    let (branch, c1) = field_line(
+        "Branch",
+        &d.branch,
+        d.field == 1,
+        "new corral/agent-xxxx, or an existing branch",
+        inner_w,
+    );
     let text = vec![
-        cmd,
         cwd,
-        wt,
         branch,
         Line::default(),
-        key_hint(&[
-            ("Tab", "next"),
-            ("Space", "toggle"),
-            ("Enter", "start"),
-            ("Esc", "cancel"),
-        ]),
+        Line::styled(
+            "Opens a shell in a fresh checkout on that branch.",
+            theme::get().muted(),
+        ),
+        key_hint(&[("Tab", "next"), ("Enter", "create"), ("Esc", "cancel")]),
     ];
-    let title = if d.worktree {
-        "New agent · worktree"
-    } else {
-        "New agent"
-    };
     f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(text).block(dialog_block(title)), r);
-    let cursor = [(0u16, c0), (1, c1), (3, c3)]
+    f.render_widget(Paragraph::new(text).block(dialog_block("New worktree")), r);
+    let cursor = [(0u16, c0), (1, c1)]
         .into_iter()
         .find_map(|(row, c)| c.map(|c| (row, c)));
     if let Some((row, col)) = cursor {
         f.set_cursor_position((r.x + 1 + col, r.y + 1 + row));
     }
+}
+
+/// The menu drops down from its button at the top of the sidebar.
+fn draw_menu(f: &mut Frame, app: &mut App, selected: usize) {
+    let t = theme::get();
+    let label = |item: MenuItem| match item {
+        MenuItem::Keys => "keys".to_string(),
+        MenuItem::Theme => "theme".into(),
+        MenuItem::Order => "sidebar".into(),
+        MenuItem::Notifications => "notifications".into(),
+        MenuItem::Hooks(a) => format!("{} hooks", a.label()),
+        MenuItem::Detach => "detach".into(),
+        MenuItem::Exit => "exit corral…".into(),
+    };
+    let rows: Vec<(String, String)> = MENU
+        .iter()
+        .map(|&item| (label(item), app.menu_value(item)))
+        .collect();
+    let hint = key_hint(&[("↑↓", "pick"), ("←→", "change"), ("Esc", "close")]);
+    let left_w = rows.iter().map(|(l, _)| l.width()).max().unwrap_or(0);
+    let right_w = rows.iter().map(|(_, v)| v.width()).max().unwrap_or(0);
+    let width = (left_w + right_w + 6).max(hint.width() + 3) as u16;
+    let area = f.area();
+    // Under the sidebar's title row, right-aligned with the menu button.
+    let x = (app.sidebar_area.x + app.sidebar_area.width)
+        .saturating_sub(width + 1)
+        .max(area.x);
+    let height = rows.len() as u16 + 4;
+    let r = Rect::new(
+        x,
+        area.y + 1,
+        width.min(area.width),
+        height.min(area.height.saturating_sub(1)),
+    );
+    f.render_widget(Clear, r);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.accent());
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    app.menu_hits.clear();
+    for (i, (l, v)) in rows.iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let row = Rect::new(inner.x, y, inner.width, 1);
+        let sel = i == selected;
+        let pad = (inner.width as usize).saturating_sub(l.width() + v.width() + 2);
+        let value_style = match MENU[i] {
+            MenuItem::Hooks(_) if v == "installed" => t.fg(t.done),
+            MenuItem::Hooks(_) if v == "install…" => t.accent(),
+            MenuItem::Keys | MenuItem::Detach | MenuItem::Exit => t.muted(),
+            _ => Style::new().fg(t.text),
+        };
+        let line = Line::from(vec![
+            Span::styled(if sel { "▍" } else { " " }, t.accent()),
+            Span::styled(
+                l.clone(),
+                if sel {
+                    t.bold()
+                } else {
+                    Style::new().fg(t.text)
+                },
+            ),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(v.clone(), value_style),
+        ]);
+        if sel {
+            f.buffer_mut().set_style(row, t.selected());
+        }
+        f.render_widget(line, row);
+        app.menu_hits.push((row, i));
+    }
+    let hint_y = inner.y + inner.height.saturating_sub(1);
+    f.render_widget(
+        hint,
+        Rect::new(inner.x + 1, hint_y, inner.width.saturating_sub(1), 1),
+    );
+}
+
+fn draw_hooks(f: &mut Frame, agent: crate::integrate::Agent, area: Rect) {
+    let t = theme::get();
+    let path = home_relative(&agent.config_path());
+    let text = vec![
+        Line::from(vec![
+            Span::raw("Add corral's hooks to "),
+            Span::styled(path, t.accent()),
+            Span::raw("?"),
+        ]),
+        Line::styled(
+            format!(
+                "{} then tells corral exactly when it's working, blocked or done.",
+                agent.label()
+            ),
+            t.muted(),
+        ),
+        Line::styled(
+            "Your other settings are kept, and the original file is backed up.",
+            t.muted(),
+        ),
+        Line::default(),
+        key_hint(&[("y", "install"), ("Esc", "cancel")]),
+    ];
+    let width = text.iter().map(Line::width).max().unwrap_or(0) as u16 + 2;
+    let r = centered(area, width, text.len() as u16 + 2);
+    f.render_widget(Clear, r);
+    f.render_widget(
+        Paragraph::new(text).block(dialog_block(&format!("{} hooks", agent.label()))),
+        r,
+    );
 }
 
 fn draw_quit(f: &mut Frame, running: usize, area: Rect) {
@@ -949,22 +1015,17 @@ mod tests {
     }
 
     #[test]
-    fn new_dialog_navigation() {
-        let mut d = NewDialog::new("claude", Path::new("/tmp"), false);
-        d.handle(Key::Tab);
+    fn worktree_dialog_navigation() {
+        let mut d = WorktreeDialog::new(Path::new("/tmp"));
         assert_eq!(d.field, 1);
-        d.handle(Key::Tab);
-        assert_eq!(d.field, 2);
-        // Branch is skipped without a worktree.
-        d.handle(Key::Tab);
-        assert_eq!(d.field, 0);
-        d.handle(Key::BackTab);
-        d.handle(Key::Char(' '));
-        assert!(d.worktree);
-        d.handle(Key::Tab);
-        assert_eq!(d.field, 3);
         d.handle(Key::Char('b'));
         assert_eq!(d.branch.text, "b");
+        d.handle(Key::Tab);
+        assert_eq!(d.field, 0);
+        d.handle(Key::Char('/'));
+        assert_eq!(d.cwd.text, "/tmp/");
+        d.handle(Key::BackTab);
+        assert_eq!(d.field, 1);
         assert_eq!(d.handle(Key::Enter), Some(true));
         assert_eq!(d.handle(Key::Esc), Some(false));
     }

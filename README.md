@@ -6,8 +6,8 @@ them running when you close the laptop or lose SSH. Optionally, give each
 agent its own git worktree so parallel agents never edit the same checkout.
 
 ```
- corral               ✕ exit │ 2 fixer · Fix token refresh   ◆ blocked 4m│▍1 api · Add rate limiting         ⠋ 32s
- ─────────────────────────── │⏺ I'll patch the refresh lock.             │⏺ Reading src/limits.rs
+ corral       ≡ menu  ✕ exit │ 2 fixer · Fix token refresh   ◆ blocked 4m│▍1 api · Add rate limiting         ⠋ 32s
+ ───────────────── ⇅ by need │⏺ I'll patch the refresh lock.             │⏺ Reading src/limits.rs
  NEEDS YOU  2                │                                            │
  2 fixer       ◆ blocked 4m  │ Do you want to proceed?                    │  ⎿ Read 120 lines
  3 docs           ✓ done 1m  │ ❯ 1. Yes                                   │
@@ -21,7 +21,7 @@ agent its own git worktree so parallel agents never edit the same checkout.
  QUIET  1                    │                                            │
  4 tests               idle  │                                            │
  ─────────────────────────── │                                            │
- + new agent   ⎇ worktree    │                                            │          ^b ? keys
+ + new shell   ⎇ worktree    │                                            │          ^b ? keys
 ```
 
 ## Why
@@ -67,17 +67,17 @@ This installs a `corral` binary into `~/.cargo/bin`.
 corral                      # open the UI (starts the server if needed)
 ```
 
-With no agents running, the new-agent dialog opens. Type a command
-(`claude` by default), pick a directory, tick **Worktree** if you want one, and
-press Enter.
+corral opens a shell in the current directory. Start an agent in it the way
+you normally would (`claude`, `codex`, `opencode`…); corral notices and tracks
+it. When the agent quits you're back at the shell, in the same place.
 
 Everything you type goes to the focused agent. corral's own commands are
 **Ctrl-b, then a key** (the bottom line reminds you):
 
 | Keys | Action |
 |---|---|
-| `^b n` | new agent |
-| `^b w` | new agent in its own git worktree |
+| `^b n` | new shell, next to the focused agent's work |
+| `^b w` | new shell in its own git worktree (asks for a branch name) |
 | `^b j` / `^b k`, `^b ↑` / `^b ↓` | next / previous agent |
 | `^b 1` … `^b 9` | jump to an agent |
 | `^b b` | jump to the next blocked agent |
@@ -88,6 +88,7 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b D` | review the agent's worktree diff ([below](#diff-review)) |
 | `^b x` | close the agent's pane |
 | `^b r` | rename it |
+| `^b m` | menu: theme, sidebar order, notifications, agent hooks |
 | `^b d` | detach (agents keep running) |
 | `^b q` | exit: detach, or stop corral and every agent (also the **✕ exit** button) |
 | `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`) |
@@ -95,10 +96,15 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b ^b` | send a literal `Ctrl-b` to the agent |
 
 Click an agent on screen to type into it, or a sidebar row to bring that agent
-into the focused spot; the **+ new agent** / **⎇ worktree** buttons at the
-bottom of the sidebar start one. **✕ exit** (top of the
-sidebar) asks whether to detach, leaving agents running, or stop corral and
-every agent; worktrees are kept either way. Scroll the wheel for
+into the focused spot. The **+ new shell** / **⎇ worktree** buttons at the
+bottom of the sidebar open one. At the top:
+
+- **≡ menu** (or `^b m`) changes the theme, the sidebar's order and
+  notifications, and installs agent hooks. Changes are saved to your config.
+- **⇅ by need / by project**, on the line under the title, switches between
+  listing agents by what they need from you and grouping them by project.
+- **✕ exit** asks whether to detach, leaving agents running, or stop corral
+  and every agent; worktrees are kept either way. Scroll the wheel for
 scrollback. corral captures the mouse, so hold Shift (Option in some
 terminals) to select text.
 
@@ -106,6 +112,10 @@ Detach, close the terminal, and come back later (or from another machine over
 SSH): run `corral` again and everything is where you left it.
 
 ## Worktrees
+
+In the UI, `^b w` (or **⎇ worktree**) asks for a branch name, leave it empty
+for a fresh `corral/agent-xxxx`, and opens a shell in the new checkout. From
+any shell:
 
 ```sh
 corral new --worktree -- claude
@@ -280,11 +290,12 @@ Each pane gets these environment variables:
 
 ```toml
 prefix = "C-b"                         # C-a … C-z or C-space
-default_command = "claude"             # prefilled in the new-agent dialog
+default_command = ""                   # run in each new shell, e.g. "claude"; you get the shell back when it exits
 notifications = true
 worktree_root = "~/.corral/worktrees"
 sidebar_width = 30
 theme = "ranch"                        # ranch, ink or terminal
+sidebar_order = "need"                 # need or project
 ```
 
 Themes:

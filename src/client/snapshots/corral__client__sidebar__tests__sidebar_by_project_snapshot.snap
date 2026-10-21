@@ -1,0 +1,27 @@
+---
+source: src/client/sidebar.rs
+assertion_line: 708
+expression: text
+---
+ corral        ≡ menu   ✕ exit │
+ ─────────────── ⇅ by project  │
+ corral  2                     │
+▍1 claude         ◆ blocked 4m │
+▍  Fix token refresh           │
+▍  claude                      │
+▍  ⎇ corral/claude-3f9a +42 −7 │
+ 3 a-very-long-agen… ✓ done 4m │
+                               │
+ website  3                    │
+ 2 codex                  ⠋ 4m │
+ 4 zsh                exited 1 │
+ 5 docs                   idle │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+ ───────────────────────────── │
+ + new shell   ⎇ worktree      │

@@ -146,21 +146,21 @@ fn tui_shows_panes_forwards_input_and_detaches() {
         s.panes().iter().any(|p| p.rows > 25)
     });
 
-    // Prefix n opens the new-agent dialog; Esc closes it.
+    // Prefix n opens a shell right away, with the keyboard on it.
     t.type_(b"\x02n");
-    t.wait_for("dialog", |x| {
-        x.contains("New agent") && x.contains("Command")
+    eventually("third pane", || s.panes().len() == 3);
+    t.type_(b"echo from-$((1+1))-shell\r");
+    t.wait_for("typed into the new shell", |x| x.contains("from-2-shell"));
+
+    // Prefix w asks for a branch (this directory isn't a repo, so the
+    // worktree falls back to a plain shell with a warning); Esc cancels.
+    t.type_(b"\x02w");
+    t.wait_for("worktree dialog", |x| {
+        x.contains("New worktree") && x.contains("Branch")
     });
     println!("{}", t.screen());
     t.type_(b"\x1b");
-    t.wait_for("dialog closed", |x| !x.contains("New agent"));
-
-    // Start a pane from the dialog: it gets focus.
-    t.type_(b"\x02n");
-    t.wait_for("dialog", |x| x.contains("New agent"));
-    t.type_(b"\x15echo from-dialog; cat\r");
-    t.wait_for("third pane", |x| x.contains("from-dialog"));
-    assert_eq!(s.panes().len(), 3);
+    t.wait_for("dialog closed", |x| !x.contains("New worktree"));
 
     // Help overlay.
     t.type_(b"\x02?");
@@ -276,7 +276,7 @@ fn diff_review_commit_and_merge() {
 }
 
 #[test]
-fn new_agent_button_starts_an_agent() {
+fn new_shell_button_opens_a_shell() {
     let s = TestServer::start();
     let dir = s.dir.path().to_str().unwrap().to_string();
     s.ok(&[
@@ -290,14 +290,14 @@ fn new_agent_button_starts_an_agent() {
     ]);
     let mut t = Tui::start(&s, 120, 30);
     t.wait_for("button", |x| {
-        x.contains("+ new agent") && x.contains("first-agent")
+        x.contains("+ new shell") && x.contains("first-agent")
     });
-    // Click the "+ new agent" button where it's drawn.
+    // Click the "+ new shell" button where it's drawn.
     let screen = t.screen();
     let (row, col) = screen
         .lines()
         .enumerate()
-        .find_map(|(r, l)| l.find("+ new agent").map(|c| (r, l[..c].chars().count())))
+        .find_map(|(r, l)| l.find("+ new shell").map(|c| (r, l[..c].chars().count())))
         .unwrap();
     t.type_(
         format!(
@@ -309,12 +309,9 @@ fn new_agent_button_starts_an_agent() {
         )
         .as_bytes(),
     );
-    t.wait_for("dialog", |x| {
-        x.contains("New agent") && x.contains("Command")
-    });
-    t.type_(b"\x15echo from-button; cat\r");
-    t.wait_for("new agent focused", |x| x.contains("from-button"));
-    assert_eq!(s.panes().len(), 2);
+    eventually("a second pane", || s.panes().len() == 2);
+    t.type_(b"echo from-$((2+2))-button\r");
+    t.wait_for("new shell focused", |x| x.contains("from-4-button"));
 }
 
 fn click_text(t: &mut Tui, text: &str) {

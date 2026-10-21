@@ -2,11 +2,12 @@
 //!
 //! ```toml
 //! prefix = "C-b"                    # C-a … C-z, or C-space
-//! default_command = "claude"        # prefilled in the new-agent dialog
+//! default_command = ""              # run in each new shell, e.g. "claude"
 //! notifications = true              # bell + OSC 9 when an unfocused agent is blocked/done
 //! worktree_root = "~/.corral/worktrees"
 //! sidebar_width = 30
 //! theme = "ranch"                  # ranch, ink or terminal
+//! sidebar_order = "need"           # need (what needs you first) or project
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -25,17 +26,19 @@ pub struct Config {
     pub worktree_root: Option<String>,
     pub sidebar_width: u16,
     pub theme: String,
+    pub sidebar_order: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             prefix: "C-b".into(),
-            default_command: "claude".into(),
+            default_command: String::new(),
             notifications: true,
             worktree_root: None,
             sidebar_width: 30,
             theme: "ranch".into(),
+            sidebar_order: "need".into(),
         }
     }
 }
@@ -59,6 +62,13 @@ impl Config {
         let cfg: Config = toml::from_str(src)?;
         cfg.prefix_byte()?;
         crate::client::theme::by_name(&cfg.theme)?;
+        if !SIDEBAR_ORDERS.contains(&cfg.sidebar_order.as_str()) {
+            bail!(
+                "sidebar_order must be one of {} (got {:?})",
+                SIDEBAR_ORDERS.join(", "),
+                cfg.sidebar_order
+            );
+        }
         Ok(cfg)
     }
 
@@ -73,6 +83,33 @@ impl Config {
             None => paths::default_worktree_root(),
         }
     }
+}
+
+pub const SIDEBAR_ORDERS: [&str; 2] = ["need", "project"];
+
+/// Set one top-level key in the config file, keeping everything else in it
+/// (comments included). Creates the file if needed.
+pub fn save(key: &str, value: impl Into<toml_edit::Value>) -> Result<()> {
+    save_to(&paths::config_path(), key, value)
+}
+
+pub fn save_to(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> Result<()> {
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let mut doc: toml_edit::DocumentMut = src
+        .parse()
+        .with_context(|| format!("in {}", path.display()))?;
+    doc[key] = toml_edit::value(value);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string()).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 /// `C-b` → 0x02, `C-space` → 0x00.
@@ -110,7 +147,8 @@ mod tests {
         let c = Config::parse("").unwrap();
         assert_eq!(c.prefix_byte().unwrap(), 0x02);
         assert!(c.notifications);
-        assert_eq!(c.default_command, "claude");
+        assert_eq!(c.default_command, "");
+        assert_eq!(c.sidebar_order, "need");
     }
 
     #[test]
@@ -135,7 +173,28 @@ mod tests {
         assert_eq!(c.sidebar_width, 24);
         assert_eq!(c.theme, "ink");
         assert!(Config::parse("theme = 'neon'").is_err());
+        assert!(Config::parse("sidebar_order = 'random'").is_err());
         assert!(!c.notifications);
+    }
+
+    #[test]
+    fn saving_keeps_the_rest_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("config.toml");
+        save_to(&path, "theme", "ink").unwrap();
+        assert_eq!(Config::load_from(&path).unwrap().theme, "ink");
+
+        std::fs::write(&path, "# mine\nprefix = 'C-a'   # comfy\ntheme = 'ink'\n").unwrap();
+        save_to(&path, "theme", "terminal").unwrap();
+        save_to(&path, "notifications", false).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# mine") && text.contains("# comfy"),
+            "{text}"
+        );
+        let c = Config::load_from(&path).unwrap();
+        assert_eq!((c.theme.as_str(), c.notifications), ("terminal", false));
+        assert_eq!(c.prefix_byte().unwrap(), 1);
     }
 
     #[test]

@@ -235,7 +235,12 @@ pub fn diff(old: &str, new: &str) -> String {
 }
 
 /// Apply `transform` to the file at `path` after showing the diff.
-pub fn apply(path: &Path, transform: impl Fn(&str) -> Result<String>, yes: bool) -> Result<bool> {
+/// What a transform would change: `None` when the file is already up to
+/// date, else its current and new contents.
+pub fn plan(
+    path: &Path,
+    transform: impl Fn(&str) -> Result<String>,
+) -> Result<Option<(String, String)>> {
     let old = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -243,9 +248,40 @@ pub fn apply(path: &Path, transform: impl Fn(&str) -> Result<String>, yes: bool)
     };
     let new = transform(&old)?;
     if new == old || (old.trim().is_empty() && new.trim() == "{}") {
+        return Ok(None);
+    }
+    Ok(Some((old, new)))
+}
+
+/// Write `new` over `old` atomically, backing up the original once.
+/// Returns the backup's path if one was made now.
+pub fn write(path: &Path, old: &str, new: &str) -> Result<Option<PathBuf>> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut made = None;
+    if !old.is_empty() {
+        let backup = path.with_extension(format!(
+            "{}.corral-backup",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        ));
+        if !backup.exists() {
+            std::fs::write(&backup, old)
+                .with_context(|| format!("writing backup {}", backup.display()))?;
+            made = Some(backup);
+        }
+    }
+    let tmp = path.with_extension("corral-tmp");
+    std::fs::write(&tmp, new).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(made)
+}
+
+pub fn apply(path: &Path, transform: impl Fn(&str) -> Result<String>, yes: bool) -> Result<bool> {
+    let Some((old, new)) = plan(path, transform)? else {
         println!("{} is already up to date", path.display());
         return Ok(false);
-    }
+    };
     println!("{}:\n{}", path.display(), diff(&old, &new));
     if !yes {
         if !std::io::stdin().is_terminal() {
@@ -260,25 +296,76 @@ pub fn apply(path: &Path, transform: impl Fn(&str) -> Result<String>, yes: bool)
             return Ok(false);
         }
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+    if let Some(backup) = write(path, &old, &new)? {
+        println!("backed up the original to {}", backup.display());
     }
-    if !old.is_empty() {
-        let backup = path.with_extension(format!(
-            "{}.corral-backup",
-            path.extension().and_then(|e| e.to_str()).unwrap_or("")
-        ));
-        if !backup.exists() {
-            std::fs::write(&backup, &old)
-                .with_context(|| format!("writing backup {}", backup.display()))?;
-            println!("backed up the original to {}", backup.display());
-        }
-    }
-    let tmp = path.with_extension("corral-tmp");
-    std::fs::write(&tmp, &new).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     println!("wrote {}", path.display());
     Ok(true)
+}
+
+impl Agent {
+    pub fn label(self) -> &'static str {
+        match self {
+            Agent::Claude => "claude",
+            Agent::Codex => "codex",
+        }
+    }
+
+    pub fn config_path(self) -> PathBuf {
+        match self {
+            Agent::Claude => claude_settings_path(),
+            Agent::Codex => codex_config_path(),
+        }
+    }
+
+    fn install_transform(self) -> fn(&str) -> Result<String> {
+        match self {
+            Agent::Claude => claude_install,
+            Agent::Codex => codex_install,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookStatus {
+    /// The agent's program isn't on `PATH`.
+    NotFound,
+    Missing,
+    Installed,
+}
+
+/// Whether corral's hooks are in `agent`'s config.
+pub fn status(agent: Agent) -> HookStatus {
+    match plan(&agent.config_path(), agent.install_transform()) {
+        Ok(None) => HookStatus::Installed,
+        _ if !on_path(agent.label()) => HookStatus::NotFound,
+        _ => HookStatus::Missing,
+    }
+}
+
+/// Install `agent`'s hooks without printing anything; returns what was done.
+pub fn install_quietly(agent: Agent) -> Result<String> {
+    let path = agent.config_path();
+    let Some((old, new)) = plan(&path, agent.install_transform())? else {
+        return Ok(format!("{} hooks are already installed", agent.label()));
+    };
+    let backup = write(&path, &old, &new)?;
+    Ok(match backup {
+        Some(b) => format!(
+            "installed {} hooks in {} (original saved as {})",
+            agent.label(),
+            path.display(),
+            b.display()
+        ),
+        None => format!("installed {} hooks in {}", agent.label(), path.display()),
+    })
+}
+
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths)
+            .any(|dir| std::fs::metadata(dir.join(program)).is_ok_and(|m| m.is_file()))
+    })
 }
 
 pub fn run_cli(agent: Agent, uninstall: bool, yes: bool) -> Result<()> {

@@ -504,11 +504,13 @@ impl Hub {
         let mut cwd = origin.clone();
         let mut wt = None;
         if req.worktree {
+            // A plain shell's branch is named for the work, not the shell.
+            let branch_hint = if argv.is_empty() { "agent" } else { &hint };
             match worktree::create(
                 &origin,
                 &self.config.worktree_root(),
                 req.branch.as_deref(),
-                &hint,
+                branch_hint,
             ) {
                 Ok(info) => {
                     cwd = info.path.clone();
@@ -831,10 +833,9 @@ impl Hub {
         if changed {
             self.emit(Event::State);
         }
-        if self.config.notifications {
-            for n in notes {
-                self.emit(n);
-            }
+        // Clients decide whether to ring (their `notifications` setting).
+        for n in notes {
+            self.emit(n);
         }
     }
 
@@ -979,7 +980,12 @@ fn resolve_command(req: &NewPane) -> (Vec<String>, Vec<String>) {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "/bin/sh".into());
         let display = line.split_whitespace().map(String::from).collect();
-        return (vec![shell, "-lc".into(), line], display);
+        let script = if req.then_shell {
+            format!("{line}\nexec '{}' -l", shell.replace('\'', r"'\''"))
+        } else {
+            line
+        };
+        return (vec![shell, "-lc".into(), script], display);
     }
     (req.command.clone(), req.command.clone())
 }
@@ -1103,6 +1109,20 @@ mod tests {
         assert_eq!(argv[2], "claude --model opus");
         assert_eq!(display, vec!["claude", "--model", "opus"]);
         assert_eq!(resolve_command(&NewPane::default()).0, Vec::<String>::new());
+
+        // then_shell: the shell takes over when the command exits.
+        let req = NewPane {
+            then_shell: true,
+            ..req
+        };
+        let (argv, display) = resolve_command(&req);
+        assert!(
+            argv[2].starts_with("claude --model opus\nexec '"),
+            "{}",
+            argv[2]
+        );
+        assert!(argv[2].ends_with("' -l"), "{}", argv[2]);
+        assert_eq!(display[0], "claude");
     }
 
     #[test]

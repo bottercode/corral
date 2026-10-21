@@ -1,9 +1,9 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 552
+assertion_line: 714
 expression: text
 ---
- corral                 ✕ exit │
+ corral        ≡ menu   ✕ exit │
  ───────────────────────────── │
  no agents yet                 │
  start one below               │
@@ -24,4 +24,4 @@ expression: text
                                │
                                │
  ───────────────────────────── │
- + new agent   ⎇ worktree      │
+ + new shell   ⎇ worktree      │

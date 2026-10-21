@@ -352,6 +352,7 @@ async fn run_client(cmd: Cmd) -> Result<ExitCode> {
                 workspace: a.workspace,
                 command: a.command,
                 shell: false,
+                then_shell: false,
                 worktree: a.worktree,
                 branch: a.branch,
                 focus: false,
