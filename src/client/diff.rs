@@ -7,8 +7,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
-use super::grid::truncate;
 use super::input::Key;
+use super::sidebar::truncate;
 use super::ui::TextInput;
 use crate::protocol::{DiffReport, FileDiff, PaneId};
 

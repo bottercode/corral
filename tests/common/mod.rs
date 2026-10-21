@@ -149,7 +149,6 @@ pub async fn new_pane(conn: &mut Conn, command: Vec<String>, cwd: &Path) -> Pane
 /// A headless interactive client: attaches and mirrors its focused pane.
 pub struct Headless {
     pub conn: Conn,
-    pub previews: std::collections::HashMap<String, String>,
     pub parser: Option<vt100::Parser>,
     pub focus: Option<String>,
     pub panes: Vec<PaneInfo>,
@@ -169,7 +168,6 @@ impl Headless {
         .unwrap();
         Headless {
             conn,
-            previews: Default::default(),
             parser: None,
             focus: None,
             panes: vec![],
@@ -212,16 +210,6 @@ impl Headless {
                 if let Some(p) = self.parser.as_mut() {
                     p.process(&bytes);
                 }
-            }
-            ServerMsg::Preview {
-                pane,
-                cols,
-                rows,
-                bytes,
-            } => {
-                let mut p = vt100::Parser::new(rows.max(1), cols, 0);
-                p.process(&bytes);
-                self.previews.insert(pane, p.screen().contents());
             }
             ServerMsg::Notify { message, .. } => self.notes.push(message),
             _ => {}

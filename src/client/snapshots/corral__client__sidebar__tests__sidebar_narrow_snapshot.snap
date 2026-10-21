@@ -1,0 +1,16 @@
+---
+source: src/client/sidebar.rs
+expression: text
+---
+ corral  ●1  ✓1    │
+                   │
+ corral            │
+ 1 cl… ● blocked 4m│
+   ⎇ corral/claude…│
+ 2 a-ver… ✓ done 4m│
+                   │
+ website           │
+▌3 codex  ⠋ working│
+ 4 zsh     ✗ exit 1│
+                   │
+                   │

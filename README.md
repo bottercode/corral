@@ -6,17 +6,18 @@ them running when you close the laptop or lose SSH. Optionally, give each
 agent its own git worktree so parallel agents never edit the same checkout.
 
 ```
- corral                                          ● 1 need you  ✓ 1 done  ⠋ 1 working
-┏ 1 ● claude · api ━━━━━━━━━━━━ blocked 4m ┓╭ 2 ⠋ codex · web ──────── working 30s ╮
-┃ Bash(cargo test)                         ┃│ test parser::ok ... ok               │
-┃ Do you want to proceed?                  ┃│ test lexer::ws ... ok                │
-┃ ❯ 1. Yes                                 ┃│ test lexer::strings ...              │
-┃   2. No                                  ┃│                                      │
-┗ ⎇ corral/fix-auth · 3 files +42 −7 ━━━━━━┛╰ ⎇ corral/codex-81c2 · 1 file +3 −0 ──╯
-╭ 3 ✓ opencode · api ──────────── done 2m ╮╭ 4 ○ claude · docs ─────────────── idle ╮
-│ All 214 tests pass. Updated README.     ││ ❯                                    │
-╰ ⎇ corral/opencode-77a0 · 2 files +18 −3 ╯╰──────────────────────────────────────╯
- ←↓↑→ select · enter open · n new · w worktree · d diff · b next blocked · q detach · ? help
+ corral  ●1  ✓1                │> fix the failing test in parser.rs
+                               │
+ api                           │⏺ I'll run the tests first.
+▌1 claude         ● blocked 4m │
+   ⎇ corral/fix-auth +42 −7    │ Bash(cargo test)
+ 2 codex           ⠋ working   │
+   ⎇ corral/codex-81c2 +3 −0   │ Do you want to proceed?
+                               │ ❯ 1. Yes
+ website                       │   2. Yes, and don't ask again for cargo test
+ 3 opencode         ✓ done 2m  │   3. No, and tell Claude what to do differently
+                               │
+ ^b then  n new · w worktree · j/k switch · b next blocked · x close · d detach · ? help
 ```
 
 ## Why
@@ -33,13 +34,13 @@ Running several agents in separate terminal tabs breaks down quickly:
 corral runs a small background server that owns every agent's terminal. The
 UI is a client that attaches and detaches; the agents don't notice.
 
-- **An overview of every agent at once.** Each agent is a live card showing
-  its terminal, its state, and how long it has been waiting. Blocked agents
-  turn red, and you get a bell and a desktop notification.
+- **Every agent's state at a glance.** The sidebar lists agents by project
+  with their state and how long they've been waiting. Blocked agents turn
+  red, and you get a bell and a desktop notification.
 - **A worktree per agent, if you want one.** `--worktree` starts an agent in a
   fresh git worktree on its own branch.
-- **Review and land agents' work without leaving corral.** Press `d` to see
-  the diff, then commit and merge it into your branch.
+- **Review and land agents' work without leaving corral.** Press `^b D` to
+  see the diff, then commit and merge it into your branch.
 
 ## Install
 
@@ -61,39 +62,28 @@ corral                      # open the UI (starts the server if needed)
 
 With no agents running, the new-agent dialog opens. Type a command
 (`claude` by default), pick a directory, tick **Worktree** if you want one, and
-press Enter. The new agent opens full screen.
+press Enter.
 
-corral has two views.
-
-**The overview** is a grid of live cards, one per agent. Here keys drive
-corral, and nothing is typed into agents:
+Everything you type goes to the focused agent. corral's own commands are
+**Ctrl-b, then a key** (the bottom line reminds you):
 
 | Keys | Action |
 |---|---|
-| `←↓↑→` / `hjkl`, `Tab` | select an agent (or click its card) |
-| `Enter`, `1` … `9` | open it full screen (or click the selected card) |
-| `n` / `w` | new agent / new agent in its own git worktree |
-| `d` | review the agent's diff ([below](#diff-review)) |
-| `b` | select the next agent that needs you |
-| `x` / `r` | close / rename |
-| `q` | detach (agents keep running) |
-| `?` | help |
-
-**A zoomed agent** fills the screen, and everything you type goes to it.
-corral's commands are **Ctrl-b, then a key**:
-
-| Keys | Action |
-|---|---|
-| `^b g` | back to the overview (or click `‹` in the top bar) |
-| `^b j` / `^b k`, `^b 1` … `^b 9` | next / previous / numbered agent |
-| `^b b` | jump to the next agent that needs you |
-| `^b D` | diff · `^b n` new · `^b x` close · `^b r` rename |
-| `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`); the mouse wheel works too |
-| `^b d` | detach |
+| `^b n` | new agent |
+| `^b w` | new agent in its own git worktree |
+| `^b j` / `^b k`, `^b ↑` / `^b ↓` | next / previous agent |
+| `^b 1` … `^b 9` | jump to an agent |
+| `^b b` | jump to the next blocked agent |
+| `^b D` | review the agent's worktree diff ([below](#diff-review)) |
+| `^b x` | close the agent's pane |
+| `^b r` | rename it |
+| `^b d` | detach (agents keep running) |
+| `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`) |
+| `^b ?` | help |
 | `^b ^b` | send a literal `Ctrl-b` to the agent |
 
-The top bar always shows how many other agents need you, so you don't have
-to go looking. corral captures the mouse, so hold Shift (Option in some
+Click a sidebar row to focus that agent, and scroll the wheel for
+scrollback. corral captures the mouse, so hold Shift (Option in some
 terminals) to select text.
 
 Detach, close the terminal, and come back later (or from another machine over
@@ -113,8 +103,8 @@ Each worktree is created next to, not inside, your repository:
 ```
 
 - Your own checkout stays untouched, and each agent works on its own branch.
-- Each card shows the branch and what the agent has changed so far,
-  committed and uncommitted (`⎇ corral/claude-3f9a · 3 files +42 −7`). This
+- The sidebar shows the branch and the lines the agent has added and removed
+  so far, committed and uncommitted (`⎇ corral/claude-3f9a +42 −7`). This
   updates every few seconds.
 - The branch's starting point is recorded (in `branch.<name>.corralBase`), so
   diffs and merges know where to compare against.
@@ -139,8 +129,8 @@ corral kill p3 --delete-branch            # … and delete its branch
 
 ## Diff review
 
-Select a worktree agent and press `d` (or `^b D` while zoomed) to see
-everything it changed since its branch started:
+Focus a worktree agent and press `^b D` to see everything it changed since
+its branch started:
 - committed work
 - uncommitted edits
 - new untracked files
@@ -273,6 +263,7 @@ prefix = "C-b"                         # C-a … C-z or C-space
 default_command = "claude"             # prefilled in the new-agent dialog
 notifications = true
 worktree_root = "~/.corral/worktrees"
+sidebar_width = 30
 ```
 
 Environment variables:
@@ -299,10 +290,8 @@ agent hooks (report) ┘          │
 
 - The server owns every PTY, so agents survive clients coming and going.
 - Each pane's output feeds a terminal emulator (vt100) on the server.
-- On the overview, clients get a few times a second the bottom of each
-  agent's screen (formatting included, blank gaps collapsed) for the cards.
-- Opening an agent gets a snapshot (scrollback included) and then its live
-  byte stream, rendered with Ratatui and tui-term.
+- A client looking at an agent gets a snapshot (scrollback included) and
+  then its live byte stream, rendered with Ratatui and tui-term.
 - The PTY size follows whichever client was used most recently, like tmux's
   `latest` policy.
 - Keystrokes pass through to the pane untouched, apart from the prefix key,
@@ -326,15 +315,15 @@ access from other machines. The two differ in their focus:
 
 | | Herdr | corral |
 |---|---|---|
-| Layout | sidebar of agents + split panes | overview grid of live agent cards, one agent zoomed at a time |
-| "Who needs me?" | status dots in the sidebar | red cards with waiting timers, a count in the top bar while zoomed |
+| Layout | sidebar of agents + split panes | sidebar of agents + one agent at a time |
+| "Who needs me?" | status dots in the sidebar | state badges with waiting timers (`● blocked 4m`), a counter, `^b b` to jump |
 | Worktrees | left to external tools | built in: one per agent, created, tracked and cleaned up safely |
 | Agent's changes | left to external tools | diff review in the UI, with commit, merge and discard |
 
 ## Limitations (v0.1)
 
 - macOS and Linux only.
-- One agent zoomed at a time (no split panes); the overview shows all of them.
+- One agent visible at a time (no split panes).
 - Agents don't survive a reboot or `corral kill-server`.
 - Programs inside panes don't receive mouse events; the wheel scrolls
   corral's scrollback instead.

@@ -82,7 +82,7 @@ impl Tui {
 }
 
 #[test]
-fn overview_zoom_and_detach() {
+fn tui_shows_panes_forwards_input_and_detaches() {
     let s = TestServer::start();
     let dir = s.dir.path().to_str().unwrap().to_string();
     s.ok(&[
@@ -108,67 +108,53 @@ fn overview_zoom_and_detach() {
         "echo second-pane; cat",
     ]);
 
-    let mut t = Tui::start(&s, 120, 32);
-    // The overview: both agents as cards with live previews.
-    t.wait_for("cards", |x| {
-        x.contains("first")
-            && x.contains("second")
-            && x.contains("hello-from-pane")
-            && x.contains("second-pane")
+    let mut t = Tui::start(&s, 110, 30);
+    t.wait_for("sidebar and pane", |x| {
+        x.contains("corral") && x.contains("hello-from-pane")
+    });
+    t.wait_for("both panes listed", |x| {
+        x.contains("first") && x.contains("second")
     });
     println!("{}", t.screen());
 
-    // Keys on the overview drive corral; typing doesn't reach agents.
-    t.type_(b"zzz");
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(!s.ok(&["read", "p1"]).contains("zzz"));
-
-    // Enter opens the selected agent; typing goes to it.
-    t.type_(b"\r");
-    t.wait_for("zoomed", |x| x.contains("^b g grid"));
+    // Typing goes to the focused pane (cat echoes it back).
     t.type_(b"typed-in-tui\r");
     t.wait_for("echo", |x| x.matches("typed-in-tui").count() >= 2);
 
-    // ^b j: next agent, still zoomed. ^b g: back to the overview.
+    // Prefix j switches to the next pane.
     t.type_(b"\x02j");
-    t.wait_for("second zoomed", |x| {
-        x.contains("second-pane") && !x.contains("hello-from-pane")
-    });
-    t.type_(b"\x02g");
-    t.wait_for("overview again", |x| {
-        x.contains("hello-from-pane") && x.contains("second-pane")
-    });
+    t.wait_for("second pane", |x| x.contains("second-pane"));
 
-    // n opens the new-agent dialog; starting one opens it zoomed.
-    t.type_(b"n");
+    // Prefix n opens the new-agent dialog; Esc closes it.
+    t.type_(b"\x02n");
     t.wait_for("dialog", |x| {
         x.contains("New agent") && x.contains("Command")
     });
+    println!("{}", t.screen());
     t.type_(b"\x1b");
     t.wait_for("dialog closed", |x| !x.contains("New agent"));
-    t.type_(b"n");
+
+    // Start a pane from the dialog: it gets focus.
+    t.type_(b"\x02n");
     t.wait_for("dialog", |x| x.contains("New agent"));
     t.type_(b"\x15echo from-dialog; cat\r");
-    t.wait_for("third agent zoomed", |x| {
-        x.contains("from-dialog") && x.contains("^b g grid")
-    });
+    t.wait_for("third pane", |x| x.contains("from-dialog"));
     assert_eq!(s.panes().len(), 3);
 
-    // Help, then close the zoomed agent: the client returns to the overview.
+    // Help overlay.
     t.type_(b"\x02?");
     t.wait_for("help", |x| x.contains("corral help"));
     t.type_(b"q");
     t.wait_for("help closed", |x| !x.contains("corral help"));
+
+    // Close the focused pane with prefix x, confirm with y.
     t.type_(b"\x02x");
     t.wait_for("close dialog", |x| x.contains("Close p3"));
     t.type_(b"y");
     eventually("pane closed", || s.panes().len() == 2);
-    t.wait_for("overview", |x| {
-        x.contains("hello-from-pane") && !x.contains("from-dialog")
-    });
 
-    // q detaches from the overview; agents keep running.
-    t.type_(b"q");
+    // Detach: the client exits, the agents keep running.
+    t.type_(b"\x02d");
     let deadline = Instant::now() + Duration::from_secs(10);
     while t.child.try_wait().unwrap().is_none() {
         assert!(Instant::now() < deadline, "client didn't exit on detach");
@@ -180,35 +166,21 @@ fn overview_zoom_and_detach() {
 }
 
 #[test]
-fn clicking_a_card_selects_then_opens_it() {
+fn tui_mouse_click_focuses_a_sidebar_row() {
     let s = TestServer::start();
     let dir = s.dir.path().to_str().unwrap().to_string();
     s.ok(&["new", "--cwd", &dir, "--", "sh", "-c", "echo pane-one; cat"]);
     s.ok(&["new", "--cwd", &dir, "--", "sh", "-c", "echo pane-two; cat"]);
-    let mut t = Tui::start(&s, 120, 30);
-    t.wait_for("cards", |x| {
-        x.contains("pane-one") && x.contains("pane-two")
-    });
-    // Click inside the second card twice: select, then open.
+    let mut t = Tui::start(&s, 110, 30);
+    t.wait_for("pane one", |x| x.contains("pane-one"));
+    // Find the row of the second pane in the sidebar ("2 sh").
     let screen = t.screen();
-    let (row, col) = screen
+    let row = screen
         .lines()
-        .enumerate()
-        .find_map(|(r, l)| l.find("pane-two").map(|c| (r, l[..c].chars().count())))
-        .unwrap();
-    let click = format!(
-        "\x1b[<0;{};{}M\x1b[<0;{};{}m",
-        col + 2,
-        row + 1,
-        col + 2,
-        row + 1
-    );
-    t.type_(click.as_bytes());
-    std::thread::sleep(Duration::from_millis(200));
-    t.type_(click.as_bytes());
-    t.wait_for("pane two zoomed", |x| {
-        x.contains("pane-two") && x.contains("^b g grid") && !x.contains("pane-one")
-    });
+        .position(|l| l.trim_start().starts_with("2 sh"))
+        .unwrap_or_else(|| panic!("no second row:\n{screen}"));
+    t.type_(format!("\x1b[<0;5;{}M\x1b[<0;5;{}m", row + 1, row + 1).as_bytes());
+    t.wait_for("pane two", |x| x.contains("pane-two"));
 }
 
 #[test]
@@ -254,8 +226,10 @@ fn diff_review_commit_and_merge() {
     });
 
     let mut t = Tui::start(&s, 120, 30);
-    t.wait_for("card with diff stats", |x| x.contains("1 file +1 −0"));
-    t.type_(b"d");
+    t.wait_for("sidebar with diff stats", |x| {
+        x.contains("+1 −0") && x.contains("agent-done")
+    });
+    t.type_(b"\x02D");
     t.wait_for("diff view", |x| {
         x.contains("README") && x.contains("+fixed line")
     });
@@ -264,9 +238,7 @@ fn diff_review_commit_and_merge() {
     t.type_(b"c");
     t.wait_for("commit prompt", |x| x.contains("Work from fixer"));
     t.type_(b"\r");
-    t.wait_for("committed", |x| {
-        x.contains("committed") && x.contains("0 uncommitted")
-    });
+    t.wait_for("committed", |x| x.contains("0 uncommitted"));
     t.type_(b"m");
     t.wait_for("merge prompt", |x| x.contains("Merge corral/"));
     t.type_(b"y");
@@ -275,8 +247,11 @@ fn diff_review_commit_and_merge() {
         std::fs::read_to_string(repo.join("README")).unwrap(),
         "hello\nfixed line\n"
     );
+    // q closes the diff; typing goes to the agent again.
     t.type_(b"q");
-    t.wait_for("overview", |x| x.contains("agent-done"));
+    t.wait_for("agent again", |x| {
+        x.contains("agent-done") && !x.contains("+fixed line")
+    });
 }
 
 /// Needs `claude` on PATH; run with `cargo test --test tui -- --ignored --nocapture`.

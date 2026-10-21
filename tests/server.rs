@@ -181,39 +181,3 @@ async fn notifications_only_for_unfocused_panes() {
     assert_eq!(a.notes.len(), 1);
     assert!(a.notes[0].contains("p2"), "{:?}", a.notes);
 }
-
-#[tokio::test(flavor = "multi_thread")]
-async fn overview_streams_previews_of_every_pane() {
-    let server = TestServer::start();
-    let mut conn = server.conn().await;
-    new_pane(&mut conn, sh("echo alpha-out; read x"), server.dir.path()).await;
-    new_pane(&mut conn, sh("echo beta-out; read x"), server.dir.path()).await;
-
-    // Clients start on the overview: no focus, previews for all panes.
-    let mut a = Headless::attach(&server, 80, 24).await;
-    a.until("previews", |c| {
-        c.previews
-            .get("p1")
-            .is_some_and(|t| t.contains("alpha-out"))
-            && c.previews.get("p2").is_some_and(|t| t.contains("beta-out"))
-    })
-    .await;
-    assert!(a.focus.is_none());
-
-    // New output shows up in the preview (sh echoes what `read` gets).
-    conn.request(Command::Send {
-        pane: "p2".into(),
-        bytes: b"typed\r".to_vec(),
-    })
-    .await
-    .unwrap();
-    a.until("updated preview", |c| {
-        c.previews.get("p2").is_some_and(|t| t.contains("typed"))
-    })
-    .await;
-
-    // Zoom in, then back to the overview.
-    a.focus_on("p1").await;
-    a.conn.send(&ClientMsg::Focus { pane: None }).await.unwrap();
-    a.until("back to overview", |c| c.focus.is_none()).await;
-}

@@ -34,8 +34,6 @@ pub const DEFAULT_SIZE: (u16, u16) = (120, 36);
 const TICK: Duration = Duration::from_millis(250);
 const IDENTIFY_EVERY: Duration = Duration::from_secs(2);
 const WORKTREE_POLL_EVERY: Duration = Duration::from_secs(3);
-/// Rows of each pane sent for overview cards.
-pub const PREVIEW_ROWS: u16 = 40;
 
 pub type ClientId = u64;
 
@@ -202,6 +200,21 @@ impl Hub {
         g.refresh_focus_flags();
     }
 
+    /// The pane a newly attached client looks at: the first in
+    /// `workspace`, else the last one anyone looked at, else the first.
+    pub fn initial_focus(&self, workspace: Option<&str>) -> Option<PaneId> {
+        let g = self.lock();
+        if let Some(ws) = workspace
+            && let Some(p) = g.panes.iter().find(|p| p.workspace == ws)
+        {
+            return Some(p.id.clone());
+        }
+        g.last_focus
+            .clone()
+            .filter(|id| g.panes.iter().any(|p| &p.id == id))
+            .or_else(|| g.panes.first().map(|p| p.id.clone()))
+    }
+
     pub fn workspace_exists(&self, ws: &str) -> bool {
         self.lock().panes.iter().any(|p| p.workspace == ws)
     }
@@ -302,27 +315,6 @@ impl Hub {
             seq: p.seq,
             bytes: p.snapshot(),
         })
-    }
-
-    /// Previews of panes whose output changed since `sent` (pane → seq).
-    pub fn previews(&self, sent: &mut HashMap<PaneId, u64>) -> Vec<ServerMsg> {
-        let g = self.lock();
-        let mut out = Vec::new();
-        for p in &g.panes {
-            if sent.get(&p.id) == Some(&p.seq) {
-                continue;
-            }
-            sent.insert(p.id.clone(), p.seq);
-            let (cols, rows, bytes) = pane::preview(p.parser.screen(), PREVIEW_ROWS);
-            out.push(ServerMsg::Preview {
-                pane: p.id.clone(),
-                cols,
-                rows,
-                bytes,
-            });
-        }
-        sent.retain(|id, _| g.panes.iter().any(|p| &p.id == id));
-        out
     }
 
     pub fn read(&self, pane: &str, lines: Option<usize>, scrollback: bool) -> Result<String> {

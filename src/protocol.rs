@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Largest frame either side will accept (scrollback snapshots can be large).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -249,8 +249,7 @@ pub enum ClientMsg {
         workspace: Option<String>,
     },
     Detach,
-    /// Look at one pane (`Some`), or at the overview of all panes (`None`),
-    /// which streams [`ServerMsg::Preview`]s instead of one pane's output.
+    /// Look at one pane, or at none (`None`).
     Focus {
         pane: Option<PaneId>,
     },
@@ -293,15 +292,6 @@ pub enum ServerMsg {
     Output {
         pane: PaneId,
         seq: u64,
-        #[serde(with = "serde_bytes")]
-        bytes: Vec<u8>,
-    },
-    /// The bottom of a pane's screen for the overview: `rows` formatted
-    /// rows, replayable into a `rows`×`cols` emulator.
-    Preview {
-        pane: PaneId,
-        cols: u16,
-        rows: u16,
         #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
     },
@@ -511,12 +501,6 @@ mod tests {
             pane: "p1".into(),
             seq: 8,
             bytes: b"hi".to_vec(),
-        });
-        roundtrip(ServerMsg::Preview {
-            pane: "p1".into(),
-            cols: 80,
-            rows: 3,
-            bytes: b"a\r\nb\r\nc".to_vec(),
         });
         roundtrip(ServerMsg::Notify {
             pane: "p1".into(),

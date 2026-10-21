@@ -308,41 +308,6 @@ impl Pane {
     }
 }
 
-/// The bottom of the screen for an overview card, formatted for a
-/// `rows`×`cols` emulator: up to `max_rows` rows ending at the last row with
-/// content (or the cursor), with runs of blank rows collapsed to one so the
-/// card shows content rather than an agent UI's empty middle.
-pub fn preview(screen: &vt100::Screen, max_rows: u16) -> (u16, u16, Vec<u8>) {
-    let (rows, cols) = screen.size();
-    let plain: Vec<String> = screen.rows(0, cols).collect();
-    let (cursor_row, _) = screen.cursor_position();
-    let last = plain
-        .iter()
-        .rposition(|l| !l.trim().is_empty())
-        .unwrap_or(0)
-        .max(cursor_row as usize)
-        .min(rows as usize - 1);
-    let mut keep: Vec<usize> = Vec::new();
-    for (i, line) in plain.iter().enumerate().take(last + 1) {
-        let blank = line.trim().is_empty();
-        let prev_blank = keep.last().is_some_and(|&j| plain[j].trim().is_empty());
-        if !(blank && (prev_blank || keep.is_empty())) {
-            keep.push(i);
-        }
-    }
-    let keep = &keep[keep.len().saturating_sub(max_rows as usize)..];
-    let formatted: Vec<Vec<u8>> = screen.rows_formatted(0, cols).take(last + 1).collect();
-    let mut out = Vec::new();
-    for (n, &i) in keep.iter().enumerate() {
-        if n > 0 {
-            out.extend_from_slice(b"\r\n");
-        }
-        out.extend_from_slice(b"\x1b[m");
-        out.extend_from_slice(&formatted[i]);
-    }
-    (cols, keep.len().max(1) as u16, out)
-}
-
 /// History rows (oldest first) as `(formatted, plain)` pairs.
 fn history_rows(screen: &mut vt100::Screen) -> Vec<(Vec<u8>, String)> {
     let (rows, cols) = screen.size();
@@ -499,32 +464,6 @@ mod tests {
         q.process(&snap);
         assert!(q.screen().alternate_screen());
         assert_eq!(q.screen().contents(), p.screen().contents());
-    }
-
-    #[test]
-    fn preview_takes_the_bottom_rows_with_content() {
-        let mut p = new_parser(10, 20);
-        feed(&mut p, "a\r\n\x1b[31mb\x1b[m\r\nc\r\nd");
-        let (cols, rows, bytes) = preview(p.screen(), 3);
-        assert_eq!((cols, rows), (20, 3));
-        let mut q = vt100::Parser::new(rows, cols, 0);
-        q.process(&bytes);
-        assert_eq!(q.screen().contents(), "b\nc\nd");
-        assert_eq!(
-            q.screen().cell(0, 0).unwrap().fgcolor(),
-            vt100::Color::Idx(1)
-        );
-        // Fewer rows of content than asked for.
-        let (_, rows, _) = preview(p.screen(), 30);
-        assert_eq!(rows, 4);
-
-        // Blank runs collapse: a banner, a gap, and an input box.
-        let mut p = new_parser(20, 20);
-        feed(&mut p, "\r\nbanner\r\n\r\n\r\n\r\n\r\n\r\n> input");
-        let (_, rows, bytes) = preview(p.screen(), 30);
-        let mut q = vt100::Parser::new(rows, 20, 0);
-        q.process(&bytes);
-        assert_eq!(q.screen().contents(), "banner\n\n> input");
     }
 
     #[test]

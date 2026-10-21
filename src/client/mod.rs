@@ -1,15 +1,14 @@
 //! The terminal UI client.
 //!
-//! Two views: the overview, a grid of live cards for every agent where
-//! keys drive corral itself; and a zoomed agent, where stdin is forwarded
-//! byte-for-byte to the agent except for the prefix key, mouse events and
-//! bracketed pastes (which pass through whole). The zoomed agent is mirrored
-//! locally in a vt100 parser (snapshot plus live output).
+//! Stdin goes to the terminal in raw mode and is forwarded byte-for-byte to
+//! the focused pane, except for the prefix key, mouse events and corral's
+//! dialogs. The focused pane is mirrored locally in a vt100 parser (snapshot
+//! plus live output) and drawn with tui-term next to the sidebar.
 
 pub mod conn;
 pub mod diff;
-pub mod grid;
 pub mod input;
+pub mod sidebar;
 pub mod ui;
 
 use std::collections::HashMap;
@@ -68,21 +67,18 @@ pub struct App {
     pub panes: Vec<PaneInfo>,
     /// When `panes` arrived (their `state_secs` count from then).
     pub state_at: Instant,
-    /// The zoomed agent; `None` is the overview.
     pub focus: Option<PaneId>,
-    /// The highlighted card on the overview.
-    pub selected: Option<PaneId>,
     pub parser: Option<vt100::Parser>,
     parser_pane: Option<PaneId>,
-    pub previews: HashMap<PaneId, grid::Preview>,
     pub mode: Mode,
     status: Option<(String, Instant, bool)>,
     pub prefix_label: String,
     prefix: u8,
     pub awaiting_command: bool,
-    pub body_area: Rect,
-    pub card_hits: Vec<(Rect, PaneId)>,
-    pub grid_scroll: usize,
+    pub sidebar_width: u16,
+    pub sidebar_area: Rect,
+    pub pane_area: Rect,
+    pub hits: Vec<(u16, PaneId)>,
     pub frame: usize,
     pub scroll_max: usize,
     splitter: Splitter,
@@ -105,18 +101,17 @@ impl App {
             panes: Vec::new(),
             state_at: Instant::now(),
             focus: None,
-            selected: None,
             parser: None,
             parser_pane: None,
-            previews: HashMap::new(),
             mode: Mode::Normal,
             status: None,
             prefix_label: prefix_label(prefix),
             prefix,
             awaiting_command: false,
-            body_area: Rect::default(),
-            card_hits: Vec::new(),
-            grid_scroll: 0,
+            sidebar_width: config.sidebar_width,
+            sidebar_area: Rect::default(),
+            pane_area: Rect::default(),
+            hits: Vec::new(),
             frame: 0,
             scroll_max: 0,
             splitter: Splitter::new(prefix),
@@ -143,11 +138,6 @@ impl App {
         self.status = Some((msg.into(), Instant::now(), error));
     }
 
-    /// Time `p` has spent in its current state.
-    pub fn age(&self, p: &PaneInfo) -> Duration {
-        Duration::from_secs(p.state_secs) + self.state_at.elapsed()
-    }
-
     fn request(&mut self, cmd: Command, kind: Pending) {
         let id = self.next_id;
         self.next_id += 1;
@@ -155,93 +145,31 @@ impl App {
         self.outbox.push(ClientMsg::Command { id, cmd });
     }
 
-    pub fn focused(&self) -> Option<&PaneInfo> {
+    fn focused(&self) -> Option<&PaneInfo> {
         let id = self.focus.as_ref()?;
         self.panes.iter().find(|p| &p.id == id)
     }
 
-    pub fn selected_pane(&self) -> Option<&PaneInfo> {
-        let id = self.selected.as_ref()?;
-        self.panes.iter().find(|p| &p.id == id)
-    }
-
-    /// The pane commands like close or rename apply to.
-    fn target(&self) -> Option<&PaneInfo> {
-        if self.focus.is_some() {
-            self.focused()
-        } else {
-            self.selected_pane()
-        }
-    }
-
     fn order(&self) -> Vec<PaneId> {
-        grid::display_order(&self.panes)
+        sidebar::display_order(&self.panes)
             .into_iter()
             .map(|p| p.id.clone())
             .collect()
     }
 
-    fn selected_index(&self) -> Option<usize> {
-        let sel = self.selected.as_ref()?;
-        self.order().iter().position(|p| p == sel)
-    }
-
-    /// Scroll the grid so the selected card is on screen.
-    pub fn keep_selection_visible(&mut self) {
-        let n = self.panes.len();
-        let layout = grid::grid_layout(n, self.body_area);
-        let row = self.selected_index().unwrap_or(0) / layout.cols;
-        if row < self.grid_scroll {
-            self.grid_scroll = row;
-        } else if row >= self.grid_scroll + layout.rows_visible {
-            self.grid_scroll = row + 1 - layout.rows_visible;
-        }
-        let rows = n.div_ceil(layout.cols);
-        self.grid_scroll = self
-            .grid_scroll
-            .min(rows.saturating_sub(layout.rows_visible));
-    }
-
-    /// Open an agent full screen.
-    fn zoom(&mut self, pane: PaneId) {
-        self.selected = Some(pane.clone());
+    fn set_focus(&mut self, pane: PaneId) {
         if self.focus.as_ref() != Some(&pane) {
             self.outbox.push(ClientMsg::Focus {
                 pane: Some(pane.clone()),
             });
             self.focus = Some(pane);
-            self.parser = None;
-            self.parser_pane = None;
         }
-        if !matches!(self.mode, Mode::Normal) {
-            self.mode = Mode::Normal;
-        }
-    }
-
-    /// Back to the overview.
-    fn unzoom(&mut self) {
-        if let Some(p) = self.focus.take() {
-            self.selected = Some(p);
-            self.outbox.push(ClientMsg::Focus { pane: None });
-        }
-        self.parser = None;
-        self.parser_pane = None;
         if matches!(self.mode, Mode::Scroll { .. }) {
             self.mode = Mode::Normal;
         }
     }
 
-    /// Move to another pane: zoomed stays zoomed, the overview moves the
-    /// selection.
-    fn go_to(&mut self, pane: PaneId) {
-        if self.focus.is_some() {
-            self.zoom(pane);
-        } else {
-            self.selected = Some(pane);
-        }
-    }
-
-    fn cycle(&mut self, delta: isize) {
+    fn cycle_focus(&mut self, delta: isize) {
         let order = self.order();
         if order.is_empty() {
             return;
@@ -249,36 +177,17 @@ impl App {
         let cur = self
             .focus
             .as_ref()
-            .or(self.selected.as_ref())
             .and_then(|f| order.iter().position(|p| p == f))
-            .map_or(if delta > 0 { -1 } else { 0 }, |i| i as isize);
+            .unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(order.len() as isize) as usize;
-        self.go_to(order[next].clone());
+        self.set_focus(order[next].clone());
     }
 
-    /// Arrow keys on the grid move in two dimensions.
-    fn move_selection(&mut self, dx: isize, dy: isize) {
-        let order = self.order();
-        if order.is_empty() {
-            return;
-        }
-        let cols = grid::grid_layout(order.len(), self.body_area).cols as isize;
-        let cur = self.selected_index().map_or(0, |i| i as isize);
-        let mut next = cur + dx + dy * cols;
-        if dx != 0 {
-            next = next.rem_euclid(order.len() as isize);
-        } else if !(0..order.len() as isize).contains(&next) {
-            return;
-        }
-        self.selected = Some(order[next as usize].clone());
-    }
-
-    fn next_blocked(&mut self) {
+    fn focus_next_blocked(&mut self) {
         let order = self.order();
         let cur = self
             .focus
             .as_ref()
-            .or(self.selected.as_ref())
             .and_then(|f| order.iter().position(|p| p == f))
             .unwrap_or(0);
         let n = order.len();
@@ -293,15 +202,15 @@ impl App {
         {
             Some(id) => {
                 let id = id.clone();
-                self.go_to(id);
+                self.set_focus(id);
             }
-            None => self.set_status("no agent needs you", false),
+            None => self.set_status("no agent is blocked", false),
         }
     }
 
     /// Directory a new agent should start in by default.
     fn default_dir(&self) -> PathBuf {
-        match self.target() {
+        match self.focused() {
             Some(p) => p
                 .worktree
                 .as_ref()
@@ -350,7 +259,7 @@ impl App {
     }
 
     fn open_close(&mut self) {
-        let Some(p) = self.target() else { return };
+        let Some(p) = self.focused() else { return };
         let step = if p.worktree.is_some() {
             CloseStep::Worktree
         } else {
@@ -362,22 +271,24 @@ impl App {
         };
     }
 
-    fn open_rename(&mut self) {
-        if let Some(p) = self.target() {
-            self.mode = Mode::Rename {
-                pane: p.id.clone(),
-                input: TextInput::new(&p.name),
-            };
-        }
+    fn kill(&mut self, pane: PaneId, worktree: WorktreeAction, force: bool) {
+        self.request(
+            Command::Kill {
+                pane: pane.clone(),
+                worktree,
+                force,
+            },
+            Pending::Kill { pane },
+        );
     }
 
     fn open_diff(&mut self) {
-        let Some(p) = self.target() else { return };
+        let Some(p) = self.focused() else { return };
         if p.worktree.is_none() {
             self.set_status(
                 format!(
-                    "{} has no worktree; start agents with w to review their diffs",
-                    p.name
+                    "{} has no worktree; start agents with {} w to review their diffs",
+                    p.name, self.prefix_label
                 ),
                 false,
             );
@@ -388,17 +299,6 @@ impl App {
         self.request(
             Command::Diff { pane: id.clone() },
             Pending::Diff { pane: id },
-        );
-    }
-
-    fn kill(&mut self, pane: PaneId, worktree: WorktreeAction, force: bool) {
-        self.request(
-            Command::Kill {
-                pane: pane.clone(),
-                worktree,
-                force,
-            },
-            Pending::Kill { pane },
         );
     }
 
@@ -416,63 +316,35 @@ impl App {
         }
     }
 
-    fn detach(&mut self) {
-        self.outbox.push(ClientMsg::Detach);
-        self.exit = Some(Exit::Detached);
-    }
-
-    /// Keys after the prefix (work in both views).
     fn prefix_command(&mut self, key: Key) {
         match key {
-            Key::Char('g') | Key::Esc => self.unzoom(),
             Key::Char('n') => self.open_new(false),
             Key::Char('w') => self.open_new(true),
-            Key::Char('j') | Key::Down => self.cycle(1),
-            Key::Char('k') | Key::Up => self.cycle(-1),
+            Key::Char('j') | Key::Down => self.cycle_focus(1),
+            Key::Char('k') | Key::Up => self.cycle_focus(-1),
             Key::Char(c @ '1'..='9') => {
-                if let Some(id) = self.order().get(c as usize - '1' as usize).cloned() {
-                    self.zoom(id);
+                let i = c as usize - '1' as usize;
+                if let Some(id) = self.order().get(i).cloned() {
+                    self.set_focus(id);
                 }
             }
-            Key::Char('b') => self.next_blocked(),
+            Key::Char('b') => self.focus_next_blocked(),
             Key::Char('x') => self.open_close(),
-            Key::Char('r') => self.open_rename(),
+            Key::Char('r') => {
+                if let Some(p) = self.focused() {
+                    self.mode = Mode::Rename {
+                        pane: p.id.clone(),
+                        input: TextInput::new(&p.name),
+                    };
+                }
+            }
+            Key::Char('d') => {
+                self.outbox.push(ClientMsg::Detach);
+                self.exit = Some(Exit::Detached);
+            }
             Key::Char('D') => self.open_diff(),
-            Key::Char('d') => self.detach(),
-            Key::Char('[') if self.focus.is_some() => self.enter_scroll(0),
+            Key::Char('[') => self.enter_scroll(0),
             Key::Char('?') => self.mode = Mode::Help,
-            _ => {}
-        }
-    }
-
-    /// Keys on the overview, where nothing is forwarded to agents.
-    fn grid_key(&mut self, key: Key) {
-        match key {
-            Key::Left | Key::Char('h') => self.move_selection(-1, 0),
-            Key::Right | Key::Char('l') => self.move_selection(1, 0),
-            Key::Up | Key::Char('k') => self.move_selection(0, -1),
-            Key::Down | Key::Char('j') => self.move_selection(0, 1),
-            Key::Tab => self.cycle(1),
-            Key::BackTab => self.cycle(-1),
-            Key::Enter => {
-                if let Some(id) = self.selected_pane().map(|p| p.id.clone()) {
-                    self.zoom(id);
-                }
-            }
-            Key::Char(c @ '1'..='9') => {
-                if let Some(id) = self.order().get(c as usize - '1' as usize).cloned() {
-                    self.zoom(id);
-                }
-            }
-            Key::Char('n') => self.open_new(false),
-            Key::Char('w') => self.open_new(true),
-            Key::Char('d') => self.open_diff(),
-            Key::Char('b') => self.next_blocked(),
-            Key::Char('x') => self.open_close(),
-            Key::Char('r') => self.open_rename(),
-            Key::Char('q') => self.detach(),
-            Key::Char('?') => self.mode = Mode::Help,
-            Key::Ctrl('c') => self.set_status("press q to detach (agents keep running)", false),
             _ => {}
         }
     }
@@ -516,7 +388,7 @@ impl App {
     }
 
     fn scroll_key(&mut self, key: Key) {
-        let page = self.body_area.height.max(2) as isize - 1;
+        let page = self.pane_area.height.max(2) as isize - 1;
         match key {
             Key::Char('q') | Key::Esc | Key::Ctrl('c') | Key::Enter => self.mode = Mode::Normal,
             Key::Char('k') | Key::Up => self.scroll_by(1),
@@ -530,33 +402,16 @@ impl App {
     }
 
     fn on_mouse(&mut self, m: Mouse) {
-        if self.focus.is_none() {
-            match m.kind {
-                MouseKind::LeftDown => {
-                    let hit = self
-                        .card_hits
-                        .iter()
-                        .find(|(r, _)| r.contains((m.x, m.y).into()))
-                        .map(|(_, id)| id.clone());
-                    if let Some(id) = hit {
-                        // Click selects; clicking the selected card opens it.
-                        if self.selected.as_ref() == Some(&id) {
-                            self.zoom(id);
-                        } else {
-                            self.selected = Some(id);
-                        }
-                    }
-                }
-                MouseKind::WheelDown => self.move_selection(0, 1),
-                MouseKind::WheelUp => self.move_selection(0, -1),
-                _ => {}
-            }
-            return;
-        }
+        let in_sidebar = m.x < self.sidebar_area.x + self.sidebar_area.width;
         match m.kind {
-            // The top bar's "‹" goes back to the overview.
-            MouseKind::LeftDown if m.y < self.body_area.y && m.x < 12 => self.unzoom(),
-            MouseKind::WheelUp if matches!(self.mode, Mode::Normal | Mode::Scroll { .. }) => {
+            MouseKind::LeftDown if in_sidebar => {
+                if let Some((_, id)) = self.hits.iter().find(|(y, _)| *y == m.y).cloned() {
+                    self.set_focus(id);
+                }
+            }
+            MouseKind::WheelUp
+                if !in_sidebar && matches!(self.mode, Mode::Normal | Mode::Scroll { .. }) =>
+            {
                 if matches!(self.mode, Mode::Normal) {
                     self.enter_scroll(WHEEL_LINES);
                     if !matches!(self.mode, Mode::Scroll { .. }) {
@@ -665,7 +520,6 @@ impl App {
         self.dirty = true;
         for chunk in self.splitter.feed(bytes) {
             let in_dialog = !matches!(self.mode, Mode::Normal | Mode::Scroll { .. });
-            let zoomed = self.focus.is_some();
             match chunk {
                 Chunk::Mouse(m) => {
                     if !in_dialog {
@@ -675,7 +529,7 @@ impl App {
                 Chunk::Paste(p) => {
                     if in_dialog {
                         self.paste_into_dialog(&p);
-                    } else if zoomed {
+                    } else {
                         self.awaiting_command = false;
                         self.mode = Mode::Normal;
                         self.forward(&p, true);
@@ -688,7 +542,7 @@ impl App {
                 }
                 Chunk::Prefix => {
                     if self.awaiting_command {
-                        // Prefix twice sends it to the agent.
+                        // Prefix twice sends it to the pane.
                         self.awaiting_command = false;
                         let p = [self.prefix];
                         self.forward(&p, false);
@@ -713,18 +567,8 @@ impl App {
                         for k in decode_keys(&b) {
                             self.scroll_key(k);
                         }
-                    } else if zoomed {
-                        self.forward(&b, false);
                     } else {
-                        for k in decode_keys(&b) {
-                            if !matches!(self.mode, Mode::Normal)
-                                || self.focus.is_some()
-                                || self.exit.is_some()
-                            {
-                                break;
-                            }
-                            self.grid_key(k);
-                        }
+                        self.forward(&b, false);
                     }
                 }
             }
@@ -737,30 +581,11 @@ impl App {
             ServerMsg::State { panes, focus } => {
                 self.panes = panes;
                 self.state_at = Instant::now();
-                self.previews
-                    .retain(|id, _| self.panes.iter().any(|p| &p.id == id));
-                // The server decides what this client is looking at: a new
-                // agent opens zoomed; a closed one falls back to the grid.
-                if focus != self.focus {
-                    if focus.is_none() {
-                        self.parser = None;
-                        self.parser_pane = None;
-                        if matches!(self.mode, Mode::Scroll { .. }) {
-                            self.mode = Mode::Normal;
-                        }
-                    }
-                    if let Some(f) = &focus {
-                        self.selected = Some(f.clone());
-                    }
-                    self.focus = focus;
+                if focus.is_none() {
+                    self.parser = None;
+                    self.parser_pane = None;
                 }
-                let valid = self
-                    .selected
-                    .as_ref()
-                    .is_some_and(|s| self.panes.iter().any(|p| &p.id == s));
-                if !valid {
-                    self.selected = self.order().first().cloned();
-                }
+                self.focus = focus;
                 if !self.seen_state {
                     self.seen_state = true;
                     if self.panes.is_empty() {
@@ -789,11 +614,6 @@ impl App {
                 {
                     p.process(&bytes);
                 }
-            }
-            ServerMsg::Preview {
-                pane, cols, bytes, ..
-            } => {
-                self.previews.insert(pane, grid::Preview::new(cols, bytes));
             }
             ServerMsg::Notify { message, .. } => {
                 self.term_writes.push(0x07);
@@ -830,6 +650,7 @@ impl App {
                 let action = if e.contains("on any other branch") {
                     WorktreeAction::RemoveAndDeleteBranch
                 } else {
+                    // Keep the user's choice of deleting the branch too.
                     WorktreeAction::Remove
                 };
                 self.mode = Mode::Close {
@@ -869,11 +690,16 @@ impl App {
         }
     }
 
+    /// Time `p` has spent in its current state.
+    pub fn age(&self, p: &PaneInfo) -> Duration {
+        Duration::from_secs(p.state_secs) + self.state_at.elapsed()
+    }
+
     pub fn tick(&mut self) {
-        let animated = self.panes.iter().any(|p| p.state == AgentState::Working);
+        let working = self.panes.iter().any(|p| p.state == AgentState::Working);
         self.frame = self.frame.wrapping_add(1);
-        // Spinners animate; waiting timers tick once a second.
-        if animated || self.frame.is_multiple_of(10) {
+        // Spinners animate; waiting timers in the sidebar tick each second.
+        if working || self.frame.is_multiple_of(10) {
             self.dirty = true;
         }
         if let Some((_, at, _)) = &self.status
@@ -920,10 +746,9 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// The size a zoomed agent gets: the whole terminal under the top bar.
-fn pane_size() -> Result<(u16, u16)> {
+fn pane_size(app: &App) -> Result<(u16, u16)> {
     let (w, h) = crossterm::terminal::size()?;
-    let a = ui::layout(Rect::new(0, 0, w, h), true).body;
+    let a = ui::layout(Rect::new(0, 0, w, h), app.sidebar_width).pane;
     Ok((a.width.max(2), a.height.max(1)))
 }
 
@@ -980,7 +805,7 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
         })?;
 
     let (mut sink, mut stream) = conn.transport.split();
-    let mut size = pane_size()?;
+    let mut size = pane_size(app)?;
     let attach = ClientMsg::Attach {
         cols: size.0,
         rows: size.1,
@@ -1007,11 +832,10 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
                     app.on_server(msg);
                     if !checked_workspace && app.seen_state {
                         checked_workspace = true;
-                        if let Some(ws) = &workspace {
-                            match app.panes.iter().find(|p| &p.workspace == ws) {
-                                Some(p) => app.selected = Some(p.id.clone()),
-                                None => app.set_status(format!("no workspace named {ws}"), true),
-                            }
+                        if let Some(ws) = &workspace
+                            && !app.panes.iter().any(|p| &p.workspace == ws)
+                        {
+                            app.set_status(format!("no workspace named {ws}"), true);
                         }
                     }
                 }
@@ -1020,7 +844,7 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
             },
             _ = winch.recv() => {
                 app.dirty = true;
-                let new = pane_size()?;
+                let new = pane_size(app)?;
                 if new != size {
                     size = new;
                     app.outbox.push(ClientMsg::Resize { cols: size.0, rows: size.1 });
@@ -1074,24 +898,16 @@ mod tests {
         }
     }
 
-    /// An app on the overview with three panes, p1 selected.
     fn app() -> App {
         let mut a = App::new(&Config::default(), "/tmp".into()).unwrap();
-        a.body_area = Rect::new(0, 1, 140, 40);
         a.on_server(ServerMsg::State {
             panes: vec![
                 pane("p1", AgentState::Idle),
                 pane("p2", AgentState::Blocked),
                 pane("p3", AgentState::Working),
             ],
-            focus: None,
+            focus: Some("p1".into()),
         });
-        a
-    }
-
-    fn zoomed() -> App {
-        let mut a = app();
-        a.on_stdin(b"\r");
         a.on_server(ServerMsg::Screen {
             pane: "p1".into(),
             cols: 80,
@@ -1099,33 +915,12 @@ mod tests {
             seq: 0,
             bytes: vec![],
         });
-        a.outbox.clear();
         a
     }
 
     #[test]
-    fn overview_keys_drive_corral_not_agents() {
+    fn typing_is_forwarded() {
         let mut a = app();
-        assert_eq!(a.selected.as_deref(), Some("p1"));
-        a.on_stdin(b"l");
-        assert_eq!(a.selected.as_deref(), Some("p2"));
-        a.on_stdin(b"\x1b[C");
-        assert_eq!(a.selected.as_deref(), Some("p3"));
-        // Nothing was typed into an agent.
-        assert!(a.outbox.is_empty());
-        a.on_stdin(b"\r");
-        assert_eq!(
-            a.outbox,
-            vec![ClientMsg::Focus {
-                pane: Some("p3".into())
-            }]
-        );
-        assert_eq!(a.focus.as_deref(), Some("p3"));
-    }
-
-    #[test]
-    fn zoomed_typing_is_forwarded_and_prefix_g_returns() {
-        let mut a = zoomed();
         a.on_stdin(b"hi\r");
         assert_eq!(
             a.outbox,
@@ -1134,16 +929,11 @@ mod tests {
                 bytes: b"hi\r".to_vec()
             }]
         );
-        a.outbox.clear();
-        a.on_stdin(b"\x02g");
-        assert_eq!(a.outbox, vec![ClientMsg::Focus { pane: None }]);
-        assert!(a.focus.is_none());
-        assert_eq!(a.selected.as_deref(), Some("p1"));
     }
 
     #[test]
-    fn prefix_commands_when_zoomed() {
-        let mut a = zoomed();
+    fn prefix_commands() {
+        let mut a = app();
         a.on_stdin(b"\x02j");
         assert_eq!(
             a.outbox,
@@ -1170,6 +960,7 @@ mod tests {
             }]
         );
         a.outbox.clear();
+        // Prefix twice sends a literal prefix byte.
         a.on_stdin(b"\x02\x02");
         assert_eq!(
             a.outbox,
@@ -1185,24 +976,9 @@ mod tests {
     }
 
     #[test]
-    fn q_detaches_from_the_overview() {
+    fn new_dialog_sends_a_shell_command() {
         let mut a = app();
-        a.on_stdin(b"q");
-        assert_eq!(a.exit, Some(Exit::Detached));
-    }
-
-    #[test]
-    fn b_selects_the_next_blocked_agent() {
-        let mut a = app();
-        a.on_stdin(b"b");
-        assert_eq!(a.selected.as_deref(), Some("p2"));
-        assert!(a.outbox.is_empty());
-    }
-
-    #[test]
-    fn new_agent_opens_zoomed() {
-        let mut a = app();
-        a.on_stdin(b"w");
+        a.on_stdin(b"\x02w");
         assert!(matches!(&a.mode, Mode::New(d) if d.worktree));
         a.on_stdin(b" --resume\r");
         let Some(ClientMsg::Command {
@@ -1214,65 +990,7 @@ mod tests {
         };
         assert_eq!(req.command, vec!["claude --resume"]);
         assert!(req.shell && req.worktree && req.focus);
-        // The server focuses the new pane: the client follows.
-        a.on_server(ServerMsg::State {
-            panes: a.panes.clone(),
-            focus: Some("p3".into()),
-        });
-        assert_eq!(a.focus.as_deref(), Some("p3"));
-    }
-
-    #[test]
-    fn closed_zoomed_pane_returns_to_grid() {
-        let mut a = zoomed();
-        a.on_server(ServerMsg::State {
-            panes: vec![pane("p2", AgentState::Idle)],
-            focus: None,
-        });
-        assert!(a.focus.is_none() && a.parser.is_none());
-        assert_eq!(a.selected.as_deref(), Some("p2"));
-    }
-
-    #[test]
-    fn diff_needs_a_worktree_and_requests_one() {
-        let mut a = app();
-        a.on_stdin(b"d");
-        assert!(matches!(a.mode, Mode::Normal));
-        assert!(a.status().unwrap().0.contains("no worktree"));
-        let mut panes = a.panes.clone();
-        panes[0].worktree = Some(Default::default());
-        a.on_server(ServerMsg::State { panes, focus: None });
-        a.on_stdin(b"d");
-        assert!(matches!(a.mode, Mode::Diff(_)));
-        let ClientMsg::Command {
-            id,
-            cmd: Command::Diff { pane },
-        } = &a.outbox[0]
-        else {
-            panic!()
-        };
-        assert_eq!(pane, "p1");
-        let id = *id;
-        a.outbox.clear();
-        a.on_server(ServerMsg::Reply {
-            id,
-            result: Ok(Reply::Diff(protocol::DiffReport {
-                uncommitted: 1,
-                ..Default::default()
-            })),
-        });
-        let Mode::Diff(v) = &a.mode else { panic!() };
-        assert!(v.report.is_some() && !v.busy);
-        // Commit from the diff view, then it refreshes.
-        a.on_stdin(b"c\r");
-        assert!(matches!(
-            &a.outbox[0],
-            ClientMsg::Command {
-                cmd: Command::Commit { .. },
-                ..
-            }
-        ));
-        a.on_stdin(b"q");
+        assert_eq!(req.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
         assert!(matches!(a.mode, Mode::Normal));
     }
 
@@ -1315,6 +1033,52 @@ mod tests {
     }
 
     #[test]
+    fn prefix_shift_d_opens_diff_review() {
+        let mut a = app();
+        a.on_stdin(b"\x02D");
+        assert!(matches!(a.mode, Mode::Normal));
+        assert!(a.status().unwrap().0.contains("no worktree"));
+        let mut panes = a.panes.clone();
+        panes[0].worktree = Some(Default::default());
+        a.on_server(ServerMsg::State {
+            panes,
+            focus: Some("p1".into()),
+        });
+        a.on_stdin(b"\x02D");
+        assert!(matches!(a.mode, Mode::Diff(_)));
+        let ClientMsg::Command {
+            id,
+            cmd: Command::Diff { pane },
+        } = &a.outbox[0]
+        else {
+            panic!("{:?}", a.outbox)
+        };
+        assert_eq!(pane, "p1");
+        let id = *id;
+        a.outbox.clear();
+        a.on_server(ServerMsg::Reply {
+            id,
+            result: Ok(Reply::Diff(protocol::DiffReport {
+                uncommitted: 1,
+                ..Default::default()
+            })),
+        });
+        let Mode::Diff(v) = &a.mode else { panic!() };
+        assert!(v.report.is_some() && !v.busy);
+        // Keys go to the diff view, not the agent.
+        a.on_stdin(b"c\r");
+        assert!(matches!(
+            &a.outbox[0],
+            ClientMsg::Command {
+                cmd: Command::Commit { .. },
+                ..
+            }
+        ));
+        a.on_stdin(b"q");
+        assert!(matches!(a.mode, Mode::Normal));
+    }
+
+    #[test]
     fn notifications_ring_the_bell() {
         let mut a = app();
         a.on_server(ServerMsg::Notify {
@@ -1338,20 +1102,15 @@ mod tests {
     }
 
     #[test]
-    fn clicking_cards() {
+    fn sidebar_click_focuses() {
         let mut a = app();
-        a.card_hits = vec![
-            (Rect::new(0, 1, 40, 10), "p1".into()),
-            (Rect::new(40, 1, 40, 10), "p2".into()),
-        ];
-        a.on_stdin(b"\x1b[<0;45;5M");
-        assert_eq!(a.selected.as_deref(), Some("p2"));
-        assert!(a.outbox.is_empty());
-        a.on_stdin(b"\x1b[<0;45;5M");
+        a.sidebar_area = Rect::new(0, 0, 30, 20);
+        a.hits = vec![(3, "p1".into()), (4, "p3".into())];
+        a.on_stdin(b"\x1b[<0;5;5M");
         assert_eq!(
             a.outbox,
             vec![ClientMsg::Focus {
-                pane: Some("p2".into())
+                pane: Some("p3".into())
             }]
         );
     }
