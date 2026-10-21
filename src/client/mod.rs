@@ -78,7 +78,7 @@ pub struct App {
     pub sidebar_width: u16,
     pub sidebar_area: Rect,
     pub pane_area: Rect,
-    pub hits: Vec<(u16, PaneId)>,
+    pub hits: Vec<sidebar::Hit>,
     pub frame: usize,
     pub scroll_max: usize,
     splitter: Splitter,
@@ -405,8 +405,15 @@ impl App {
         let in_sidebar = m.x < self.sidebar_area.x + self.sidebar_area.width;
         match m.kind {
             MouseKind::LeftDown if in_sidebar => {
-                if let Some((_, id)) = self.hits.iter().find(|(y, _)| *y == m.y).cloned() {
-                    self.set_focus(id);
+                let click = self
+                    .hits
+                    .iter()
+                    .find(|h| h.contains(m.x, m.y))
+                    .map(|h| h.click.clone());
+                match click {
+                    Some(sidebar::Click::Focus(id)) => self.set_focus(id),
+                    Some(sidebar::Click::New { worktree }) => self.open_new(worktree),
+                    None => {}
                 }
             }
             MouseKind::WheelUp
@@ -1102,10 +1109,33 @@ mod tests {
     }
 
     #[test]
+    fn new_agent_buttons_open_the_dialog() {
+        let mut a = app();
+        a.sidebar_area = Rect::new(0, 0, 30, 20);
+        let button = |x, worktree| sidebar::Hit {
+            area: Rect::new(x, 18, 12, 1),
+            click: sidebar::Click::New { worktree },
+        };
+        a.hits = vec![button(1, false), button(14, true)];
+        // Click "+ new agent".
+        a.on_stdin(b"\x1b[<0;3;19M\x1b[<0;3;19m");
+        assert!(matches!(&a.mode, Mode::New(d) if !d.worktree));
+        assert!(a.outbox.is_empty());
+        a.on_stdin(b"\x1b");
+        // Click "⎇ worktree".
+        a.on_stdin(b"\x1b[<0;16;19M");
+        assert!(matches!(&a.mode, Mode::New(d) if d.worktree));
+    }
+
+    #[test]
     fn sidebar_click_focuses() {
         let mut a = app();
         a.sidebar_area = Rect::new(0, 0, 30, 20);
-        a.hits = vec![(3, "p1".into()), (4, "p3".into())];
+        let row = |y, id: &str| sidebar::Hit {
+            area: Rect::new(0, y, 30, 1),
+            click: sidebar::Click::Focus(id.into()),
+        };
+        a.hits = vec![row(3, "p1"), row(4, "p3")];
         a.on_stdin(b"\x1b[<0;5;5M");
         assert_eq!(
             a.outbox,

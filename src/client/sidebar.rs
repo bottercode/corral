@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::protocol::{AgentState, PaneInfo};
+use crate::protocol::{AgentState, PaneId, PaneInfo};
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -87,6 +87,28 @@ pub fn truncate(s: &str, width: usize) -> String {
     out
 }
 
+/// What clicking somewhere in the sidebar does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Click {
+    Focus(PaneId),
+    /// The "+ new agent" / "⎇ worktree" buttons.
+    New {
+        worktree: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    pub area: Rect,
+    pub click: Click,
+}
+
+impl Hit {
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        self.area.contains((x, y).into())
+    }
+}
+
 pub struct Sidebar<'a> {
     pub panes: &'a [PaneInfo],
     pub focus: Option<&'a str>,
@@ -97,7 +119,7 @@ pub struct Sidebar<'a> {
 
 impl Sidebar<'_> {
     /// Render into `area`; returns `(row, pane id)` for clickable rows.
-    pub fn render(&self, area: Rect, buf: &mut Buffer) -> Vec<(u16, String)> {
+    pub fn render(&self, area: Rect, buf: &mut Buffer) -> Vec<Hit> {
         let block = Block::new()
             .borders(Borders::RIGHT)
             .border_style(Style::new().fg(Color::DarkGray));
@@ -209,8 +231,15 @@ impl Sidebar<'_> {
             }
         }
 
+        // The buttons sit on the last row, with a blank row above them.
+        let show_buttons = inner.height >= 4;
+        let list_rows = if show_buttons {
+            inner.height - 2
+        } else {
+            inner.height
+        };
         let mut hits = Vec::new();
-        for (i, (line, id)) in lines.into_iter().take(inner.height as usize).enumerate() {
+        for (i, (line, id)) in lines.into_iter().take(list_rows as usize).enumerate() {
             let y = inner.y + i as u16;
             let row = Rect::new(inner.x, y, inner.width, 1);
             if line.style.bg.is_some() {
@@ -218,11 +247,56 @@ impl Sidebar<'_> {
             }
             line.render(row, buf);
             if let Some(id) = id {
-                hits.push((y, id));
+                hits.push(Hit {
+                    area: row,
+                    click: Click::Focus(id),
+                });
             }
+        }
+        if show_buttons {
+            hits.extend(render_buttons(
+                Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+                buf,
+            ));
         }
         hits
     }
+}
+
+/// `[ + new agent ] [ ⎇ worktree ]`, shortened when the sidebar is narrow.
+fn render_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
+    let (new, wt) = if row.width >= 27 {
+        (" + new agent ", " ⎇ worktree ")
+    } else {
+        (" + new ", " ⎇ wt ")
+    };
+    let buttons = [
+        (
+            new,
+            Style::new()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            false,
+        ),
+        (wt, Style::new().fg(Color::Black).bg(Color::Magenta), true),
+    ];
+    let mut hits = Vec::new();
+    let mut x = row.x + 1;
+    for (label, style, worktree) in buttons {
+        let w = label.width() as u16;
+        if x + w > row.x + row.width {
+            break;
+        }
+        let area = Rect::new(x, row.y, w, 1);
+        Line::styled(label, style).render(area, buf);
+        hits.push(Hit {
+            area,
+            click: Click::New { worktree },
+        });
+        x += w + 1;
+    }
+    hits
 }
 
 #[cfg(test)]
@@ -250,7 +324,7 @@ mod tests {
         }
     }
 
-    fn render(panes: &[PaneInfo], focus: Option<&str>, width: u16) -> (String, Vec<(u16, String)>) {
+    fn render(panes: &[PaneInfo], focus: Option<&str>, width: u16) -> (String, Vec<Hit>) {
         let mut term = Terminal::new(TestBackend::new(width, 12)).unwrap();
         let mut hits = Vec::new();
         term.draw(|f| {
@@ -307,15 +381,33 @@ mod tests {
     fn sidebar_snapshot() {
         let (text, hits) = render(&sample(), Some("p1"), 32);
         insta::assert_snapshot!(text);
-        let ids: Vec<&str> = hits.iter().map(|(_, id)| id.as_str()).collect();
-        assert_eq!(ids, vec!["p1", "p1", "p3", "p2", "p4"]);
+        let clicks: Vec<Click> = hits.iter().map(|h| h.click.clone()).collect();
+        let f = |id: &str| Click::Focus(id.into());
+        assert_eq!(
+            clicks,
+            vec![
+                f("p1"),
+                f("p1"),
+                f("p3"),
+                f("p2"),
+                f("p4"),
+                Click::New { worktree: false },
+                Click::New { worktree: true },
+            ]
+        );
+        // The buttons are on the last row and don't overlap.
+        let (a, b) = (hits[5].area, hits[6].area);
+        assert_eq!((a.y, b.y), (11, 11));
+        assert!(a.x + a.width < b.x);
     }
 
     #[test]
     fn sidebar_empty_snapshot() {
         let (text, hits) = render(&[], None, 32);
         insta::assert_snapshot!(text);
-        assert!(hits.is_empty());
+        // Only the buttons are clickable.
+        assert!(hits.iter().all(|h| matches!(h.click, Click::New { .. })));
+        assert_eq!(hits.len(), 2);
     }
 
     #[test]

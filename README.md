@@ -82,7 +82,8 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b ?` | help |
 | `^b ^b` | send a literal `Ctrl-b` to the agent |
 
-Click a sidebar row to focus that agent, and scroll the wheel for
+Click a sidebar row to focus that agent, or the **+ new agent** / **⎇ worktree**
+buttons at the bottom of the sidebar to start one. Scroll the wheel for
 scrollback. corral captures the mouse, so hold Shift (Option in some
 terminals) to select text.
 

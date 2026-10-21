@@ -379,7 +379,7 @@ fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
                         format!("{} w", app.prefix_label),
                         Style::new().fg(Color::Cyan),
                     ),
-                    Span::raw(" for one in its own git worktree,"),
+                    Span::raw(" for one in its own git worktree (or click the buttons),"),
                 ]),
                 Line::from(vec![
                     Span::raw("or run "),

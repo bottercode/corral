@@ -254,6 +254,48 @@ fn diff_review_commit_and_merge() {
     });
 }
 
+#[test]
+fn new_agent_button_starts_an_agent() {
+    let s = TestServer::start();
+    let dir = s.dir.path().to_str().unwrap().to_string();
+    s.ok(&[
+        "new",
+        "--cwd",
+        &dir,
+        "--",
+        "sh",
+        "-c",
+        "echo first-agent; cat",
+    ]);
+    let mut t = Tui::start(&s, 120, 30);
+    t.wait_for("button", |x| {
+        x.contains("+ new agent") && x.contains("first-agent")
+    });
+    // Click the "+ new agent" button where it's drawn.
+    let screen = t.screen();
+    let (row, col) = screen
+        .lines()
+        .enumerate()
+        .find_map(|(r, l)| l.find("+ new agent").map(|c| (r, l[..c].chars().count())))
+        .unwrap();
+    t.type_(
+        format!(
+            "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+            col + 2,
+            row + 1,
+            col + 2,
+            row + 1
+        )
+        .as_bytes(),
+    );
+    t.wait_for("dialog", |x| {
+        x.contains("New agent") && x.contains("Command")
+    });
+    t.type_(b"\x15echo from-button; cat\r");
+    t.wait_for("new agent focused", |x| x.contains("from-button"));
+    assert_eq!(s.panes().len(), 2);
+}
+
 /// Needs `claude` on PATH; run with `cargo test --test tui -- --ignored --nocapture`.
 #[test]
 #[ignore]
