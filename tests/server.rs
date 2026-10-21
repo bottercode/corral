@@ -183,6 +183,42 @@ async fn notifications_only_for_unfocused_panes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn covered_panes_still_need_you() {
+    let server = TestServer::start();
+    let mut conn = server.conn().await;
+    new_pane(&mut conn, sh("echo hi; read x"), server.dir.path()).await;
+
+    let mut a = Headless::attach(&server, 80, 24).await;
+    a.focus_on("p1").await;
+    // The client draws its own page over p1.
+    a.cover("p1", true).await;
+
+    // p1 finishes: it isn't seen, so it stays done and the client is told.
+    conn.request(Command::Report {
+        pane: "p1".into(),
+        state: AgentState::Done,
+    })
+    .await
+    .unwrap();
+    a.until("notification", |c| !c.notes.is_empty()).await;
+    a.until("p1 done", |c| {
+        c.panes
+            .iter()
+            .any(|p| p.id == "p1" && p.state == AgentState::Done)
+    })
+    .await;
+
+    // Uncovered, the user sees it.
+    a.cover("p1", false).await;
+    a.until("p1 seen", |c| {
+        c.panes
+            .iter()
+            .any(|p| p.id == "p1" && p.state == AgentState::Idle)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn client_attached_to_an_empty_server_shows_the_first_new_pane() {
     let server = TestServer::start();
     let mut a = Headless::attach(&server, 80, 24).await;

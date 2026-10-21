@@ -61,6 +61,7 @@ pub async fn handle(hub: Arc<Hub>, stream: UnixStream) -> Result<()> {
         focus: None,
         shown: HashMap::new(),
         view_generation: 0,
+        covered: false,
     };
 
     let result: Result<()> = async {
@@ -110,6 +111,8 @@ struct Session {
     /// Panes in view → (last output seq sent, size of the last snapshot).
     shown: HashMap<PaneId, (u64, (u16, u16))>,
     view_generation: u64,
+    /// The client draws over its panes (see `ClientMsg::View`).
+    covered: bool,
 }
 
 impl Session {
@@ -190,10 +193,13 @@ impl Session {
                 generation,
                 focus,
                 panes,
+                covered,
             } => {
                 self.view_generation = generation;
+                self.covered = covered;
                 if self.events.is_some() {
-                    self.hub.set_view(self.client, focus.as_deref(), panes);
+                    self.hub
+                        .set_view(self.client, focus.as_deref(), panes, covered);
                     self.sync_view();
                 }
             }
@@ -255,7 +261,7 @@ impl Session {
                 state,
                 message,
             }) => {
-                if !self.shown.contains_key(&pane) {
+                if self.covered || !self.shown.contains_key(&pane) {
                     self.send(ServerMsg::Notify {
                         pane,
                         state,

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Largest frame either side will accept (scrollback snapshots can be large).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -268,6 +268,11 @@ pub enum ClientMsg {
         generation: u64,
         focus: Option<PaneId>,
         panes: Vec<Viewport>,
+        /// Something of the client's own (top stories, a diff) is drawn over
+        /// the panes: they keep streaming, but don't count as seen, so a
+        /// finished agent stays "done" and its notification still comes.
+        #[serde(default)]
+        covered: bool,
     },
     Input {
         pane: PaneId,
@@ -441,11 +446,13 @@ mod tests {
                     rows: 20,
                 },
             ],
+            covered: false,
         });
         roundtrip(ClientMsg::View {
             generation: 0,
             focus: None,
             panes: vec![],
+            covered: true,
         });
         roundtrip(ClientMsg::Input {
             pane: "p1".into(),

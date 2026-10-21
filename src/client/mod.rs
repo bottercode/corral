@@ -11,6 +11,7 @@ pub mod conn;
 pub mod diff;
 pub mod input;
 pub mod sidebar;
+pub mod stories;
 pub mod theme;
 pub mod ui;
 
@@ -37,6 +38,7 @@ use conn::Conn;
 use diff::DiffView;
 use input::{Chunk, Key, Mouse, MouseKind, Splitter, decode_keys};
 use sidebar::Order;
+use stories::Stories;
 use ui::{CloseStep, TextInput, WorktreeDialog};
 
 const STATUS_FOR: Duration = Duration::from_secs(6);
@@ -45,6 +47,7 @@ const STATUS_FOR: Duration = Duration::from_secs(6);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuItem {
     Keys,
+    Stories,
     Theme,
     Order,
     Notifications,
@@ -53,8 +56,9 @@ pub enum MenuItem {
     Exit,
 }
 
-pub const MENU: [MenuItem; 8] = [
+pub const MENU: [MenuItem; 9] = [
     MenuItem::Keys,
+    MenuItem::Stories,
     MenuItem::Theme,
     MenuItem::Order,
     MenuItem::Notifications,
@@ -91,6 +95,8 @@ pub enum Mode {
         step: CloseStep,
     },
     Diff(DiffView),
+    /// Top stories, over the panes (`App::stories` has the page).
+    Stories,
     /// Detach, or stop corral and every agent.
     Quit,
 }
@@ -126,7 +132,7 @@ pub struct App {
     pub screens: HashMap<PaneId, vt100::Parser>,
     /// Generation of the last `View` sent, and what it said.
     view_generation: u64,
-    sent_view: Option<(Option<PaneId>, Vec<Viewport>)>,
+    sent_view: Option<(Option<PaneId>, Vec<Viewport>, bool)>,
     pub mode: Mode,
     status: Option<(String, Instant, bool)>,
     pub prefix_label: String,
@@ -148,6 +154,12 @@ pub struct App {
     pub order: Order,
     /// Ring the bell and send desktop notifications.
     pub notifications: bool,
+    /// The top stories page's feeds and position.
+    pub stories: Stories,
+    /// Feeds to fetch; the run loop fetches them off the UI thread.
+    pub fetches: Vec<stories::Source>,
+    /// The prefix was pressed on the stories page, which it closed.
+    from_stories: bool,
     /// Hook status per agent, read when the menu opens.
     pub hooks: Vec<(Agent, HookStatus)>,
     /// Where the menu's rows were drawn, for clicks.
@@ -197,6 +209,9 @@ impl App {
             default_command: config.default_command.trim().to_string(),
             order: Order::from_config(&config.sidebar_order),
             notifications: config.notifications,
+            stories: Stories::default(),
+            fetches: Vec::new(),
+            from_stories: false,
             hooks: Vec::new(),
             menu_hits: Vec::new(),
             save_to: None,
@@ -272,7 +287,7 @@ impl App {
 
     fn set_focus(&mut self, pane: PaneId) {
         self.show(Some(pane));
-        if matches!(self.mode, Mode::Scroll { .. }) {
+        if matches!(self.mode, Mode::Scroll { .. } | Mode::Stories) {
             self.mode = Mode::Normal;
         }
     }
@@ -302,7 +317,9 @@ impl App {
                 rows: body.height.max(1),
             })
             .collect();
-        let now = (self.focus.clone(), view);
+        // Pages drawn over the panes leave them unseen.
+        let covered = matches!(self.mode, Mode::Diff(_) | Mode::Stories);
+        let now = (self.focus.clone(), view, covered);
         if self.sent_view.as_ref() == Some(&now) {
             return;
         }
@@ -311,6 +328,7 @@ impl App {
             generation: self.view_generation,
             focus: now.0.clone(),
             panes: now.1.clone(),
+            covered,
         });
         self.sent_view = Some(now);
     }
@@ -522,6 +540,7 @@ impl App {
         let p = &self.prefix_label;
         match item {
             MenuItem::Keys => format!("{p} ?"),
+            MenuItem::Stories => format!("{p} t"),
             MenuItem::Theme => format!("‹ {} ›", theme::get().name),
             MenuItem::Order => format!("‹ {} ›", self.order.label()),
             MenuItem::Notifications => {
@@ -562,6 +581,7 @@ impl App {
         let stay = Mode::Menu { selected };
         match MENU[selected] {
             MenuItem::Keys => self.mode = Mode::Help,
+            MenuItem::Stories => self.open_stories(),
             MenuItem::Theme => {
                 let next = theme::cycle(step);
                 theme::set(next);
@@ -631,6 +651,10 @@ impl App {
     /// A click while a dialog is open: the menu's rows work, and clicking
     /// elsewhere closes the menu.
     fn dialog_mouse(&mut self, m: Mouse) {
+        if matches!(self.mode, Mode::Stories) {
+            self.stories_mouse(m);
+            return;
+        }
         if !matches!(m.kind, MouseKind::LeftDown) {
             return;
         }
@@ -643,6 +667,108 @@ impl App {
                 Some(&(_, i)) => self.menu_activate(i, 1),
                 None => self.mode = Mode::Normal,
             }
+        }
+    }
+
+    /// `^b t`: the top stories page, fetching its feed if it's stale.
+    fn open_stories(&mut self) {
+        self.mode = Mode::Stories;
+        self.fetch_stories(false);
+    }
+
+    fn fetch_stories(&mut self, force: bool) {
+        if let Some(source) = self.stories.want(force) {
+            self.fetches.push(source);
+            self.dirty = true;
+        }
+    }
+
+    /// A feed arrived (or failed) from the run loop's worker.
+    pub fn on_stories(
+        &mut self,
+        source: stories::Source,
+        result: Result<Vec<stories::Story>, String>,
+    ) {
+        self.stories.loaded(source, result);
+        self.dirty = true;
+    }
+
+    fn open_link(&mut self, url: String) {
+        match stories::open_in_browser(&url) {
+            Ok(()) => self.set_status(format!("opened {url}"), false),
+            Err(e) => self.set_status(format!("{e:#}"), true),
+        }
+    }
+
+    fn stories_key(&mut self, key: Key) {
+        let page = self.stories.visible.max(1) as isize;
+        match key {
+            Key::Esc | Key::Ctrl('c') | Key::Char('q') => return,
+            Key::Down | Key::Char('j') => self.stories.move_by(1),
+            Key::Up | Key::Char('k') => self.stories.move_by(-1),
+            Key::PageDown | Key::Ctrl('d') | Key::Char(' ') => self.stories.move_by(page),
+            Key::PageUp | Key::Ctrl('u') => self.stories.move_by(-page),
+            Key::Home | Key::Char('g') => self.stories.move_by(isize::MIN / 2),
+            Key::End | Key::Char('G') => self.stories.move_by(isize::MAX / 2),
+            Key::Enter | Key::Char('o') => {
+                if let Some(s) = self.stories.current() {
+                    self.open_link(s.link().to_string());
+                }
+            }
+            Key::Char('c') => {
+                if let Some(s) = self.stories.current() {
+                    self.open_link(s.discussion.clone());
+                }
+            }
+            Key::Tab | Key::BackTab | Key::Left | Key::Right | Key::Char('h' | 'l') => {
+                self.stories.switch(self.stories.source.other());
+                self.fetch_stories(false);
+            }
+            Key::Char('r') => self.fetch_stories(true),
+            _ => {}
+        }
+        self.mode = Mode::Stories;
+    }
+
+    fn stories_mouse(&mut self, m: Mouse) {
+        let in_sidebar = m.x < self.sidebar_area.x + self.sidebar_area.width;
+        match m.kind {
+            MouseKind::LeftDown if in_sidebar => {
+                // Picking an agent or starting one leaves the page.
+                let leaves = self.hits.iter().any(|h| {
+                    h.contains(m.x, m.y)
+                        && matches!(
+                            h.click,
+                            sidebar::Click::Focus(_) | sidebar::Click::New { .. }
+                        )
+                });
+                if leaves {
+                    self.mode = Mode::Normal;
+                }
+                self.on_mouse(m);
+            }
+            MouseKind::LeftDown => match self.stories.click_at(m.x, m.y) {
+                Some(stories::Click::Source(s)) => {
+                    self.stories.switch(s);
+                    self.fetch_stories(false);
+                }
+                Some(stories::Click::Open(i)) => {
+                    self.stories.selected = i;
+                    if let Some(url) = self.stories.story(i).map(|s| s.link().to_string()) {
+                        self.open_link(url);
+                    }
+                }
+                Some(stories::Click::Comments(i)) => {
+                    self.stories.selected = i;
+                    if let Some(url) = self.stories.story(i).map(|s| s.discussion.clone()) {
+                        self.open_link(url);
+                    }
+                }
+                None => {}
+            },
+            MouseKind::WheelDown if !in_sidebar => self.stories.scroll_by(1),
+            MouseKind::WheelUp if !in_sidebar => self.stories.scroll_by(-1),
+            _ => {}
         }
     }
 
@@ -725,7 +851,11 @@ impl App {
     }
 
     fn prefix_command(&mut self, key: Key) {
+        let from_stories = std::mem::take(&mut self.from_stories);
         match key {
+            // `^b t` on the page closes it (the prefix already did).
+            Key::Char('t') if from_stories => {}
+            Key::Char('t') => self.open_stories(),
             Key::Char('n') => self.new_shell(),
             Key::Char('w') => self.open_worktree(),
             Key::Char('m') => self.open_menu(),
@@ -888,6 +1018,7 @@ impl App {
                 None => self.mode = Mode::Worktree(d),
             },
             Mode::Menu { selected } => self.menu_key(selected, key),
+            Mode::Stories => self.stories_key(key),
             Mode::Hooks(agent) => match key {
                 Key::Char('y' | 'Y') | Key::Enter => match integrate::install_quietly(agent) {
                     Ok(msg) => self.set_status(msg, false),
@@ -997,11 +1128,16 @@ impl App {
                         self.forward(&p, true);
                     }
                 }
-                Chunk::Prefix if in_dialog => {
-                    if matches!(self.mode, Mode::Help) {
+                Chunk::Prefix if in_dialog => match self.mode {
+                    Mode::Help => self.mode = Mode::Normal,
+                    // The page steps aside for corral's keys.
+                    Mode::Stories => {
                         self.mode = Mode::Normal;
+                        self.awaiting_command = true;
+                        self.from_stories = true;
                     }
-                }
+                    _ => {}
+                },
                 Chunk::Prefix => {
                     if self.awaiting_command {
                         // Prefix twice sends it to the pane.
@@ -1190,6 +1326,10 @@ impl App {
         if working || self.frame.is_multiple_of(10) {
             self.dirty = true;
         }
+        // An open page keeps its feed fresh.
+        if matches!(self.mode, Mode::Stories) {
+            self.fetch_stories(false);
+        }
         if let Some((_, at, _)) = &self.status
             && at.elapsed() >= STATUS_FOR
         {
@@ -1316,9 +1456,12 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
     redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut anim = tokio::time::interval(Duration::from_millis(100));
     let mut checked_workspace = false;
+    // Story feeds come back from blocking fetches on worker threads.
+    let (stories_tx, mut stories_rx) = mpsc::unbounded_channel();
 
     loop {
         tokio::select! {
+            Some((source, result)) = stories_rx.recv() => app.on_stories(source, result),
             bytes = stdin_rx.recv() => match bytes {
                 Some(b) => app.on_stdin(&b),
                 None => return Ok(Exit::Detached),
@@ -1359,6 +1502,13 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
 
         for msg in app.outbox.drain(..) {
             sink.send(protocol::encode(&msg)?).await?;
+        }
+        for source in app.fetches.drain(..) {
+            let tx = stories_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = stories::fetch(source).map_err(|e| format!("{e:#}"));
+                let _ = tx.send((source, result));
+            });
         }
         if !app.term_writes.is_empty() {
             let mut out = std::io::stdout();
@@ -1709,8 +1859,8 @@ mod tests {
         a.on_stdin(b"\x02m");
         assert!(matches!(a.mode, Mode::Menu { selected: 0 }));
         // Down to the theme, → to the next one.
-        a.on_stdin(b"j\x1b[C");
-        assert!(matches!(a.mode, Mode::Menu { selected: 1 }));
+        a.on_stdin(b"jj\x1b[C");
+        assert!(matches!(a.mode, Mode::Menu { selected: 2 }));
         assert_ne!(theme::get().name, before);
         assert!(a.menu_value(MenuItem::Theme).contains(theme::get().name));
         a.on_stdin(b"\x1b[D");
@@ -1725,7 +1875,7 @@ mod tests {
 
         // Notifications off: the status line still says it, no bell.
         a.on_stdin(b"\x02m");
-        a.on_stdin(b"jjj ");
+        a.on_stdin(b"jjjj ");
         assert!(!a.notifications);
         a.on_stdin(b"q");
         a.on_server(ServerMsg::Notify {
@@ -1744,6 +1894,67 @@ mod tests {
         a.on_stdin(b"q\x02m");
         a.on_stdin(b"\x1b[<0;80;30M");
         assert!(matches!(a.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn top_stories_page() {
+        let mut a = app();
+        a.on_stdin(b"\x02t");
+        assert!(matches!(a.mode, Mode::Stories));
+        // The feed is fetched, and the agents underneath count as covered.
+        assert_eq!(a.fetches, vec![stories::Source::HackerNews]);
+        assert!(matches!(
+            a.outbox.last(),
+            Some(ClientMsg::View { covered: true, .. })
+        ));
+        a.fetches.clear();
+        let story = |n: u64| stories::Story {
+            title: format!("story {n}"),
+            url: None,
+            discussion: format!("https://news.ycombinator.com/item?id={n}"),
+            points: 1,
+            comments: 0,
+            by: String::new(),
+            posted: 0,
+            tags: vec![],
+        };
+        a.on_stories(
+            stories::Source::HackerNews,
+            Ok((1..=5).map(story).collect()),
+        );
+        a.on_stdin(b"jj");
+        assert_eq!(a.stories.selected, 2);
+        // Tab switches to lobste.rs, which needs fetching too.
+        a.on_stdin(b"\t");
+        assert_eq!(a.stories.source, stories::Source::Lobsters);
+        assert_eq!(a.fetches, vec![stories::Source::Lobsters]);
+
+        // Esc goes back to the agents, uncovered.
+        a.on_stdin(b"\x1b");
+        assert!(matches!(a.mode, Mode::Normal));
+        assert!(matches!(
+            a.outbox.last(),
+            Some(ClientMsg::View { covered: false, .. })
+        ));
+
+        // On the page, the prefix still drives corral: ^b j moves to the
+        // next agent, and ^b t just closes the page.
+        a.on_stdin(b"\x02t");
+        a.on_stdin(b"\x02j");
+        assert!(matches!(a.mode, Mode::Normal));
+        assert_eq!(sent_focus(&a), "p2");
+        a.on_stdin(b"\x02t\x02t");
+        assert!(matches!(a.mode, Mode::Normal));
+
+        // Clicking an agent in the sidebar leaves the page for it.
+        a.on_stdin(b"\x02t");
+        a.hits = vec![sidebar::Hit {
+            area: Rect::new(0, 5, 30, 1),
+            click: sidebar::Click::Focus("p3".into()),
+        }];
+        a.on_stdin(b"\x1b[<0;3;6M");
+        assert!(matches!(a.mode, Mode::Normal));
+        assert_eq!(sent_focus(&a), "p3");
     }
 
     #[test]

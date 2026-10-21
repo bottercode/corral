@@ -157,6 +157,8 @@ pub struct Headless {
     pub others: HashMap<String, vt100::Parser>,
     pub size: (u16, u16),
     pub generation: u64,
+    /// Sent with every view: something is drawn over the panes.
+    pub covered: bool,
     pub focus: Option<String>,
     pub panes: Vec<PaneInfo>,
     pub notes: Vec<String>,
@@ -180,6 +182,7 @@ impl Headless {
             others: HashMap::new(),
             size: (cols, rows),
             generation: 0,
+            covered: false,
             focus: None,
             panes: vec![],
             notes: vec![],
@@ -191,6 +194,26 @@ impl Headless {
     pub async fn focus_on(&mut self, pane: &str) {
         let (cols, rows) = self.size;
         self.view(pane, &[(pane, cols, rows)]).await;
+    }
+
+    /// Keep `pane` in view, but say whether something is drawn over it.
+    pub async fn cover(&mut self, pane: &str, covered: bool) {
+        let (cols, rows) = self.size;
+        self.covered = covered;
+        self.generation += 1;
+        self.conn
+            .send(&ClientMsg::View {
+                generation: self.generation,
+                focus: Some(pane.into()),
+                panes: vec![Viewport {
+                    pane: pane.into(),
+                    cols,
+                    rows,
+                }],
+                covered,
+            })
+            .await
+            .unwrap();
     }
 
     /// Show several panes at the given sizes, with the keyboard on `focus`.
@@ -212,6 +235,7 @@ impl Headless {
                         rows: *rows,
                     })
                     .collect(),
+                covered: self.covered,
             })
             .await
             .unwrap();

@@ -71,11 +71,14 @@ struct Client {
     focus: Option<PaneId>,
     /// Panes on the client's screen, at the size each is drawn.
     view: Vec<Viewport>,
+    /// The client is drawing something over its panes.
+    covered: bool,
 }
 
 impl Client {
+    /// The pane is in view and not covered: the user can see it.
     fn shows(&self, id: &str) -> bool {
-        self.attached && self.view.iter().any(|v| v.pane == id)
+        self.attached && !self.covered && self.view.iter().any(|v| v.pane == id)
     }
 
     fn size_for(&self, id: &str) -> Option<(u16, u16)> {
@@ -323,6 +326,7 @@ impl Hub {
         client: ClientId,
         focus: Option<&str>,
         panes: Vec<Viewport>,
+        covered: bool,
     ) -> Vec<Viewport> {
         let (events, view) = {
             let mut g = self.lock();
@@ -348,6 +352,7 @@ impl Hub {
             };
             c.focus = focus;
             c.view = view.clone();
+            c.covered = covered;
             g.refresh_focus_flags();
             let ids: Vec<&str> = view.iter().map(|v| v.pane.as_str()).collect();
             (Self::touch_and_fit(&mut g, client, &ids), view)

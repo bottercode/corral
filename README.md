@@ -90,6 +90,7 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b x` | close the agent's pane |
 | `^b r` | rename it |
 | `^b m` | menu: theme, sidebar order, notifications, agent hooks |
+| `^b t` | top stories from Hacker News and lobste.rs ([below](#top-stories)) |
 | `^b d` | detach (agents keep running) |
 | `^b q` | exit: detach, or stop corral and every agent (also the **✕ exit** button) |
 | `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`) |
@@ -114,6 +115,35 @@ terminals) to select text.
 
 Detach, close the terminal, and come back later (or from another machine over
 SSH): run `corral` again and everything is where you left it.
+
+### Top stories
+
+While your agents work, `^b t` (or **top stories** in the menu) shows the
+front pages of Hacker News and lobste.rs in place of the agents, with the
+sidebar still beside it:
+
+```
+  TOP STORIES    Hacker News   lobste.rs                      updated just now
+  ────────────────────────────────────────────────────────────────────────────
+
+  ▍  1  Upcoming Critical PHP Security Release                         php.net
+  ▍     141 points · 87 comments · 18h · by pushcx · php security
+
+     2  Unikernels in OCaml                                          uniker.nl
+        44 points · 0 comments · 8h · by xvw · ml osdev
+```
+
+- `j`/`k` or the wheel scroll; `Enter` (or a click on the title) opens the
+  story in your browser; `c` (or a click on the line under it) opens the
+  comments.
+- `Tab` switches between the two sites; `r` refreshes; `Esc` goes back to
+  your agents. `^b` keys still work from the page, and clicking an agent in
+  the sidebar goes straight to it.
+- Agents behind the page don't count as seen: one that finishes while you
+  read stays **done**, and you still get its notification.
+- Nothing is fetched until you open the page. corral then asks the sites'
+  public APIs directly (no key, no account, nothing else in between) and
+  keeps each feed for five minutes.
 
 ## Worktrees
 

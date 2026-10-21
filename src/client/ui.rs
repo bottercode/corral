@@ -362,10 +362,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         diff::draw(f, v, body);
         return;
     }
-    draw_tiles(f, app, areas.pane);
+    if matches!(app.mode, Mode::Stories) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        f.render_widget(ratatui::widgets::Clear, areas.pane);
+        app.stories.render(areas.pane, f.buffer_mut(), now);
+    } else {
+        draw_tiles(f, app, areas.pane);
+    }
 
     match &app.mode {
-        Mode::Normal | Mode::Scroll { .. } | Mode::Diff(_) => {}
+        Mode::Normal | Mode::Scroll { .. } | Mode::Diff(_) | Mode::Stories => {}
         Mode::Quit => draw_quit(f, app.running_agents(), areas.pane),
         Mode::Help => draw_help(f, app, areas.pane),
         Mode::Worktree(d) => {
@@ -552,11 +560,25 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
     } else if matches!(app.mode, Mode::Diff(_)) {
         // The diff view lists its own keys.
         Line::default()
+    } else if matches!(app.mode, Mode::Stories) {
+        let mut l = key_hint(&[
+            ("↑↓", "pick"),
+            ("Enter", "open"),
+            ("c", "comments"),
+            ("Tab", "source"),
+            ("r", "refresh"),
+            ("Esc", "back to agents"),
+        ]);
+        l.spans
+            .insert(0, Span::styled(" top stories ", t.on_accent_style()));
+        l.spans.insert(1, Span::raw(" "));
+        l
     } else if app.awaiting_command {
         let mut l = key_hint(&[
             ("n", "new"),
             ("w", "worktree"),
             ("m", "menu"),
+            ("t", "stories"),
             ("j/k", "switch"),
             ("b", "blocked"),
             ("s", "split"),
@@ -639,6 +661,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
                     "m",
                     "menu: theme, sidebar order, notifications, agent hooks",
                 ),
+                ("t", "top stories from Hacker News and lobste.rs"),
                 ("d", "detach (agents keep running)"),
                 ("q", "exit: detach, or stop corral and every agent"),
                 ("?", "this help"),
@@ -738,6 +761,7 @@ fn draw_menu(f: &mut Frame, app: &mut App, selected: usize) {
     let t = theme::get();
     let label = |item: MenuItem| match item {
         MenuItem::Keys => "keys".to_string(),
+        MenuItem::Stories => "top stories".into(),
         MenuItem::Theme => "theme".into(),
         MenuItem::Order => "sidebar".into(),
         MenuItem::Notifications => "notifications".into(),
@@ -784,7 +808,7 @@ fn draw_menu(f: &mut Frame, app: &mut App, selected: usize) {
         let value_style = match MENU[i] {
             MenuItem::Hooks(_) if v == "installed" => t.fg(t.done),
             MenuItem::Hooks(_) if v == "install…" => t.accent(),
-            MenuItem::Keys | MenuItem::Detach | MenuItem::Exit => t.muted(),
+            MenuItem::Keys | MenuItem::Stories | MenuItem::Detach | MenuItem::Exit => t.muted(),
             _ => Style::new().fg(t.text),
         };
         let line = Line::from(vec![

@@ -1,0 +1,15 @@
+---
+source: src/client/stories.rs
+expression: "render(&mut s, 80, 14)"
+---
+  TOP STORIES    Hacker News   lobste.rs                      updated just now
+  ────────────────────────────────────────────────────────────────────────────
+
+     1  Story number 1                                            example1.com
+        101 points · 1 comment · 1h · by pg
+
+  ▍  2  Story number 2                                            example2.com
+  ▍     102 points · 2 comments · 2h · by pg
+
+     3  Story number 3                                            example3.com
+        103 points · 3 comments · 3h · by pg
