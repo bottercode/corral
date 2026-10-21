@@ -133,6 +133,10 @@ pub struct App {
     prefix: u8,
     pub awaiting_command: bool,
     pub sidebar_width: u16,
+    /// The sidebar is down to its rail of agent numbers.
+    pub sidebar_collapsed: bool,
+    /// The whole terminal, as last measured.
+    term_area: Rect,
     pub sidebar_area: Rect,
     pub pane_area: Rect,
     pub hits: Vec<sidebar::Hit>,
@@ -182,6 +186,8 @@ impl App {
             prefix,
             awaiting_command: false,
             sidebar_width: config.sidebar_width,
+            sidebar_collapsed: config.sidebar_collapsed,
+            term_area: Rect::default(),
             sidebar_area: Rect::default(),
             pane_area: Rect::default(),
             hits: Vec::new(),
@@ -531,6 +537,21 @@ impl App {
         }
     }
 
+    /// Recompute the sidebar and pane areas for `term_area`.
+    fn relayout(&mut self) {
+        let areas = ui::layout(self.term_area, self.sidebar_width, self.sidebar_collapsed);
+        self.sidebar_area = areas.sidebar;
+        self.pane_area = areas.pane;
+    }
+
+    /// Shrink the sidebar to its rail, or bring it back. The panes get the
+    /// room (`sync_view` resizes them).
+    fn toggle_sidebar(&mut self) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        self.relayout();
+        self.save_setting("sidebar_collapsed", self.sidebar_collapsed);
+    }
+
     fn toggle_order(&mut self) {
         self.order = self.order.toggled();
         self.save_setting("sidebar_order", self.order.config_value());
@@ -721,6 +742,7 @@ impl App {
             Key::Char('s') => self.split(),
             Key::Char('S') => self.hide(),
             Key::Char('o') => self.only(),
+            Key::Char('c') => self.toggle_sidebar(),
             Key::Char('h') | Key::Left | Key::BackTab => self.cycle_tile(-1),
             Key::Char('l') | Key::Right | Key::Tab => self.cycle_tile(1),
             Key::Char('x') => self.open_close(),
@@ -828,6 +850,7 @@ impl App {
                     Some(sidebar::Click::Menu) => self.open_menu(),
                     Some(sidebar::Click::Exit) => self.mode = Mode::Quit,
                     Some(sidebar::Click::Order) => self.toggle_order(),
+                    Some(sidebar::Click::Collapse) => self.toggle_sidebar(),
                     None => {}
                 }
             }
@@ -1215,10 +1238,9 @@ impl Drop for TerminalGuard {
 /// the area for panes.
 fn fit_terminal(app: &mut App) -> Result<(u16, u16)> {
     let (w, h) = crossterm::terminal::size()?;
-    let areas = ui::layout(Rect::new(0, 0, w, h), app.sidebar_width);
-    app.sidebar_area = areas.sidebar;
-    app.pane_area = areas.pane;
-    Ok((areas.pane.width.max(2), areas.pane.height.max(1)))
+    app.term_area = Rect::new(0, 0, w, h);
+    app.relayout();
+    Ok((app.pane_area.width.max(2), app.pane_area.height.max(1)))
 }
 
 pub async fn run(workspace: Option<String>) -> Result<()> {
@@ -1376,6 +1398,7 @@ mod tests {
 
     fn app() -> App {
         let mut a = App::new(&Config::default(), "/tmp".into()).unwrap();
+        a.term_area = Rect::new(0, 0, 151, 40);
         a.sidebar_area = Rect::new(0, 0, 30, 39);
         a.pane_area = Rect::new(30, 0, 121, 39);
         a.on_server(ServerMsg::State {
@@ -1734,6 +1757,34 @@ mod tests {
         assert_eq!(a.order, Order::Project);
         a.on_stdin(b"\x1b[<0;17;2M");
         assert_eq!(a.order, Order::Need);
+    }
+
+    #[test]
+    fn sidebar_collapses_to_a_rail() {
+        let mut a = app();
+        a.on_stdin(b"\x02s");
+        a.outbox.clear();
+        a.hits = vec![sidebar::Hit {
+            area: Rect::new(27, 0, 1, 1),
+            click: sidebar::Click::Collapse,
+        }];
+        a.on_stdin(b"\x1b[<0;28;1M");
+        assert!(a.sidebar_collapsed);
+        assert_eq!(a.sidebar_area.width, sidebar::RAIL_WIDTH);
+        assert_eq!(a.pane_area.x, sidebar::RAIL_WIDTH);
+        // The panes on screen grow into the room.
+        let widths = |a: &App| -> Vec<u16> {
+            a.tile_rects()
+                .iter()
+                .map(|(_, _, body)| body.width)
+                .collect()
+        };
+        let wide = widths(&a);
+        assert!(a.outbox.iter().any(|m| matches!(m, ClientMsg::View { .. })));
+        a.on_stdin(b"\x02c");
+        assert!(!a.sidebar_collapsed);
+        assert_eq!(a.sidebar_area.width, 30);
+        assert!(widths(&a).iter().zip(&wide).all(|(n, w)| n < w));
     }
 
     #[test]

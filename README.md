@@ -6,7 +6,7 @@ them running when you close the laptop or lose SSH. Optionally, give each
 agent its own git worktree so parallel agents never edit the same checkout.
 
 ```
- corral       ≡ menu  ✕ exit │ 2 fixer · Fix token refresh   ◆ blocked 4m│▍1 api · Add rate limiting         ⠋ 32s
+ corral    ≡ menu  ✕ exit  « │ 2 fixer · Fix token refresh   ◆ blocked 4m│▍1 api · Add rate limiting         ⠋ 32s
  ───────────────── ⇅ by need │⏺ I'll patch the refresh lock.             │⏺ Reading src/limits.rs
  NEEDS YOU  2                │                                            │
  2 fixer       ◆ blocked 4m  │ Do you want to proceed?                    │  ⎿ Read 120 lines
@@ -85,6 +85,7 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b S` | take the focused agent off screen (it keeps running) |
 | `^b o` | only the focused agent on screen; again to bring the others back |
 | `^b h` / `^b l`, `^b Tab` | move between the agents on screen |
+| `^b c` | collapse the sidebar to agent numbers, or expand it |
 | `^b D` | review the agent's worktree diff ([below](#diff-review)) |
 | `^b x` | close the agent's pane |
 | `^b r` | rename it |
@@ -103,6 +104,9 @@ bottom of the sidebar open one. At the top:
   notifications, and installs agent hooks. Changes are saved to your config.
 - **⇅ by need / by project**, on the line under the title, switches between
   listing agents by what they need from you and grouping them by project.
+- **«** collapses the sidebar to a narrow rail of agent numbers and state
+  marks (`◆` blocked, `✓` done, a spinner while working), giving the room to
+  your agents; **»** brings it back. `^b c` does the same.
 - **✕ exit** asks whether to detach, leaving agents running, or stop corral
   and every agent; worktrees are kept either way. Scroll the wheel for
 scrollback. corral captures the mouse, so hold Shift (Option in some
@@ -294,6 +298,7 @@ default_command = ""                   # run in each new shell, e.g. "claude"; y
 notifications = true
 worktree_root = "~/.corral/worktrees"
 sidebar_width = 30
+sidebar_collapsed = false              # just the agent numbers (« / ^b c)
 theme = "ranch"                        # ranch, ink or terminal
 sidebar_order = "need"                 # need or project
 ```

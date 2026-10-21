@@ -1,8 +1,9 @@
 //! The sidebar. By default it's organised for triage: agents that need you
 //! (blocked, or finished and unseen) on top, then the ones working, then the
 //! quiet ones. It can list them by project instead. The focused agent opens
-//! up to show its title, project and worktree. Rendering returns what each
-//! row does when clicked.
+//! up to show its title, project and worktree. Collapsed, it shrinks to a
+//! rail of agent numbers and state marks. Rendering returns what each row
+//! does when clicked.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -17,6 +18,9 @@ use super::theme;
 use crate::protocol::{AgentState, PaneId, PaneInfo};
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Width of the collapsed sidebar, its rule included.
+pub const RAIL_WIDTH: u16 = 7;
 
 /// How the sidebar lists agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -191,6 +195,19 @@ pub fn compact_badge(p: &PaneInfo, age: Duration, frame: usize) -> (String, Styl
     (text, style)
 }
 
+/// One mark for an agent's state, for the collapsed rail.
+pub fn state_mark(p: &PaneInfo, frame: usize) -> (&'static str, Style) {
+    let t = theme::get();
+    let style = t.fg(t.state(p.state));
+    match p.state {
+        AgentState::Working => (SPINNER[frame % SPINNER.len()], style),
+        AgentState::Blocked => ("◆", style.add_modifier(Modifier::BOLD)),
+        AgentState::Done => ("✓", style),
+        AgentState::Idle => ("·", style),
+        AgentState::Exited => ("×", t.faint()),
+    }
+}
+
 /// State badge: what the agent is doing and for how long.
 pub fn badge(p: &PaneInfo, age: Duration, frame: usize) -> (String, Style) {
     let t = theme::get();
@@ -263,6 +280,8 @@ pub enum Click {
     Exit,
     /// The "⇅ by need" / "⇅ by project" switch.
     Order,
+    /// The "«" / "»" button that collapses or expands the sidebar.
+    Collapse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,6 +303,8 @@ pub struct Sidebar<'a> {
     /// Panes on screen next to the focused one.
     pub shown: &'a [PaneId],
     pub order: Order,
+    /// Draw the narrow rail instead of the full list.
+    pub collapsed: bool,
     pub frame: usize,
     /// Time since `panes` arrived, added to each pane's `state_secs`.
     pub age_offset: Duration,
@@ -315,6 +336,9 @@ impl Sidebar<'_> {
             buf[(rule_x, y)].set_symbol("│").set_style(t.faint());
         }
         let inner = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+        if self.collapsed {
+            return self.render_rail(inner, buf);
+        }
         let width = inner.width as usize;
         if width < 10 || inner.height == 0 {
             return Vec::new();
@@ -395,6 +419,101 @@ impl Sidebar<'_> {
                 Rect::new(inner.x, y + 1, inner.width, 1),
                 buf,
             ));
+        }
+        hits
+    }
+
+    /// The collapsed sidebar: menu and expand buttons, then each agent's
+    /// number and state mark, grouped like the full list, then the new
+    /// buttons.
+    fn render_rail(&self, inner: Rect, buf: &mut Buffer) -> Vec<Hit> {
+        let t = theme::get();
+        if inner.width < 5 || inner.height == 0 {
+            return Vec::new();
+        }
+        let mut hits = Vec::new();
+        let mut button = |x: u16, y: u16, label: &str, style: Style, click: Click| {
+            let area = Rect::new(inner.x + x, y, 1, 1);
+            Line::styled(label.to_string(), style).render(area, buf);
+            hits.push(Hit { area, click });
+        };
+        button(2, inner.y, "≡", t.accent(), Click::Menu);
+        button(4, inner.y, "»", t.muted(), Click::Collapse);
+        let rule = || {
+            Line::styled(
+                format!(" {}", "─".repeat(inner.width as usize - 2)),
+                t.faint(),
+            )
+        };
+        if inner.height > 1 {
+            rule().render(Rect::new(inner.x, inner.y + 1, inner.width, 1), buf);
+        }
+
+        let mut rows: Vec<Option<&PaneInfo>> = Vec::new();
+        for (i, section) in sections(self.panes, self.order).into_iter().enumerate() {
+            if i > 0 {
+                rows.push(None);
+            }
+            rows.extend(section.members.into_iter().map(Some));
+        }
+        let show_buttons = inner.height >= 6;
+        let bottom = inner.y + inner.height - if show_buttons { 2 } else { 0 };
+        for (i, p) in rows.into_iter().enumerate() {
+            let y = inner.y + 2 + i as u16;
+            if y >= bottom {
+                break;
+            }
+            let Some(p) = p else { continue };
+            let rect = Rect::new(inner.x, y, inner.width, 1);
+            let focused = self.focus == Some(p.id.as_str());
+            let (marker, marker_style) = if focused {
+                ("▍", t.accent())
+            } else if self.shown.contains(&p.id) {
+                ("▏", t.muted())
+            } else {
+                (" ", Style::new())
+            };
+            let num = match number(self.panes, &p.id) {
+                Some(n @ 1..=99) => format!("{n:>2}"),
+                _ => " …".into(),
+            };
+            let num_style = if focused {
+                t.bold()
+            } else if p.state == AgentState::Exited {
+                t.muted()
+            } else {
+                Style::new().fg(t.text)
+            };
+            let (mark, mark_style) = state_mark(p, self.frame);
+            if focused {
+                buf.set_style(rect, t.selected());
+            }
+            Line::from(vec![
+                Span::styled(marker, marker_style),
+                Span::styled(num, num_style),
+                Span::raw(" "),
+                Span::styled(mark, mark_style),
+            ])
+            .render(rect, buf);
+            hits.push(Hit {
+                area: rect,
+                click: Click::Focus(p.id.clone()),
+            });
+        }
+
+        if show_buttons {
+            let y = inner.y + inner.height - 2;
+            rule().render(Rect::new(inner.x, y, inner.width, 1), buf);
+            let mut button = |x: u16, label: &str, style: Style, worktree| {
+                let area = Rect::new(inner.x + x, y + 1, 1, 1);
+                Line::styled(label.to_string(), style).render(area, buf);
+                hits.push(Hit {
+                    area,
+                    click: Click::New { worktree },
+                });
+            };
+            button(2, "+", t.accent().add_modifier(Modifier::BOLD), false);
+            button(4, "⎇", t.fg(t.git), true);
         }
         hits
     }
@@ -499,7 +618,8 @@ impl Sidebar<'_> {
     }
 }
 
-/// `≡ menu   ✕ exit`, right-aligned on the title row (`≡  ✕` when narrow).
+/// `≡ menu  ✕ exit  «`, right-aligned on the title row (`≡  ✕  «` when
+/// narrow).
 fn render_title_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
     let (menu, exit) = if row.width >= 26 {
@@ -507,27 +627,24 @@ fn render_title_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     } else {
         ("≡", "✕")
     };
-    let exit_w = exit.width() as u16;
-    let exit_area = Rect::new(
-        row.x + row.width.saturating_sub(exit_w + 1),
-        row.y,
-        exit_w,
-        1,
-    );
-    let menu_w = menu.width() as u16;
-    let menu_area = Rect::new(exit_area.x.saturating_sub(menu_w + 3), row.y, menu_w, 1);
-    Line::styled(menu, t.accent()).render(menu_area, buf);
-    Line::styled(exit, t.muted()).render(exit_area, buf);
-    vec![
-        Hit {
-            area: menu_area,
-            click: Click::Menu,
-        },
-        Hit {
-            area: exit_area,
-            click: Click::Exit,
-        },
-    ]
+    let buttons = [
+        ("«", t.muted(), Click::Collapse),
+        (exit, t.muted(), Click::Exit),
+        (menu, t.accent(), Click::Menu),
+    ];
+    // Right to left, one column in from the edge, two apart.
+    let mut right = row.x + row.width.saturating_sub(1);
+    let mut hits = Vec::new();
+    for (label, style, click) in buttons {
+        let w = label.width() as u16;
+        let area = Rect::new(right.saturating_sub(w), row.y, w, 1);
+        Line::styled(label, style).render(area, buf);
+        hits.push(Hit { area, click });
+        right = area.x.saturating_sub(2);
+    }
+    // Left to right, like the rest of the sidebar.
+    hits.reverse();
+    hits
 }
 
 /// ` ⇅ by need ` over the right end of the rule under the title.
@@ -614,6 +731,17 @@ mod tests {
         width: u16,
         order: Order,
     ) -> (String, Vec<Hit>) {
+        render_with(panes, focus, shown, width, order, false)
+    }
+
+    fn render_with(
+        panes: &[PaneInfo],
+        focus: Option<&str>,
+        shown: &[PaneId],
+        width: u16,
+        order: Order,
+        collapsed: bool,
+    ) -> (String, Vec<Hit>) {
         let mut term = Terminal::new(TestBackend::new(width, 22)).unwrap();
         let mut hits = Vec::new();
         term.draw(|f| {
@@ -622,6 +750,7 @@ mod tests {
                 focus,
                 shown,
                 order,
+                collapsed,
                 frame: 0,
                 age_offset: Duration::ZERO,
             }
@@ -697,16 +826,19 @@ mod tests {
                 f("p4"),
                 Click::Menu,
                 Click::Exit,
+                Click::Collapse,
                 Click::Order,
                 Click::New { worktree: false },
                 Click::New { worktree: true },
             ]
         );
-        // Menu and exit on the title row, the order switch on the rule
-        // under it, the new buttons on the last row.
-        assert_eq!((hits[8].area.y, hits[9].area.y, hits[10].area.y), (0, 0, 1));
+        // Menu, exit and collapse on the title row, the order switch on the
+        // rule under it, the new buttons on the last row.
+        let ys: Vec<u16> = hits[8..12].iter().map(|h| h.area.y).collect();
+        assert_eq!(ys, vec![0, 0, 0, 1]);
         assert!(hits[8].area.x + hits[8].area.width < hits[9].area.x);
-        let (a, b) = (hits[11].area, hits[12].area);
+        assert!(hits[9].area.x + hits[9].area.width < hits[10].area.x);
+        let (a, b) = (hits[12].area, hits[13].area);
         assert_eq!((a.y, b.y), (21, 21));
         assert!(a.x + a.width < b.x);
     }
@@ -723,7 +855,40 @@ mod tests {
         insta::assert_snapshot!(text);
         // Only the buttons are clickable (no order switch with no agents).
         assert!(hits.iter().all(|h| !matches!(h.click, Click::Focus(_))));
-        assert_eq!(hits.len(), 4);
+        assert_eq!(hits.len(), 5);
+    }
+
+    #[test]
+    fn collapsed_sidebar_snapshot() {
+        let (text, hits) = render_with(
+            &sample(),
+            Some("p1"),
+            &["p1".into(), "p2".into()],
+            RAIL_WIDTH,
+            Order::Need,
+            true,
+        );
+        insta::assert_snapshot!(text);
+        let clicks: Vec<Click> = hits.iter().map(|h| h.click.clone()).collect();
+        let f = |id: &str| Click::Focus(id.into());
+        assert_eq!(
+            clicks,
+            vec![
+                Click::Menu,
+                Click::Collapse,
+                // One row per agent, grouped like the full list.
+                f("p1"),
+                f("p3"),
+                f("p2"),
+                f("p5"),
+                f("p4"),
+                Click::New { worktree: false },
+                Click::New { worktree: true },
+            ]
+        );
+        // A blank row between groups.
+        assert_eq!(hits[3].area.y, 3);
+        assert_eq!(hits[4].area.y, 5);
     }
 
     #[test]

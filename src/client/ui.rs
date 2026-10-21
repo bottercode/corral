@@ -11,12 +11,14 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 use unicode_width::UnicodeWidthStr;
 
 use super::input::Key;
-use super::sidebar::{Sidebar, badge, task_title, truncate};
+use super::sidebar::{RAIL_WIDTH, Sidebar, badge, task_title, truncate};
 use super::{App, MENU, MenuItem, Mode, diff, theme};
 use crate::protocol::{AgentState, PaneInfo, WorktreeAction};
 
-/// Below this width the sidebar is hidden.
+/// Below this width the sidebar is hidden…
 const MIN_WIDTH_FOR_SIDEBAR: u16 = 60;
+/// …and below this one the collapsed rail too.
+const MIN_WIDTH_FOR_RAIL: u16 = 40;
 /// Narrowest a tile gets before tiles stack instead of sitting side by side.
 const MIN_TILE_WIDTH: u16 = 40;
 
@@ -26,10 +28,17 @@ pub struct Areas {
     pub hint: Rect,
 }
 
-pub fn layout(area: Rect, sidebar_width: u16) -> Areas {
+/// Split the screen; a collapsed sidebar is `RAIL_WIDTH` wide.
+pub fn layout(area: Rect, sidebar_width: u16, collapsed: bool) -> Areas {
     let hint_h = u16::from(area.height > 2);
     let body_h = area.height - hint_h;
-    let sw = if area.width >= MIN_WIDTH_FOR_SIDEBAR {
+    let sw = if collapsed {
+        if area.width >= MIN_WIDTH_FOR_RAIL {
+            RAIL_WIDTH
+        } else {
+            0
+        }
+    } else if area.width >= MIN_WIDTH_FOR_SIDEBAR {
         sidebar_width.min(area.width / 2)
     } else {
         0
@@ -321,7 +330,7 @@ fn key_hint(keys: &[(&str, &str)]) -> Line<'static> {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let areas = layout(f.area(), app.sidebar_width);
+    let areas = layout(f.area(), app.sidebar_width, app.sidebar_collapsed);
     app.sidebar_area = areas.sidebar;
     app.pane_area = areas.pane;
 
@@ -332,6 +341,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             focus: app.focus.as_deref(),
             shown: &shown,
             order: app.order,
+            collapsed: app.sidebar_collapsed,
             frame: app.frame,
             age_offset: app.state_at.elapsed(),
         }
@@ -617,6 +627,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
                 ("s", "show another agent alongside (up to 4)"),
                 ("S", "take this one off screen (it keeps running)"),
                 ("o", "only this one; again to bring the others back"),
+                ("c", "collapse the sidebar to agent numbers, or expand it"),
                 ("h / l, Tab", "move between agents on screen"),
                 ("[", "scrollback (mouse wheel works too)"),
             ],
@@ -974,13 +985,26 @@ mod tests {
 
     #[test]
     fn layout_hides_sidebar_when_narrow() {
-        let a = layout(Rect::new(0, 0, 120, 40), 30);
+        let a = layout(Rect::new(0, 0, 120, 40), 30, false);
         assert_eq!(a.sidebar.width, 30);
         assert_eq!(a.pane, Rect::new(30, 0, 90, 39));
         assert_eq!(a.hint, Rect::new(0, 39, 120, 1));
-        let a = layout(Rect::new(0, 0, 50, 20), 30);
+        let a = layout(Rect::new(0, 0, 50, 20), 30, false);
         assert_eq!(a.sidebar.width, 0);
         assert_eq!(a.pane.width, 50);
+    }
+
+    #[test]
+    fn collapsed_sidebar_is_a_rail() {
+        let a = layout(Rect::new(0, 0, 120, 40), 30, true);
+        assert_eq!(a.sidebar.width, RAIL_WIDTH);
+        assert_eq!(a.pane, Rect::new(RAIL_WIDTH, 0, 120 - RAIL_WIDTH, 39));
+        // The rail fits where the full sidebar wouldn't.
+        assert_eq!(
+            layout(Rect::new(0, 0, 50, 20), 30, true).sidebar.width,
+            RAIL_WIDTH
+        );
+        assert_eq!(layout(Rect::new(0, 0, 30, 20), 30, true).sidebar.width, 0);
     }
 
     #[test]

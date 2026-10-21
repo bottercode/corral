@@ -6,6 +6,7 @@
 //! notifications = true              # bell + OSC 9 when an unfocused agent is blocked/done
 //! worktree_root = "~/.corral/worktrees"
 //! sidebar_width = 30
+//! sidebar_collapsed = false        # just agent numbers (^b c, or « in the sidebar)
 //! theme = "ranch"                  # ranch, ink or terminal
 //! sidebar_order = "need"           # need (what needs you first) or project
 //! ```
@@ -25,6 +26,7 @@ pub struct Config {
     pub notifications: bool,
     pub worktree_root: Option<String>,
     pub sidebar_width: u16,
+    pub sidebar_collapsed: bool,
     pub theme: String,
     pub sidebar_order: String,
 }
@@ -37,6 +39,7 @@ impl Default for Config {
             notifications: true,
             worktree_root: None,
             sidebar_width: 30,
+            sidebar_collapsed: false,
             theme: "ranch".into(),
             sidebar_order: "need".into(),
         }
