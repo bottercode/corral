@@ -331,6 +331,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match &app.mode {
         Mode::Normal | Mode::Scroll { .. } | Mode::Diff(_) => {}
+        Mode::Quit => draw_quit(f, app.running_agents(), areas.pane),
         Mode::Help => draw_help(f, app, areas.pane),
         Mode::New(d) => {
             let d = d.clone();
@@ -464,6 +465,7 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
             ("x", "close"),
             ("r", "rename"),
             ("d", "detach"),
+            ("q", "quit"),
             ("[", "scroll"),
             ("?", "help"),
         ])
@@ -529,6 +531,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ("x", "close the pane"),
         ("r", "rename the pane"),
         ("d", "detach (agents keep running)"),
+        ("q", "exit: detach, or stop corral and every agent"),
         ("[", "scrollback (mouse wheel works too)"),
         ("?", "this help"),
     ];
@@ -645,6 +648,48 @@ fn draw_new(f: &mut Frame, d: &NewDialog, area: Rect) {
     if let Some((row, col)) = cursor {
         f.set_cursor_position((r.x + 1 + col, r.y + 1 + row));
     }
+}
+
+fn draw_quit(f: &mut Frame, running: usize, area: Rect) {
+    let agents = match running {
+        0 => "No agents are running.".to_string(),
+        1 => "1 agent is running.".to_string(),
+        n => format!("{n} agents are running."),
+    };
+    let mut text = vec![Line::styled(
+        agents,
+        Style::new().add_modifier(Modifier::BOLD),
+    )];
+    text.push(Line::default());
+    text.extend(options(&[
+        (
+            "d",
+            "detach: close this window, agents keep running (corral to return)",
+        ),
+        (
+            "s",
+            "stop corral: end every agent and the background server",
+        ),
+        ("Esc", "cancel"),
+    ]));
+    if running > 0 {
+        text.push(Line::default());
+        text.push(Line::styled(
+            "Stopping ends the agents' processes; worktrees and their changes stay on disk.",
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    let width = 78u16.min(area.width.saturating_sub(2));
+    let inner = width.saturating_sub(2).max(1) as usize;
+    let rows: usize = text.iter().map(|l| l.width().div_ceil(inner).max(1)).sum();
+    let r = centered(area, width, rows as u16 + 2);
+    f.render_widget(Clear, r);
+    f.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(dialog_block("Exit corral")),
+        r,
+    );
 }
 
 fn draw_rename(f: &mut Frame, pane: &str, input: &TextInput, area: Rect) {

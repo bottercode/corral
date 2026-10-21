@@ -41,11 +41,21 @@ const WHEEL_LINES: usize = 3;
 pub enum Mode {
     Normal,
     Help,
-    Scroll { offset: usize },
+    Scroll {
+        offset: usize,
+    },
     New(NewDialog),
-    Rename { pane: PaneId, input: TextInput },
-    Close { pane: PaneId, step: CloseStep },
+    Rename {
+        pane: PaneId,
+        input: TextInput,
+    },
+    Close {
+        pane: PaneId,
+        step: CloseStep,
+    },
     Diff(DiffView),
+    /// Detach, or stop corral and every agent.
+    Quit,
 }
 
 #[derive(Debug)]
@@ -60,6 +70,8 @@ enum Pending {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Exit {
     Detached,
+    /// The user stopped corral; this many agents were still running.
+    Stopped(usize),
     ServerGone(String),
 }
 
@@ -91,6 +103,8 @@ pub struct App {
     /// Raw bytes for the outer terminal (bell, OSC 9).
     pub term_writes: Vec<u8>,
     pub exit: Option<Exit>,
+    /// Asked the server to stop; its shutdown is expected.
+    stopping: Option<usize>,
     pub dirty: bool,
 }
 
@@ -123,6 +137,7 @@ impl App {
             outbox: Vec::new(),
             term_writes: Vec::new(),
             exit: None,
+            stopping: None,
             dirty: true,
         })
     }
@@ -282,6 +297,26 @@ impl App {
         );
     }
 
+    fn detach(&mut self) {
+        self.outbox.push(ClientMsg::Detach);
+        self.exit = Some(Exit::Detached);
+    }
+
+    /// Agents whose processes are still running.
+    pub fn running_agents(&self) -> usize {
+        self.panes
+            .iter()
+            .filter(|p| p.state != AgentState::Exited)
+            .count()
+    }
+
+    /// Stop the server and every agent it runs.
+    fn stop_corral(&mut self) {
+        self.stopping = Some(self.running_agents());
+        self.set_status("stopping corral…", false);
+        self.request(Command::KillServer, Pending::Other);
+    }
+
     fn open_diff(&mut self) {
         let Some(p) = self.focused() else { return };
         if p.worktree.is_none() {
@@ -338,10 +373,8 @@ impl App {
                     };
                 }
             }
-            Key::Char('d') => {
-                self.outbox.push(ClientMsg::Detach);
-                self.exit = Some(Exit::Detached);
-            }
+            Key::Char('d') => self.detach(),
+            Key::Char('q') => self.mode = Mode::Quit,
             Key::Char('D') => self.open_diff(),
             Key::Char('[') => self.enter_scroll(0),
             Key::Char('?') => self.mode = Mode::Help,
@@ -413,6 +446,7 @@ impl App {
                 match click {
                     Some(sidebar::Click::Focus(id)) => self.set_focus(id),
                     Some(sidebar::Click::New { worktree }) => self.open_new(worktree),
+                    Some(sidebar::Click::Exit) => self.mode = Mode::Quit,
                     None => {}
                 }
             }
@@ -438,6 +472,12 @@ impl App {
     fn dialog_key(&mut self, key: Key) {
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Help => {}
+            Mode::Quit => match key {
+                Key::Char('d' | 'q') | Key::Enter => self.detach(),
+                Key::Char('s' | 'S') => self.stop_corral(),
+                Key::Esc | Key::Ctrl('c') => {}
+                _ => self.mode = Mode::Quit,
+            },
             Mode::New(mut d) => match d.handle(key) {
                 Some(true) => self.submit_new(d),
                 Some(false) => {}
@@ -567,8 +607,17 @@ impl App {
                         }
                     } else if self.awaiting_command {
                         self.awaiting_command = false;
-                        if let Some(k) = decode_keys(&b).into_iter().next() {
+                        let mut keys = decode_keys(&b).into_iter();
+                        if let Some(k) = keys.next() {
                             self.prefix_command(k);
+                        }
+                        // Keys typed right after a command that opened a
+                        // dialog belong to that dialog.
+                        for k in keys {
+                            if matches!(self.mode, Mode::Normal | Mode::Scroll { .. }) {
+                                break;
+                            }
+                            self.dialog_key(k);
                         }
                     } else if matches!(self.mode, Mode::Scroll { .. }) {
                         for k in decode_keys(&b) {
@@ -633,7 +682,12 @@ impl App {
                 let kind = self.pending.remove(&id).unwrap_or(Pending::Other);
                 self.on_reply(kind, result);
             }
-            ServerMsg::Shutdown { reason } => self.exit = Some(Exit::ServerGone(reason)),
+            ServerMsg::Shutdown { reason } => {
+                self.exit = Some(match self.stopping {
+                    Some(n) => Exit::Stopped(n),
+                    None => Exit::ServerGone(reason),
+                });
+            }
             ServerMsg::Hello { .. } => {}
         }
     }
@@ -784,6 +838,10 @@ pub async fn run(workspace: Option<String>) -> Result<()> {
         Exit::Detached => {
             println!("[detached from corral; agents keep running — `corral` to reattach]")
         }
+        Exit::Stopped(n) => println!(
+            "[corral stopped; {n} {} ended. Worktrees are kept: `corral worktree ls`]",
+            if n == 1 { "agent" } else { "agents" }
+        ),
         Exit::ServerGone(reason) => println!("[corral: {reason}]"),
     }
     Ok(())
@@ -1106,6 +1164,44 @@ mod tests {
             focus: None,
         });
         assert!(matches!(a.mode, Mode::New(_)));
+    }
+
+    #[test]
+    fn exit_button_offers_detach_or_stop() {
+        let mut a = app();
+        a.sidebar_area = Rect::new(0, 0, 30, 20);
+        a.hits = vec![sidebar::Hit {
+            area: Rect::new(21, 0, 8, 1),
+            click: sidebar::Click::Exit,
+        }];
+        // Click "✕ exit", then d: detach, agents keep running.
+        a.on_stdin(b"\x1b[<0;23;1M");
+        assert!(matches!(a.mode, Mode::Quit));
+        assert!(a.exit.is_none());
+        a.on_stdin(b"d");
+        assert_eq!(a.exit, Some(Exit::Detached));
+        assert_eq!(a.outbox, vec![ClientMsg::Detach]);
+
+        // Esc cancels.
+        let mut a = app();
+        a.on_stdin(b"\x02q\x1b");
+        assert!(matches!(a.mode, Mode::Normal) && a.exit.is_none());
+
+        // ^b q, then s: stop the server; exit once it has shut down.
+        let mut a = app();
+        a.on_stdin(b"\x02qs");
+        assert!(matches!(
+            &a.outbox[0],
+            ClientMsg::Command {
+                cmd: Command::KillServer,
+                ..
+            }
+        ));
+        assert!(a.exit.is_none());
+        a.on_server(ServerMsg::Shutdown {
+            reason: "server shut down".into(),
+        });
+        assert_eq!(a.exit, Some(Exit::Stopped(3)));
     }
 
     #[test]

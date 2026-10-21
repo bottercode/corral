@@ -2,7 +2,7 @@
 source: src/client/sidebar.rs
 expression: text
 ---
- corral  ●1  ✓1    │
+ corral  ●1  ✓1 ✕  │
                    │
  corral            │
  1 cl… ● blocked 4m│

@@ -95,6 +95,8 @@ pub enum Click {
     New {
         worktree: bool,
     },
+    /// The "✕ exit" button.
+    Exit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,6 +255,10 @@ impl Sidebar<'_> {
                 });
             }
         }
+        hits.push(render_exit_button(
+            Rect::new(inner.x, inner.y, inner.width, 1),
+            buf,
+        ));
         if show_buttons {
             hits.extend(render_buttons(
                 Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
@@ -260,6 +266,22 @@ impl Sidebar<'_> {
             ));
         }
         hits
+    }
+}
+
+/// `✕ exit`, right-aligned on the title row (`✕` alone when narrow).
+fn render_exit_button(row: Rect, buf: &mut Buffer) -> Hit {
+    let label = if row.width >= 24 {
+        " ✕ exit "
+    } else {
+        " ✕ "
+    };
+    let w = label.width() as u16;
+    let area = Rect::new(row.x + row.width.saturating_sub(w + 1), row.y, w, 1);
+    Line::styled(label, Style::new().fg(Color::Black).bg(Color::Gray)).render(area, buf);
+    Hit {
+        area,
+        click: Click::Exit,
     }
 }
 
@@ -391,12 +413,14 @@ mod tests {
                 f("p3"),
                 f("p2"),
                 f("p4"),
+                Click::Exit,
                 Click::New { worktree: false },
                 Click::New { worktree: true },
             ]
         );
-        // The buttons are on the last row and don't overlap.
-        let (a, b) = (hits[5].area, hits[6].area);
+        // Exit is on the title row; the new buttons on the last row.
+        assert_eq!(hits[5].area.y, 0);
+        let (a, b) = (hits[6].area, hits[7].area);
         assert_eq!((a.y, b.y), (11, 11));
         assert!(a.x + a.width < b.x);
     }
@@ -406,8 +430,8 @@ mod tests {
         let (text, hits) = render(&[], None, 32);
         insta::assert_snapshot!(text);
         // Only the buttons are clickable.
-        assert!(hits.iter().all(|h| matches!(h.click, Click::New { .. })));
-        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|h| !matches!(h.click, Click::Focus(_))));
+        assert_eq!(hits.len(), 3);
     }
 
     #[test]

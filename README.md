@@ -78,12 +78,15 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b x` | close the agent's pane |
 | `^b r` | rename it |
 | `^b d` | detach (agents keep running) |
+| `^b q` | exit: detach, or stop corral and every agent (also the **✕ exit** button) |
 | `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`) |
 | `^b ?` | help |
 | `^b ^b` | send a literal `Ctrl-b` to the agent |
 
 Click a sidebar row to focus that agent, or the **+ new agent** / **⎇ worktree**
-buttons at the bottom of the sidebar to start one. Scroll the wheel for
+buttons at the bottom of the sidebar to start one. **✕ exit** (top of the
+sidebar) asks whether to detach, leaving agents running, or stop corral and
+every agent; worktrees are kept either way. Scroll the wheel for
 scrollback. corral captures the mouse, so hold Shift (Option in some
 terminals) to select text.
 

@@ -296,6 +296,74 @@ fn new_agent_button_starts_an_agent() {
     assert_eq!(s.panes().len(), 2);
 }
 
+fn click_text(t: &mut Tui, text: &str) {
+    let screen = t.screen();
+    let (row, col) = screen
+        .lines()
+        .enumerate()
+        .find_map(|(r, l)| l.find(text).map(|c| (r, l[..c].chars().count())))
+        .unwrap_or_else(|| panic!("{text:?} not on screen:\n{screen}"));
+    t.type_(
+        format!(
+            "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+            col + 2,
+            row + 1,
+            col + 2,
+            row + 1
+        )
+        .as_bytes(),
+    );
+}
+
+fn wait_exit(t: &mut Tui) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while t.child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "client didn't exit");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn exit_button_detaches_or_stops_corral() {
+    let s = TestServer::start();
+    let dir = s.dir.path().to_str().unwrap().to_string();
+    s.ok(&[
+        "new",
+        "--cwd",
+        &dir,
+        "--",
+        "sh",
+        "-c",
+        "echo agent-one; cat",
+    ]);
+
+    // ✕ exit → d: the window closes, the agent keeps running.
+    let mut t = Tui::start(&s, 120, 30);
+    t.wait_for("exit button", |x| {
+        x.contains("✕ exit") && x.contains("agent-one")
+    });
+    click_text(&mut t, "✕ exit");
+    t.wait_for("exit menu", |x| {
+        x.contains("Exit corral") && x.contains("stop corral")
+    });
+    t.type_(b"d");
+    wait_exit(&mut t);
+    t.wait_for("detach message", |x| x.contains("detached from corral"));
+    assert_eq!(s.panes().len(), 1);
+
+    // ✕ exit → s: the server and its agents stop.
+    let mut t = Tui::start(&s, 120, 30);
+    t.wait_for("exit button", |x| x.contains("✕ exit"));
+    click_text(&mut t, "✕ exit");
+    t.wait_for("exit menu", |x| x.contains("Exit corral"));
+    t.type_(b"s");
+    wait_exit(&mut t);
+    t.wait_for("stopped message", |x| {
+        x.contains("corral stopped; 1 agent ended")
+    });
+    eventually("socket removed", || !s.socket.exists());
+}
+
 /// Needs `claude` on PATH; run with `cargo test --test tui -- --ignored --nocapture`.
 #[test]
 #[ignore]

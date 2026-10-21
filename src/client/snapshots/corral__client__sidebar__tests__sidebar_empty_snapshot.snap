@@ -2,7 +2,7 @@
 source: src/client/sidebar.rs
 expression: text
 ---
- corral                        │
+ corral                ✕ exit  │
                                │
  no agents yet                 │
                                │
