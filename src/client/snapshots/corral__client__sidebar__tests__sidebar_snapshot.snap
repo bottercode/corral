@@ -6,7 +6,7 @@ expression: text
                                │
  corral                        │
 ▌1 claude             ● blocked│
-   ⎇ corral/claude-3f9a · 3 fi…│
+   ⎇ corral/claude-3f9a +3     │
  2 a-very-long-agent-na… ✓ done│
                                │
  website                       │

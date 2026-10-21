@@ -79,6 +79,32 @@ pub struct SpawnSpec {
     pub worktree: Option<WorktreeInfo>,
 }
 
+/// Variables that describe the session that started the server rather
+/// than user configuration. Agent settings such as `CLAUDE_CODE_USE_BEDROCK`
+/// or `ANTHROPIC_API_KEY` are kept.
+pub fn is_inherited_session_var(k: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "TERM_PROGRAM",
+        "TERM_PROGRAM_VERSION",
+        "TERM_SESSION_ID",
+        "TMUX",
+        "TMUX_PANE",
+        "CLAUDECODE",
+        "CLAUDE_PID",
+        "CLAUDE_EFFORT",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS",
+        "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING",
+        "CODEX_SANDBOX",
+        "CODEX_SANDBOX_NETWORK_DISABLED",
+        "CODEX_THREAD_ID",
+    ];
+    const PREFIXES: &[&str] = &["CLAUDE_CODE_SESSION_", "CLAUDE_CODE_MESSAGING_"];
+    EXACT.contains(&k) || PREFIXES.iter().any(|p| k.starts_with(p))
+}
+
 pub struct Pane {
     pub id: PaneId,
     pub name: String,
@@ -138,16 +164,14 @@ pub fn spawn(spec: SpawnSpec) -> Result<Spawned> {
     if let Ok(exe) = std::env::current_exe() {
         cmd.env(paths::BIN_ENV, exe);
     }
-    // The pane's shell shouldn't think it's inside the terminal that
-    // happened to start the server.
-    for var in [
-        "TERM_PROGRAM",
-        "TERM_PROGRAM_VERSION",
-        "TERM_SESSION_ID",
-        "TMUX",
-        "TMUX_PANE",
-    ] {
-        cmd.env_remove(var);
+    // A pane is a fresh terminal: it shouldn't inherit the identity of the
+    // terminal or agent session that happened to start the server.
+    for (key, _) in std::env::vars_os() {
+        if let Some(k) = key.to_str()
+            && is_inherited_session_var(k)
+        {
+            cmd.env_remove(k);
+        }
     }
 
     let child = pty.slave.spawn_command(cmd).with_context(|| {
@@ -363,6 +387,28 @@ mod tests {
         feed(&mut p, "ab\r\ncd\x1b[6n\x1b[c\x1b[5n");
         let replies = std::mem::take(&mut p.callbacks_mut().replies);
         assert_eq!(replies, b"\x1b[2;3R\x1b[?1;2c\x1b[0n");
+    }
+
+    #[test]
+    fn session_markers_are_dropped_but_config_is_kept() {
+        for k in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "TMUX",
+        ] {
+            assert!(is_inherited_session_var(k), "{k}");
+        }
+        for k in [
+            "CLAUDE_CODE_USE_BEDROCK",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CONFIG_DIR",
+            "PATH",
+            "HOME",
+        ] {
+            assert!(!is_inherited_session_var(k), "{k}");
+        }
     }
 
     #[test]

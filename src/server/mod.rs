@@ -345,6 +345,7 @@ impl Hub {
             .pane(pane)?
             .detector
             .report(state, Instant::now());
+        tracing::info!(pane, %state, "state reported");
         self.tick();
         Ok(())
     }

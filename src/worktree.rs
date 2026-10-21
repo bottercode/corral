@@ -14,10 +14,11 @@ use crate::protocol::WorktreeInfo;
 pub enum WorktreeError {
     #[error("{0} is not inside a git repository")]
     NotARepo(PathBuf),
-    #[error("{path} has uncommitted changes ({files} files); commit them or force removal")]
+    #[error("{path} has uncommitted changes ({files} {}); commit them or force removal", plural(*files, "file"))]
     Dirty { path: PathBuf, files: u32 },
     #[error(
-        "branch {branch} has {commits} commits that aren't on any other branch; merge them or force deletion"
+        "branch {branch} has {commits} {} that aren't on any other branch; merge them or force deletion",
+        plural(*commits, "commit")
     )]
     Unmerged { branch: String, commits: u32 },
     #[error("{0}")]
@@ -29,6 +30,15 @@ pub enum WorktreeError {
 }
 
 pub type Result<T> = std::result::Result<T, WorktreeError>;
+
+/// `file` / `files` for a count.
+pub fn plural(n: u32, word: &str) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")

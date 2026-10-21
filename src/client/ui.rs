@@ -349,6 +349,9 @@ fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
         _ => 0,
     };
     let Some(parser) = app.parser.as_mut() else {
+        if !matches!(app.mode, Mode::Normal) {
+            return;
+        }
         let text = if app.panes.is_empty() {
             vec![
                 Line::styled("No agents yet.", Style::new().add_modifier(Modifier::BOLD)),
@@ -471,7 +474,7 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
             }
             _ => {
                 let mut l = key_hint(&[
-                    (&format!("{p} n"), "new"),
+                    ("n", "new"),
                     ("w", "worktree"),
                     ("j/k", "switch"),
                     ("b", "next blocked"),
@@ -479,7 +482,15 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
                     ("d", "detach"),
                     ("?", "help"),
                 ]);
-                l.spans.insert(0, Span::raw(" "));
+                let lead = vec![
+                    Span::raw(" "),
+                    Span::styled(
+                        p.clone(),
+                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" then  ", Style::new().fg(Color::DarkGray)),
+                ];
+                l.spans.splice(0..0, lead);
                 l
             }
         }
@@ -646,7 +657,7 @@ fn draw_close(f: &mut Frame, p: &PaneInfo, step: &CloseStep, area: Rect) {
                 "Close this pane?"
             }));
             text.push(Line::default());
-            text.push(key_hint(&[("y", "close"), ("n/Esc", "cancel")]));
+            text.extend(options(&[("y", "close it"), ("Esc", "cancel")]));
         }
         (CloseStep::Worktree, Some(w)) => {
             if running {
@@ -657,7 +668,7 @@ fn draw_close(f: &mut Frame, p: &PaneInfo, step: &CloseStep, area: Rect) {
                 Span::styled(w.branch.clone(), Style::new().fg(Color::Magenta)),
                 Span::raw(match w.changed_files {
                     0 => " · clean".to_string(),
-                    n => format!(" · {n} changed files"),
+                    n => format!(" · {n} changed {}", crate::worktree::plural(n, "file")),
                 }),
             ]));
             text.push(Line::styled(
@@ -665,24 +676,27 @@ fn draw_close(f: &mut Frame, p: &PaneInfo, step: &CloseStep, area: Rect) {
                 Style::new().fg(Color::DarkGray),
             ));
             text.push(Line::default());
-            text.push(key_hint(&[
-                ("k", "keep worktree"),
-                ("r", "remove it"),
-                ("d", "remove + delete branch"),
+            text.extend(options(&[
+                ("k", "close, keep the worktree"),
+                ("r", "close and remove the worktree (keeps the branch)"),
+                ("d", "close, remove the worktree and delete the branch"),
                 ("Esc", "cancel"),
             ]));
         }
         (CloseStep::Force { message, .. }, _) => {
             text.push(Line::styled(message.clone(), Style::new().fg(Color::Red)));
             text.push(Line::default());
-            text.push(key_hint(&[
-                ("f", "force remove (loses that work)"),
-                ("k", "close, keep worktree"),
+            text.extend(options(&[
+                ("f", "force it (that work is lost)"),
+                ("k", "close, keep the worktree"),
                 ("Esc", "cancel"),
             ]));
         }
     }
-    let r = centered(area, 64, text.len() as u16 + 4);
+    let width = 72u16.min(area.width.saturating_sub(2));
+    let inner = width.saturating_sub(2).max(1) as usize;
+    let rows: usize = text.iter().map(|l| l.width().div_ceil(inner).max(1)).sum();
+    let r = centered(area, width, rows as u16 + 2);
     f.render_widget(Clear, r);
     f.render_widget(
         Paragraph::new(text)
@@ -690,6 +704,19 @@ fn draw_close(f: &mut Frame, p: &PaneInfo, step: &CloseStep, area: Rect) {
             .block(dialog_block(&title)),
         r,
     );
+}
+
+/// One `key  description` line per choice.
+fn options(items: &[(&str, &str)]) -> Vec<Line<'static>> {
+    items
+        .iter()
+        .map(|(k, what)| {
+            Line::from(vec![
+                Span::styled(format!(" {k:<4}"), Style::new().fg(Color::Cyan)),
+                Span::raw(what.to_string()),
+            ])
+        })
+        .collect()
 }
 
 #[cfg(test)]

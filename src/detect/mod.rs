@@ -23,6 +23,8 @@ pub const HOOK_WORKING_QUIET_EXPIRY: Duration = Duration::from_secs(10);
 pub const QUIET_AFTER_RESIZE: Duration = Duration::from_millis(1000);
 /// Output right after input is mostly echo, not work.
 pub const QUIET_AFTER_INPUT: Duration = Duration::from_millis(500);
+/// Unprompted output for this long counts as real work (not just startup).
+pub const ENGAGE_AFTER: Duration = Duration::from_secs(4);
 
 /// What the screen rules say about the visible screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -50,6 +52,13 @@ pub struct Detector {
     exited: bool,
     /// Working (or blocked) since the agent last went quiet.
     active: bool,
+    /// The current activity is real work: the agent was given input, a
+    /// hook reported, a spinner or prompt showed, or output went on for
+    /// a while. Startup output alone doesn't count, so an agent that just
+    /// booted settles to idle rather than done.
+    engaged: bool,
+    /// When the current stretch of output began.
+    working_since: Option<Instant>,
     /// Finished work the user hasn't looked at yet.
     unseen: bool,
 }
@@ -71,6 +80,8 @@ impl Detector {
             focused: false,
             exited: false,
             active: false,
+            engaged: false,
+            working_since: None,
             unseen: false,
         }
     }
@@ -92,6 +103,7 @@ impl Detector {
 
     pub fn on_input(&mut self, now: Instant) {
         self.extend_quiet(now + QUIET_AFTER_INPUT);
+        self.engaged = true;
         // Typing into a pane a hook marked blocked means the user answered.
         if self.hook.is_some_and(|h| h.state == AgentState::Blocked) {
             self.hook = None;
@@ -112,6 +124,7 @@ impl Detector {
             return;
         }
         self.hook = Some(Hook { state, at: now });
+        self.engaged = true;
         match state {
             AgentState::Done => {
                 self.active = false;
@@ -167,8 +180,14 @@ impl Detector {
         let raw = match self.hook_state(now) {
             Some(s) => s,
             None => match self.verdict {
-                Verdict::Blocked => AgentState::Blocked,
-                Verdict::Working => AgentState::Working,
+                Verdict::Blocked | Verdict::Working => {
+                    self.engaged = true;
+                    if self.verdict == Verdict::Blocked {
+                        AgentState::Blocked
+                    } else {
+                        AgentState::Working
+                    }
+                }
                 Verdict::None => {
                     let recent = self
                         .last_output
@@ -184,12 +203,20 @@ impl Detector {
         match raw {
             AgentState::Working | AgentState::Blocked => {
                 self.active = true;
+                let since = *self.working_since.get_or_insert(now);
+                if now.saturating_duration_since(since) >= ENGAGE_AFTER {
+                    self.engaged = true;
+                }
                 raw
             }
             AgentState::Done | AgentState::Idle => {
                 if self.active {
                     self.active = false;
-                    self.unseen = !self.focused;
+                    self.working_since = None;
+                    if self.engaged {
+                        self.unseen = !self.focused;
+                    }
+                    self.engaged = false;
                 }
                 if self.unseen {
                     AgentState::Done
@@ -226,11 +253,33 @@ mod tests {
     }
 
     #[test]
-    fn output_means_working_then_done_when_unfocused() {
+    fn startup_output_alone_settles_to_idle() {
         let c = Clock::new();
         let mut d = Detector::new();
         d.on_output(c.at(0));
         assert_eq!(d.evaluate(c.at(100)), Some((Idle, Working)));
+        d.on_output(c.at(1000));
+        assert_eq!(d.evaluate(c.at(2600)), Some((Working, Idle)));
+    }
+
+    #[test]
+    fn long_unprompted_work_counts() {
+        let c = Clock::new();
+        let mut d = Detector::new();
+        for ms in (0..=5000).step_by(500) {
+            d.on_output(c.at(ms));
+            d.evaluate(c.at(ms + 1));
+        }
+        assert_eq!(d.evaluate(c.at(7000)), Some((Working, Done)));
+    }
+
+    #[test]
+    fn output_means_working_then_done_when_unfocused() {
+        let c = Clock::new();
+        let mut d = Detector::new();
+        d.on_input(c.at(0));
+        d.on_output(c.at(600));
+        assert_eq!(d.evaluate(c.at(700)), Some((Idle, Working)));
         d.on_output(c.at(1000));
         assert_eq!(d.evaluate(c.at(2000)), None);
         assert_eq!(d.evaluate(c.at(2600)), Some((Working, Done)));

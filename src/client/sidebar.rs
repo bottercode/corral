@@ -175,12 +175,11 @@ impl Sidebar<'_> {
             lines.push((line, Some(p.id.clone())));
 
             if let Some(w) = &p.worktree {
-                let files = match w.changed_files {
-                    0 => "clean".to_string(),
-                    1 => "1 file".to_string(),
-                    n => format!("{n} files"),
+                // `+N`: files changed in the worktree (as in `corral ls`).
+                let text = match w.changed_files {
+                    0 => format!("   ⎇ {}", w.branch),
+                    n => format!("   ⎇ {} +{n}", w.branch),
                 };
-                let text = format!("   ⎇ {} · {files}", w.branch);
                 lines.push((
                     Line::styled(truncate(&text, width), Style::new().fg(Color::Magenta))
                         .style(row_style),

@@ -10,9 +10,9 @@ agent its own git worktree so parallel agents never edit the same checkout.
                                │
  api                           │⏺ I'll run the tests first.
 ▌1 claude            ● blocked │
-   ⎇ corral/claude-3f9a · 3 fi…│ Bash(cargo test)
+   ⎇ corral/claude-3f9a +3     │ Bash(cargo test)
  2 codex             ⠋ working │
-   ⎇ corral/codex-81c2 · clean │ Do you want to proceed?
+   ⎇ corral/codex-81c2         │ Do you want to proceed?
                                │ ❯ 1. Yes
  website                       │   2. Yes, and don't ask again for cargo test
  3 opencode            ✓ done  │   3. No, and tell Claude what to do differently
@@ -57,7 +57,8 @@ corral                      # open the UI (starts the server if needed)
 
 With no agents running, the new-agent dialog opens. Type a command
 (`claude` by default), pick a directory, tick **Worktree** if you want one, and
-press Enter. Then, with the prefix key `Ctrl-b`:
+press Enter. Everything you type goes to the focused agent. corral's own commands are
+**Ctrl-b, then a key** (the bottom line reminds you):
 
 | Keys | Action |
 |---|---|
@@ -95,7 +96,7 @@ Each worktree is created next to, not inside, your repository:
 
 - Your own checkout stays untouched, and each agent works on its own branch.
 - The sidebar shows the branch and how many files the agent has changed
-  (`⎇ corral/claude-3f9a · 3 files`). This updates every few seconds.
+  (`⎇ corral/claude-3f9a +3`). This updates every few seconds.
 - `--branch` uses that branch, creating it from `HEAD` if it doesn't exist
   yet or checking it out if it does.
 - Closing a worktree pane asks whether to **keep** the worktree, **remove**
@@ -283,7 +284,12 @@ cargo test --test tui -- --ignored --nocapture   # renders a real `claude` pane 
 ```
 
 The integration tests run the real binary as a server on a private socket,
-and drive the TUI inside a PTY.
+and drive the TUI inside a PTY. To look at the UI from a script, the `drive`
+example runs any command in a PTY and prints its screen:
+
+```sh
+cargo run --example drive -- 120x32 'wait:corral' 'type:\x02?' 'wait:help' dump -- corral
+```
 
 ## License
 
