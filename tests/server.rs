@@ -181,3 +181,18 @@ async fn notifications_only_for_unfocused_panes() {
     assert_eq!(a.notes.len(), 1);
     assert!(a.notes[0].contains("p2"), "{:?}", a.notes);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_attached_to_an_empty_server_shows_the_first_new_pane() {
+    let server = TestServer::start();
+    let mut a = Headless::attach(&server, 80, 24).await;
+    a.until("state", |c| c.focus.is_none()).await;
+
+    // Another shell starts a pane; the idle client picks it up on its own.
+    let mut conn = server.conn().await;
+    new_pane(&mut conn, sh("echo started; read x"), server.dir.path()).await;
+    a.until("focus moves to p1 with its screen", |c| {
+        c.focus.as_deref() == Some("p1") && c.contents().contains("started")
+    })
+    .await;
+}

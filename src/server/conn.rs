@@ -192,7 +192,14 @@ impl Session {
                     });
                 }
             }
-            Ok(Event::State) => self.send_state(),
+            Ok(Event::State) => {
+                // Attached with nothing to show, and a pane just appeared
+                // (e.g. `corral new` from another shell): show it.
+                match self.focus.is_none().then(|| self.hub.initial_focus(None)) {
+                    Some(Some(pane)) => self.set_focus(Some(&pane)),
+                    _ => self.send_state(),
+                }
+            }
             Ok(Event::Resized { pane, cols, rows }) => {
                 if self.focus.as_ref() == Some(&pane) && self.focus_size != (cols, rows) {
                     self.send_screen();

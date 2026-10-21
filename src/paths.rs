@@ -65,7 +65,7 @@ pub fn ensure_socket_dir(socket: &Path) -> Result<()> {
     let meta = std::fs::metadata(dir).with_context(|| format!("checking {}", dir.display()))?;
     if meta.uid() != uid() {
         bail!(
-            "{} is owned by another user; set {SOCKET_ENV} to use a different socket",
+            "{} is owned by another user; point {SOCKET_ENV} at a socket inside a directory you own",
             dir.display()
         );
     }

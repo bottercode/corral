@@ -560,7 +560,8 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     ));
     text.push(Line::default());
     text.push(key_hint(&[("any key", "close")]));
-    let r = centered(area, 66, text.len() as u16 + 2);
+    let width = text.iter().map(Line::width).max().unwrap_or(0) as u16 + 2;
+    let r = centered(area, width, text.len() as u16 + 2);
     f.render_widget(Clear, r);
     f.render_widget(Paragraph::new(text).block(dialog_block("corral help")), r);
 }

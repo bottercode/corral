@@ -33,6 +33,8 @@ impl Conn {
         if let Ok(stream) = UnixStream::connect(socket).await {
             return Self::handshake(stream).await;
         }
+        // Fail fast with the real reason instead of waiting on a server that can't start.
+        paths::ensure_socket_dir(socket)?;
         start_daemon(socket)?;
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
