@@ -7,6 +7,7 @@
 //! output) and drawn with tui-term. The layout is the client's: it tells the
 //! server which panes it shows, at what size, with `View`.
 
+pub mod browser;
 pub mod conn;
 pub mod diff;
 pub mod input;
@@ -34,6 +35,7 @@ use crate::protocol::{
     self, AgentState, ClientMsg, Command, NewPane, PaneId, PaneInfo, Reply, Restorable, ServerMsg,
     Viewport, WorktreeAction,
 };
+use browser::{BarClick, Browser, BrowserCmd, BrowserEvent, TILE as BROWSER};
 use conn::Conn;
 use diff::DiffView;
 use input::{Chunk, Key, Mouse, MouseKind, Splitter, decode_keys};
@@ -101,6 +103,8 @@ pub enum Mode {
     Quit,
     /// Bring back the panes from before corral stopped?
     Restore,
+    /// Open a page: an address or a search.
+    Address(TextInput),
 }
 
 #[derive(Debug)]
@@ -167,6 +171,27 @@ pub struct App {
     pub fetches: Vec<stories::Source>,
     /// The prefix was pressed on the stories page, which it closed.
     from_stories: bool,
+    /// The browser tile's page, once one is open.
+    pub browser: Option<Browser>,
+    /// Start the browser on this page at this size (the run loop does).
+    pub browser_launch: Option<(String, browser::Viewport)>,
+    /// For the running browser.
+    pub browser_out: Vec<BrowserCmd>,
+    /// The terminal can show images (kitty graphics), so pages can be drawn.
+    pub graphics: bool,
+    /// One cell, in pixels (for sizing pages).
+    pub cell_px: (f64, f64),
+    /// The terminal reports the mouse in pixels (SGR-Pixels, turned on
+    /// where pages can be shown), so clicks land exactly on the page.
+    pub pixel_mouse: bool,
+    /// `cell_px` came from the terminal, not a guess.
+    pub cell_px_known: bool,
+    /// The pixel position of the mouse event being handled.
+    mouse_px: Option<(f64, f64)>,
+    /// What's drawn on the terminal as images.
+    pub gfx: browser::kitty::Gfx,
+    /// The configured browser program; empty to find one.
+    pub browser_path: String,
     /// Hook status per agent, read when the menu opens.
     pub hooks: Vec<(Agent, HookStatus)>,
     /// Where the menu's rows were drawn, for clicks.
@@ -221,6 +246,16 @@ impl App {
             stories: Stories::default(),
             fetches: Vec::new(),
             from_stories: false,
+            browser: None,
+            browser_launch: None,
+            browser_out: Vec::new(),
+            graphics: false,
+            cell_px: (8.0, 16.0),
+            pixel_mouse: false,
+            cell_px_known: false,
+            mouse_px: None,
+            gfx: browser::kitty::Gfx::default(),
+            browser_path: config.browser.clone(),
             hooks: Vec::new(),
             menu_hits: Vec::new(),
             save_to: None,
@@ -280,18 +315,44 @@ impl App {
     /// makes the same substitution when it moves the focus itself.
     fn show(&mut self, pane: Option<PaneId>) {
         match pane {
-            None => self.tiles.clear(),
+            // Nothing to show but the page, if there is one.
+            None => {
+                self.tiles.retain(|t| t == BROWSER);
+                self.focus = self.tiles.first().cloned();
+                return;
+            }
             Some(ref p) if self.tiles.contains(p) => {}
-            Some(ref p) => match self
-                .focus
-                .as_ref()
-                .and_then(|f| self.tiles.iter().position(|t| t == f))
-            {
-                Some(i) => self.tiles[i] = p.clone(),
-                None => self.tiles = vec![p.clone()],
-            },
+            Some(ref p) => {
+                // The focused slot takes it, unless that's the page: then
+                // the first agent's slot does, or it goes next to the page.
+                let focused = self
+                    .focus
+                    .as_ref()
+                    .and_then(|f| self.tiles.iter().position(|t| t == f))
+                    .filter(|&i| self.tiles[i] != BROWSER);
+                let slot = focused.or_else(|| self.tiles.iter().position(|t| t != BROWSER));
+                match slot {
+                    Some(i) => self.tiles[i] = p.clone(),
+                    None if self.tiles.is_empty() => self.tiles = vec![p.clone()],
+                    None => self.tiles.insert(0, p.clone()),
+                }
+            }
         }
         self.focus = pane;
+    }
+
+    fn browser_focused(&self) -> bool {
+        self.focus.as_deref() == Some(BROWSER)
+    }
+
+    /// The agent the keyboard is on, or (with the page focused) the one
+    /// beside it: where `^b j` and friends count from.
+    fn agent_focus(&self) -> Option<&PaneId> {
+        if self.browser_focused() {
+            self.tiles.iter().find(|t| *t != BROWSER)
+        } else {
+            self.focus.as_ref()
+        }
     }
 
     fn set_focus(&mut self, pane: PaneId) {
@@ -301,13 +362,17 @@ impl App {
         }
     }
 
-    /// The tiles' areas: `(pane, whole tile, terminal part)`.
+    /// The tiles' areas: `(pane, whole tile, terminal part)`. The page
+    /// always has its bar.
     pub fn tile_rects(&self) -> Vec<(PaneId, Rect, Rect)> {
         let n = self.tiles.len();
         ui::tiles(self.pane_area, n)
             .into_iter()
             .zip(&self.tiles)
-            .map(|(r, id)| (id.clone(), r, ui::tile_body(r, n)))
+            .map(|(r, id)| {
+                let headed = if id == BROWSER { n.max(2) } else { n };
+                (id.clone(), r, ui::tile_body(r, headed))
+            })
             .collect()
     }
 
@@ -317,9 +382,11 @@ impl App {
         if !self.seen_state || self.pane_area.is_empty() {
             return;
         }
+        self.sync_browser();
         let view: Vec<Viewport> = self
             .tile_rects()
             .into_iter()
+            .filter(|(pane, ..)| pane != BROWSER)
             .map(|(pane, _, body)| Viewport {
                 pane,
                 cols: body.width.max(2),
@@ -328,7 +395,13 @@ impl App {
             .collect();
         // Pages drawn over the panes leave them unseen.
         let covered = matches!(self.mode, Mode::Diff(_) | Mode::Stories);
-        let now = (self.focus.clone(), view, covered);
+        // The server only knows agents: with the page focused, it hears
+        // about the agent next to it.
+        let focus = match self.focus.as_deref() {
+            Some(BROWSER) => view.first().map(|v| v.pane.clone()),
+            _ => self.focus.clone(),
+        };
+        let now = (focus, view, covered);
         if self.sent_view.as_ref() == Some(&now) {
             return;
         }
@@ -435,8 +508,7 @@ impl App {
             return;
         }
         let cur = self
-            .focus
-            .as_ref()
+            .agent_focus()
             .and_then(|f| order.iter().position(|p| p == f))
             .unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(order.len() as isize) as usize;
@@ -446,8 +518,7 @@ impl App {
     fn focus_next_blocked(&mut self) {
         let order = self.order();
         let cur = self
-            .focus
-            .as_ref()
+            .agent_focus()
             .and_then(|f| order.iter().position(|p| p == f))
             .unwrap_or(0);
         let n = order.len();
@@ -683,6 +754,205 @@ impl App {
         self.request(Command::Restore { discard }, Pending::Restore { discard });
     }
 
+    // ---- the browser tile ---------------------------------------------
+
+    /// `^b u`: ask for an address (the current one to start from).
+    fn open_address(&mut self) {
+        let current = self
+            .browser
+            .as_ref()
+            .map(|b| b.url.clone())
+            .filter(|u| u != "about:blank")
+            .unwrap_or_default();
+        self.mode = Mode::Address(TextInput::new(&current));
+    }
+
+    /// Show `input` (an address or a search) in the browser tile, starting
+    /// the browser if needed. Without terminal graphics it opens in the
+    /// system browser.
+    fn open_page(&mut self, input: &str) {
+        let url = browser::address(input);
+        self.mode = Mode::Normal;
+        if !self.graphics {
+            self.open_link(url);
+            self.set_status(
+                "pages show in corral in Ghostty, kitty or WezTerm; opened in your browser",
+                false,
+            );
+            return;
+        }
+        if !self.tiles.iter().any(|t| t == BROWSER) {
+            if self.tiles.len() < MAX_TILES {
+                let at = self
+                    .focus
+                    .as_ref()
+                    .and_then(|f| self.tiles.iter().position(|t| t == f))
+                    .map_or(self.tiles.len(), |i| i + 1);
+                self.tiles.insert(at, BROWSER.to_string());
+                self.others.clear();
+            } else if let Some(i) = self
+                .focus
+                .as_ref()
+                .and_then(|f| self.tiles.iter().position(|t| t == f))
+            {
+                self.tiles[i] = BROWSER.to_string();
+            }
+        }
+        self.focus = Some(BROWSER.to_string());
+        match &mut self.browser {
+            Some(b) if !b.dead => {
+                b.url = url.clone();
+                self.browser_out.push(BrowserCmd::Navigate(url));
+            }
+            _ => {
+                let viewport = self.browser_body().map_or(
+                    browser::Viewport {
+                        width: 800,
+                        height: 600,
+                        scale: 1.0,
+                    },
+                    |body| browser::viewport_for(body, self.cell_px),
+                );
+                self.browser = Some(Browser {
+                    url: url.clone(),
+                    loading: true,
+                    viewport: Some(viewport),
+                    ..Default::default()
+                });
+                self.browser_launch = Some((url, viewport));
+            }
+        }
+    }
+
+    /// Enter on a story: read it next to the agents when pages can be
+    /// drawn here, else in the system browser.
+    fn read_story(&mut self, url: String) {
+        if self.graphics {
+            self.mode = Mode::Normal;
+            self.open_page(&url);
+        } else {
+            self.open_link(url);
+        }
+    }
+
+    fn close_browser(&mut self) {
+        if self.browser.take().is_some() {
+            self.browser_out.push(BrowserCmd::Quit);
+        }
+        self.browser_launch = None;
+        if let Some(i) = self.tiles.iter().position(|t| t == BROWSER) {
+            self.tiles.remove(i);
+            if self.browser_focused() {
+                self.focus = self
+                    .tiles
+                    .get(i.min(self.tiles.len().saturating_sub(1)))
+                    .cloned();
+            }
+        }
+    }
+
+    /// The page's part of the browser tile, when it's on screen.
+    fn browser_body(&self) -> Option<Rect> {
+        self.tile_rects()
+            .into_iter()
+            .find(|(id, ..)| id == BROWSER)
+            .map(|(_, _, body)| body)
+    }
+
+    /// Keep the page the size of its tile.
+    fn sync_browser(&mut self) {
+        let Some(body) = self.browser_body() else {
+            return;
+        };
+        let v = browser::viewport_for(body, self.cell_px);
+        if let Some(b) = &mut self.browser
+            && b.viewport != Some(v)
+        {
+            b.viewport = Some(v);
+            match &mut self.browser_launch {
+                Some((_, launch)) => *launch = v,
+                None => self.browser_out.push(BrowserCmd::Resize(v)),
+            }
+        }
+    }
+
+    pub fn on_browser(&mut self, ev: BrowserEvent) {
+        if let Some(b) = &mut self.browser {
+            if let BrowserEvent::Failed(e) = &ev {
+                self.status = Some((format!("browser: {e}"), Instant::now(), true));
+            }
+            b.on_event(ev);
+            self.dirty = true;
+        }
+    }
+
+    fn forward_to_page(&mut self, bytes: &[u8], is_paste: bool) {
+        if is_paste {
+            let text = String::from_utf8_lossy(bytes)
+                .trim_start_matches("\x1b[200~")
+                .trim_end_matches("\x1b[201~")
+                .to_string();
+            self.browser_out.push(BrowserCmd::Text(text));
+            return;
+        }
+        for k in decode_keys(bytes) {
+            if let Some(k) = browser::KeyInput::from_key(k) {
+                self.browser_out.push(BrowserCmd::Key(k));
+            }
+        }
+    }
+
+    /// A click or the wheel over the browser tile.
+    fn browser_mouse(&mut self, m: Mouse) {
+        let Some(body) = self.browser_body() else {
+            return;
+        };
+        let bar = self.browser.as_ref().and_then(|b| b.click_at(m.x, m.y));
+        match (m.kind, bar) {
+            (MouseKind::LeftDown, Some(click)) => match click {
+                BarClick::Back => self.browser_out.push(BrowserCmd::Back),
+                BarClick::Forward => self.browser_out.push(BrowserCmd::Forward),
+                BarClick::Reload => self.browser_out.push(BrowserCmd::Reload),
+                BarClick::Address => self.open_address(),
+                BarClick::Close => self.close_browser(),
+            },
+            (kind, _) if body.contains((m.x, m.y).into()) => {
+                let Some(v) = self.browser.as_ref().and_then(|b| b.viewport) else {
+                    return;
+                };
+                let (x, y) = match self.mouse_px {
+                    Some(px) => browser::page_point_px(body, px, self.cell_px, v),
+                    None => browser::page_point(body, m.x, m.y, self.cell_px, v),
+                };
+                let dy = match kind {
+                    MouseKind::WheelUp => -120.0,
+                    MouseKind::WheelDown => 120.0,
+                    _ => 0.0,
+                };
+                match kind {
+                    MouseKind::LeftDown => self.browser_out.push(BrowserCmd::Click { x, y }),
+                    MouseKind::WheelUp | MouseKind::WheelDown => {
+                        self.browser_out.push(BrowserCmd::Scroll { x, y, dy })
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Escapes that put the page's latest frame on the terminal (or take
+    /// it off while something is drawn over it). Written after each frame.
+    pub fn graphics_output(&mut self) -> Vec<u8> {
+        let visible = matches!(self.mode, Mode::Normal | Mode::Scroll { .. });
+        let area = self.browser_body().filter(|r| visible && !r.is_empty());
+        let frame = self
+            .browser
+            .as_ref()
+            .and_then(|b| b.frame.as_deref().map(|f| (b.frame_seq, f)));
+        self.gfx.update(area, frame)
+    }
+
     /// `^b t`: the top stories page, fetching its feed if it's stale.
     fn open_stories(&mut self) {
         self.mode = Mode::Stories;
@@ -723,7 +993,16 @@ impl App {
             Key::PageUp | Key::Ctrl('u') => self.stories.move_by(-page),
             Key::Home | Key::Char('g') => self.stories.move_by(isize::MIN / 2),
             Key::End | Key::Char('G') => self.stories.move_by(isize::MAX / 2),
-            Key::Enter | Key::Char('o') => {
+            Key::Enter => {
+                if let Some(url) = self.stories.current().map(|s| s.link().to_string()) {
+                    self.read_story(url);
+                    // Read here: the page took over from the list.
+                    if self.graphics {
+                        return;
+                    }
+                }
+            }
+            Key::Char('o') => {
                 if let Some(s) = self.stories.current() {
                     self.open_link(s.link().to_string());
                 }
@@ -768,7 +1047,7 @@ impl App {
                 Some(stories::Click::Open(i)) => {
                     self.stories.selected = i;
                     if let Some(url) = self.stories.story(i).map(|s| s.link().to_string()) {
-                        self.open_link(url);
+                        self.read_story(url);
                     }
                 }
                 Some(stories::Click::Comments(i)) => {
@@ -853,6 +1132,10 @@ impl App {
         let Some(pane) = self.focus.clone() else {
             return;
         };
+        if pane == BROWSER {
+            self.forward_to_page(bytes, is_paste);
+            return;
+        }
         let (bp, app_cursor) = self.screen().map_or((false, false), |p| {
             let s = p.screen();
             (s.bracketed_paste(), s.application_cursor())
@@ -869,6 +1152,8 @@ impl App {
             // `^b t` on the page closes it (the prefix already did).
             Key::Char('t') if from_stories => {}
             Key::Char('t') => self.open_stories(),
+            Key::Char('u') => self.open_address(),
+            Key::Char('x') if self.browser_focused() => self.close_browser(),
             Key::Char('n') => self.new_shell(),
             Key::Char('w') => self.open_worktree(),
             Key::Char('m') => self.open_menu(),
@@ -968,6 +1253,13 @@ impl App {
 
     fn on_mouse(&mut self, m: Mouse) {
         let in_sidebar = m.x < self.sidebar_area.x + self.sidebar_area.width;
+        if !in_sidebar && self.tile_at(m.x, m.y).as_deref() == Some(BROWSER) {
+            if matches!(m.kind, MouseKind::LeftDown) && !self.browser_focused() {
+                self.set_focus(BROWSER.to_string());
+            }
+            self.browser_mouse(m);
+            return;
+        }
         // Clicking or scrolling over another tile moves the keyboard there.
         if !in_sidebar
             && matches!(
@@ -1044,6 +1336,14 @@ impl App {
                 _ => self.mode = Mode::Restore,
             },
             Mode::Stories => self.stories_key(key),
+            Mode::Address(mut input) => match key {
+                Key::Esc | Key::Ctrl('c') => {}
+                Key::Enter => self.open_page(&input.text),
+                k => {
+                    input.handle(k);
+                    self.mode = Mode::Address(input);
+                }
+            },
             Mode::Hooks(agent) => match key {
                 Key::Char('y' | 'Y') | Key::Enter => match integrate::install_quietly(agent) {
                     Ok(msg) => self.set_status(msg, false),
@@ -1126,7 +1426,7 @@ impl App {
             .replace(['\r', '\n'], " ");
         match &mut self.mode {
             Mode::Worktree(d) => d.paste(&text),
-            Mode::Rename { input, .. } => input.insert_str(&text),
+            Mode::Rename { input, .. } | Mode::Address(input) => input.insert_str(&text),
             Mode::Diff(v) => v.paste(&text),
             _ => {}
         }
@@ -1137,7 +1437,15 @@ impl App {
         for chunk in self.splitter.feed(bytes) {
             let in_dialog = !matches!(self.mode, Mode::Normal | Mode::Scroll { .. });
             match chunk {
-                Chunk::Mouse(m) => {
+                Chunk::Mouse(mut m) => {
+                    // In pixels: keep them for the page, use cells for the rest.
+                    self.mouse_px = None;
+                    if self.pixel_mouse {
+                        let (px, py) = (m.x as f64, m.y as f64);
+                        self.mouse_px = Some((px, py));
+                        m.x = (px / self.cell_px.0) as u16;
+                        m.y = (py / self.cell_px.1) as u16;
+                    }
                     if in_dialog {
                         self.dialog_mouse(m);
                     } else {
@@ -1228,9 +1536,16 @@ impl App {
                 }
                 self.panes = panes;
                 self.state_at = Instant::now();
-                let exists = |id: &PaneId| self.panes.iter().any(|p| &p.id == id);
+                let exists = |id: &PaneId| id == BROWSER || self.panes.iter().any(|p| &p.id == id);
                 self.tiles.retain(|id| exists(id));
-                if view_generation == self.view_generation {
+                let ours = self.sent_view.as_ref().map(|v| v.0.clone());
+                if view_generation == self.view_generation
+                    && self.browser_focused()
+                    && Some(focus.clone()) == ours
+                {
+                    // The page has the keyboard and the server agrees with
+                    // what we told it.
+                } else if view_generation == self.view_generation {
                     // The server has seen our latest layout, so its focus is
                     // current (it may have moved it: a new or closed pane).
                     self.show(focus);
@@ -1387,10 +1702,16 @@ impl App {
 struct TerminalGuard;
 
 const ENTER: &[u8] = b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h";
-const LEAVE: &[u8] = b"\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l";
+const LEAVE: &[u8] = b"\x1b[?1016l\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l";
+/// SGR-Pixels: mouse positions in pixels.
+const PIXEL_MOUSE: &[u8] = b"\x1b[?1016h";
 
 fn restore_terminal() {
     let mut out = std::io::stdout();
+    // Take the page off the screen.
+    if browser::kitty::supported() {
+        let _ = out.write_all(&browser::kitty::Gfx::default().clear());
+    }
     let _ = out.write_all(LEAVE);
     let _ = out.flush();
     let _ = crossterm::terminal::disable_raw_mode();
@@ -1422,6 +1743,18 @@ impl Drop for TerminalGuard {
 fn fit_terminal(app: &mut App) -> Result<(u16, u16)> {
     let (w, h) = crossterm::terminal::size()?;
     app.term_area = Rect::new(0, 0, w, h);
+    if let Ok(ws) = crossterm::terminal::window_size()
+        && ws.width > 0
+        && ws.height > 0
+        && ws.columns > 0
+        && ws.rows > 0
+    {
+        app.cell_px = (
+            ws.width as f64 / ws.columns as f64,
+            ws.height as f64 / ws.rows as f64,
+        );
+        app.cell_px_known = true;
+    }
     app.relayout();
     Ok((app.pane_area.width.max(2), app.pane_area.height.max(1)))
 }
@@ -1485,7 +1818,18 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
         })?;
 
     let (mut sink, mut stream) = conn.transport.split();
+    app.graphics = browser::kitty::supported();
     let mut size = fit_terminal(app)?;
+    // Pixel-exact clicks on pages, where the terminal says how big a cell is.
+    if app.graphics && app.cell_px_known {
+        let mut out = std::io::stdout();
+        out.write_all(PIXEL_MOUSE)?;
+        out.flush()?;
+        app.pixel_mouse = true;
+    }
+    // The browser runs as a task; its frames and news come back here.
+    let mut browser_tx: Option<mpsc::UnboundedSender<BrowserCmd>> = None;
+    let (browser_events, mut browser_rx) = mpsc::unbounded_channel::<BrowserEvent>();
     let attach = ClientMsg::Attach {
         cols: size.0,
         rows: size.1,
@@ -1525,8 +1869,16 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
                 Some(Err(e)) => return Err(e).context("reading from the server"),
                 None => return Ok(Exit::ServerGone("server closed the connection".into())),
             },
+            Some(ev) = browser_rx.recv() => {
+                if matches!(ev, BrowserEvent::Failed(_)) {
+                    browser_tx = None;
+                }
+                app.on_browser(ev);
+            }
             _ = winch.recv() => {
                 app.dirty = true;
+                // The terminal clears the screen on resize, images too.
+                app.gfx.forget_placement();
                 let new = fit_terminal(app)?;
                 if new != size {
                     size = new;
@@ -1538,6 +1890,14 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
                 if app.dirty {
                     app.dirty = false;
                     term.draw(|f| ui::draw(f, app))?;
+                    if app.graphics {
+                        let images = app.graphics_output();
+                        if !images.is_empty() {
+                            let mut out = std::io::stdout();
+                            out.write_all(&images)?;
+                            out.flush()?;
+                        }
+                    }
                 }
             }
             _ = anim.tick() => app.tick(),
@@ -1545,6 +1905,33 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
 
         for msg in app.outbox.drain(..) {
             sink.send(protocol::encode(&msg)?).await?;
+        }
+        for cmd in app.browser_out.drain(..) {
+            let quit = cmd == BrowserCmd::Quit;
+            if let Some(tx) = &browser_tx {
+                let _ = tx.send(cmd);
+            }
+            if quit {
+                browser_tx = None;
+            }
+        }
+        if let Some((url, viewport)) = app.browser_launch.take() {
+            match browser::cdp::find_chrome(&app.browser_path) {
+                Ok(chrome) => {
+                    let (tx, rx) = mpsc::unbounded_channel();
+                    let profile = paths::corral_home().join("browser");
+                    tokio::spawn(browser::cdp::run(
+                        chrome,
+                        profile,
+                        url,
+                        viewport,
+                        rx,
+                        browser_events.clone(),
+                    ));
+                    browser_tx = Some(tx);
+                }
+                Err(e) => app.on_browser(BrowserEvent::Failed(format!("{e:#}"))),
+            }
         }
         for source in app.fetches.drain(..) {
             let tx = stories_tx.clone();
@@ -2020,6 +2407,96 @@ mod tests {
             restorable: a.restorable.clone(),
         });
         assert!(matches!(a.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn browser_tile_next_to_the_agents() {
+        let mut a = app();
+        a.graphics = true;
+        a.cell_px = (9.0, 18.0);
+        a.on_stdin(b"\x02u");
+        assert!(matches!(a.mode, Mode::Address(_)));
+        a.on_stdin(b"example.com\r");
+        // The page opens beside the agent and takes the keyboard.
+        assert_eq!(a.tiles, vec!["p1".to_string(), BROWSER.to_string()]);
+        assert!(a.browser_focused());
+        let (url, v) = a.browser_launch.clone().unwrap();
+        assert_eq!(url, "https://example.com");
+        let body = a.browser_body().unwrap();
+        assert_eq!(v.width, body.width as u32 * 9);
+        // The server hears only about the agent.
+        let (focus, view) = sent_view(&a);
+        assert_eq!(focus.as_deref(), Some("p1"));
+        assert_eq!(view.len(), 1);
+        // Its answer doesn't take the keyboard from the page.
+        a.on_server(ServerMsg::State {
+            panes: a.panes.clone(),
+            focus: Some("p1".into()),
+            view_generation: a.view_generation,
+            restorable: vec![],
+        });
+        assert!(a.browser_focused());
+
+        // Typing goes to the page, not to an agent.
+        a.outbox.clear();
+        a.browser_launch = None;
+        a.on_stdin(b"hi");
+        assert!(
+            !a.outbox
+                .iter()
+                .any(|m| matches!(m, ClientMsg::Input { .. }))
+        );
+        assert!(
+            matches!(&a.browser_out[..], [BrowserCmd::Key(h), BrowserCmd::Key(i)] if h.key == "h" && i.key == "i")
+        );
+        a.browser_out.clear();
+
+        // A click on the page lands at the right spot.
+        let body = a.browser_body().unwrap();
+        a.on_stdin(format!("\x1b[<0;{};{}M", body.x + 3, body.y + 2).as_bytes());
+        let v = a.browser.as_ref().unwrap().viewport.unwrap();
+        assert_eq!(
+            a.browser_out.last(),
+            Some(&BrowserCmd::Click {
+                x: 2.5 * 9.0 / v.scale,
+                y: 1.5 * 18.0 / v.scale
+            })
+        );
+
+        // Another agent replaces the agent beside the page, never the page.
+        a.on_stdin(b"\x02j");
+        assert_eq!(a.tiles, vec!["p2".to_string(), BROWSER.to_string()]);
+
+        // Frames are drawn, and hidden under dialogs.
+        a.on_browser(BrowserEvent::Frame("iVBORw0KGgo".into()));
+        let out = String::from_utf8(a.graphics_output()).unwrap();
+        assert!(out.contains("a=t") && out.contains("iVBORw0KGgo"));
+        a.on_stdin(b"\x02?");
+        assert!(
+            String::from_utf8(a.graphics_output())
+                .unwrap()
+                .contains("a=d")
+        );
+        a.on_stdin(b"q");
+
+        // ^b x on the page closes it.
+        a.on_stdin(b"\x02l");
+        assert!(a.browser_focused());
+        a.browser_out.clear();
+        a.on_stdin(b"\x02x");
+        assert_eq!(a.browser_out, vec![BrowserCmd::Quit]);
+        assert_eq!(a.tiles, vec!["p2".to_string()]);
+        assert!(a.browser.is_none());
+    }
+
+    #[test]
+    fn without_graphics_pages_open_in_the_system_browser() {
+        let mut a = app();
+        a.on_stdin(b"\x02u");
+        a.on_stdin(b"example.com\r");
+        assert!(a.browser.is_none());
+        assert_eq!(a.tiles, vec!["p1".to_string()]);
+        assert!(a.status().unwrap().0.contains("Ghostty"));
     }
 
     #[test]

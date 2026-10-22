@@ -9,6 +9,7 @@
 //! sidebar_collapsed = false        # just agent numbers (^b c, or « in the sidebar)
 //! theme = "ranch"                  # ranch, ink or terminal
 //! sidebar_order = "need"           # need (what needs you first) or project
+//! browser = ""                     # Chrome/Chromium/Brave/Edge for pages; found if empty
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ pub struct Config {
     pub sidebar_collapsed: bool,
     pub theme: String,
     pub sidebar_order: String,
+    pub browser: String,
 }
 
 impl Default for Config {
@@ -42,6 +44,7 @@ impl Default for Config {
             sidebar_collapsed: false,
             theme: "ranch".into(),
             sidebar_order: "need".into(),
+            browser: String::new(),
         }
     }
 }

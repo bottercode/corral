@@ -238,6 +238,10 @@ pub fn open_in_browser(url: &str) -> Result<()> {
     if !openable(url) {
         bail!("not a web link: {url}");
     }
+    // Unit tests never open a real browser.
+    if cfg!(test) {
+        return Ok(());
+    }
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
