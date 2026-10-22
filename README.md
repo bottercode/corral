@@ -406,6 +406,7 @@ sidebar_width = 30
 sidebar_collapsed = false              # just the agent numbers (« / ^b c)
 theme = "ranch"                        # ranch, ink or terminal
 sidebar_order = "need"                 # need or project
+update_check = true                    # once a day, a toast when a newer corral is out
 ```
 
 Themes:

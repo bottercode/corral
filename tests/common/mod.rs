@@ -61,6 +61,8 @@ impl TestServer {
         let dir = tempfile::Builder::new().prefix("c").tempdir().unwrap();
         let socket = dir.path().join("s.sock");
         let home = dir.path().join("home");
+        // No looking for new releases from tests.
+        let config = format!("update_check = false\n{config}");
         std::fs::write(dir.path().join("config.toml"), config).unwrap();
         TestServer {
             dir,

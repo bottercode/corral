@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use tui_term::widget::{Cursor, PseudoTerminal};
 use unicode_width::UnicodeWidthStr;
 
@@ -372,6 +372,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         draw_tiles(f, app, areas.pane);
     }
+    if let Some(version) = app.update() {
+        draw_update(f, version, areas.pane);
+    }
 
     match &app.mode {
         Mode::Normal | Mode::Scroll { .. } | Mode::Diff(_) | Mode::Stories => {}
@@ -403,6 +406,33 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             }
         }
     }
+}
+
+/// A toast in the top right corner: a newer release is out.
+fn draw_update(f: &mut Frame, version: &str, area: Rect) {
+    let t = theme::get();
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(format!("corral {version}"), t.bold()),
+            Span::styled(
+                format!(" is out (you have {})", env!("CARGO_PKG_VERSION")),
+                t.muted(),
+            ),
+        ]),
+        Line::styled(super::update::INSTALL, t.key()),
+    ];
+    let inner = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let w = (inner + 4).min(area.width);
+    let h = (lines.len() as u16 + 2).min(area.height);
+    if w < 12 || h < 3 {
+        return;
+    }
+    let rect = Rect::new(area.right() - w, area.y, w, h);
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(dialog_block("update").padding(Padding::horizontal(1))),
+        rect,
+    );
 }
 
 fn draw_empty(f: &mut Frame, app: &App, area: Rect) {

@@ -14,6 +14,7 @@ pub mod sidebar;
 pub mod stories;
 pub mod theme;
 pub mod ui;
+pub mod update;
 
 use std::collections::HashMap;
 use std::io::{IsTerminal, Read, Write};
@@ -42,6 +43,8 @@ use stories::Stories;
 use ui::{CloseStep, TextInput, WorktreeDialog};
 
 const STATUS_FOR: Duration = Duration::from_secs(6);
+/// How long the new-release toast stays up.
+const TOAST_FOR: Duration = Duration::from_secs(15);
 
 /// The menu's rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +178,10 @@ pub struct App {
     pub stories: Stories,
     /// Feeds to fetch; the run loop fetches them off the UI thread.
     pub fetches: Vec<stories::Source>,
+    /// Look for a newer release once a day.
+    pub update_check: bool,
+    /// A newer release, and when its toast went up.
+    update: Option<(String, Instant)>,
     /// The prefix was pressed on the stories page, which it closed.
     from_stories: bool,
     /// Hook status per agent, read when the menu opens.
@@ -232,6 +239,8 @@ impl App {
             notifications: config.notifications,
             stories: Stories::default(),
             fetches: Vec::new(),
+            update_check: config.update_check,
+            update: None,
             from_stories: false,
             hooks: Vec::new(),
             menu_hits: Vec::new(),
@@ -253,6 +262,20 @@ impl App {
             .as_ref()
             .filter(|(_, at, _)| at.elapsed() < STATUS_FOR)
             .map(|(m, _, e)| (m.as_str(), *e))
+    }
+
+    /// The newer release to show a toast for, while it's up.
+    pub fn update(&self) -> Option<&str> {
+        self.update
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < TOAST_FOR)
+            .map(|(v, _)| v.as_str())
+    }
+
+    /// The run loop's update check found a newer release.
+    pub fn on_update(&mut self, version: String) {
+        self.update = Some((version, Instant::now()));
+        self.dirty = true;
     }
 
     fn set_status(&mut self, msg: impl Into<String>, error: bool) {
@@ -1520,6 +1543,12 @@ impl App {
             self.status = None;
             self.dirty = true;
         }
+        if let Some((_, at)) = &self.update
+            && at.elapsed() >= TOAST_FOR
+        {
+            self.update = None;
+            self.dirty = true;
+        }
     }
 }
 
@@ -1642,10 +1671,22 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
     let mut checked_workspace = false;
     // Story feeds come back from blocking fetches on worker threads.
     let (stories_tx, mut stories_rx) = mpsc::unbounded_channel();
+    // So does the daily look for a newer release; a failed one stays quiet.
+    let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+    if app.update_check {
+        tokio::task::spawn_blocking(move || match update::check() {
+            Ok(Some(version)) => {
+                let _ = update_tx.send(version);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!("update check: {e:#}"),
+        });
+    }
 
     loop {
         tokio::select! {
             Some((source, result)) = stories_rx.recv() => app.on_stories(source, result),
+            Some(version) = update_rx.recv() => app.on_update(version),
             bytes = stdin_rx.recv() => match bytes {
                 Some(b) => app.on_stdin(&b),
                 None => return Ok(Exit::Detached),
@@ -2522,5 +2563,27 @@ mod tests {
         assert_eq!(a.tiles, vec!["p1"]);
         // p1 grows back to the whole area.
         assert_eq!(sent_view(&a).1, vec![("p1".into(), 121, 39)]);
+    }
+
+    #[test]
+    fn a_newer_release_puts_up_a_toast() {
+        let mut a = app();
+        a.on_update("9.9.9".into());
+        assert_eq!(a.update(), Some("9.9.9"));
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        term.draw(|f| ui::draw(f, &mut a)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("corral 9.9.9 is out"));
+        assert!(screen.contains(update::INSTALL));
+        // It goes away on its own.
+        a.update.as_mut().unwrap().1 -= TOAST_FOR;
+        a.tick();
+        assert_eq!(a.update(), None);
     }
 }
