@@ -990,7 +990,8 @@ impl Hub {
                 Some(a) => record
                     .resume_for(i)
                     .and_then(|how| restore::resume_argv(a, &how))
-                    .unwrap_or_else(|| restore::restart_argv(a)),
+                    .map(restore::with_full_path)
+                    .unwrap_or_else(|| restore::with_full_path(restore::restart_argv(a))),
                 None => Vec::new(),
             };
             let req = NewPane {

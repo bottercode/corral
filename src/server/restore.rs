@@ -225,6 +225,32 @@ fn strip(args: &[String], flags: &[&str], with_value: &[&str]) -> Vec<String> {
     out
 }
 
+/// The program as a full path, found on the server's `PATH` (the one
+/// corral was started with). The command runs through a login shell, and
+/// some login profiles reset `PATH` (Debian's does for root), which could
+/// hide an agent installed somewhere only the user's shell knows about.
+pub fn with_full_path(mut argv: Vec<String>) -> Vec<String> {
+    if let Some(found) = argv
+        .first()
+        .and_then(|p| find_on(std::env::var_os("PATH"), p))
+    {
+        argv[0] = found.to_string_lossy().into_owned();
+    }
+    argv
+}
+
+fn find_on(path: Option<std::ffi::OsString>, program: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if program.contains('/') {
+        return None;
+    }
+    std::env::split_paths(&path?)
+        .map(|d| d.join(program))
+        .find(|c| {
+            std::fs::metadata(c).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+}
+
 /// One line for `$SHELL -lc`: each argument quoted when it needs to be.
 pub fn shell_line(argv: &[String]) -> String {
     argv.iter()
@@ -425,6 +451,24 @@ mod tests {
         let amp = agent("amp", &["amp", "--x"]);
         assert_eq!(resume_argv(&amp, &Resume::Latest), None);
         assert_eq!(restart_argv(&amp), s(&["amp", "--x"]));
+    }
+
+    #[test]
+    fn programs_are_found_on_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "").unwrap();
+        // Not executable yet: not a match.
+        let path = || Some(std::env::join_paths([tmp.path(), &bin]).unwrap());
+        assert_eq!(find_on(path(), "claude"), None);
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(find_on(path(), "claude"), Some(claude));
+        assert_eq!(find_on(path(), "codex"), None);
+        // Already a path: left alone.
+        assert_eq!(find_on(path(), "./claude"), None);
     }
 
     #[test]
