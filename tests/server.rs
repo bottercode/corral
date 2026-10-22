@@ -4,6 +4,7 @@ mod common;
 
 use common::*;
 use corral::protocol::{AgentState, ClientMsg, Command, Reply};
+use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn attach_detach_reattach_keeps_the_screen() {
@@ -166,6 +167,7 @@ async fn notifications_only_for_unfocused_panes() {
         .request(Command::Report {
             pane: "p1".into(),
             state: AgentState::Blocked,
+            session: None,
         })
         .await
         .unwrap();
@@ -174,6 +176,7 @@ async fn notifications_only_for_unfocused_panes() {
     conn.request(Command::Report {
         pane: "p2".into(),
         state: AgentState::Blocked,
+        session: None,
     })
     .await
     .unwrap();
@@ -197,6 +200,7 @@ async fn covered_panes_still_need_you() {
     conn.request(Command::Report {
         pane: "p1".into(),
         state: AgentState::Done,
+        session: None,
     })
     .await
     .unwrap();
@@ -216,6 +220,140 @@ async fn covered_panes_still_need_you() {
             .any(|p| p.id == "p1" && p.state == AgentState::Idle)
     })
     .await;
+}
+
+/// The session record, once it mentions `what`.
+fn wait_for_record(server: &TestServer, what: &str) -> String {
+    let dir = server.home.join("sessions");
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let text: String = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| std::fs::read_to_string(e.ok()?.path()).ok())
+            .collect();
+        if text.contains(what) {
+            return text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "record never mentioned {what}: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A stand-in for claude that prints how it was started, then waits.
+fn fake_agents(server: &TestServer) -> Vec<(&'static str, std::ffi::OsString)> {
+    let bin = server.dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(
+        &claude,
+        "#!/bin/sh\necho \"claude started: $*\"\nwhile read x; do :; done\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    vec![
+        ("PATH", path.into()),
+        ("SHELL", "/bin/sh".into()),
+        // Never look at the real ~/.claude.
+        (
+            "CLAUDE_CONFIG_DIR",
+            server.dir.path().join("claude-home").into(),
+        ),
+        ("CODEX_HOME", server.dir.path().join("codex-home").into()),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn panes_come_back_after_a_restart() {
+    let mut server = TestServer::unstarted("");
+    let env = fake_agents(&server);
+    server.spawn(&env);
+    let (a, b) = (server.dir.path().join("a"), server.dir.path().join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let mut conn = server.conn().await;
+    new_pane(
+        &mut conn,
+        vec!["claude".into(), "--model".into(), "haiku".into()],
+        &a,
+    )
+    .await;
+    new_pane(&mut conn, sh("echo some job; read x"), &b).await;
+    wait_for_record(&server, "--model");
+    drop(conn);
+
+    server.stop();
+    server.spawn(&env);
+
+    // A client hears what can come back.
+    let mut c = Headless::attach(&server, 80, 24).await;
+    c.until("restorable", |c| c.restorable.len() == 2).await;
+    assert_eq!(c.restorable[0].agent.as_deref(), Some("claude"));
+    assert_eq!(c.restorable[0].how, "continues its latest conversation");
+    assert_eq!(c.restorable[1].how, "shell");
+
+    let mut conn = server.conn().await;
+    let r = conn
+        .request(Command::Restore { discard: false })
+        .await
+        .unwrap();
+    assert_eq!(r, Reply::Text("brought back 2 panes".into()));
+    c.until("decided", |c| c.restorable.is_empty()).await;
+
+    let panes = server.panes();
+    assert_eq!(panes.len(), 2);
+    // claude resumes with the flags it had; the job comes back as a shell
+    // in its folder, not run again.
+    let claude = panes
+        .iter()
+        .find(|p| p.cwd == a.canonicalize().unwrap())
+        .unwrap();
+    let shell = panes
+        .iter()
+        .find(|p| p.cwd == b.canonicalize().unwrap())
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let out = server.ok(&["read", &claude.id]);
+        if out.contains("claude started: --model haiku --continue") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "claude screen: {out}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!server.ok(&["read", &shell.id]).contains("some job"));
+
+    // Asking twice: nothing left.
+    let r = conn.request(Command::Restore { discard: false }).await;
+    assert!(r.unwrap_err().to_string().contains("nothing to restore"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn starting_fresh_lets_the_old_panes_go() {
+    let mut server = TestServer::unstarted("");
+    let env = fake_agents(&server);
+    server.spawn(&env);
+    let mut conn = server.conn().await;
+    new_pane(&mut conn, sh("read x"), server.dir.path()).await;
+    wait_for_record(&server, "\"name\"");
+    drop(conn);
+    server.stop();
+    server.spawn(&env);
+
+    assert_eq!(server.ok(&["restore", "--discard"]).trim(), "started fresh");
+    assert!(server.panes().is_empty());
+    // And they stay gone after another restart.
+    wait_for_record(&server, "\"panes\": []");
+    server.stop();
+    server.spawn(&env);
+    let mut c = Headless::attach(&server, 80, 24).await;
+    c.until("state", |c| c.seen_state).await;
+    assert!(c.restorable.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -271,6 +409,7 @@ async fn several_panes_on_screen_stream_side_by_side() {
         conn.request(Command::Report {
             pane: pane.into(),
             state: AgentState::Blocked,
+            session: None,
         })
         .await
         .unwrap();

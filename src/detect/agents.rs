@@ -51,11 +51,38 @@ pub fn match_agent(name: &str, argv: &[String]) -> Option<&'static str> {
     None
 }
 
+/// Where the agent's program sits in its command line (`claude …` at 0,
+/// `node /path/to/codex …` at 1).
+pub fn program_index(argv: &[String]) -> Option<usize> {
+    argv.iter()
+        .take(2)
+        .position(|a| AGENTS.contains(&stem(a).as_str()))
+}
+
 pub fn is_shell(name: &str) -> bool {
     SHELLS.contains(&stem(name).as_str())
 }
 
 /// Resolves pane foreground processes to agent names.
+/// What runs in the foreground of a pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seen {
+    Agent(Running),
+    /// The shell, with no agent under it: any agent has quit.
+    Shell,
+    /// Something else (or nothing could be read).
+    Other,
+}
+
+/// An agent process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Running {
+    pub name: &'static str,
+    pub argv: Vec<String>,
+    /// Unix seconds.
+    pub started: u64,
+}
+
 pub struct Identifier {
     sys: System,
 }
@@ -75,7 +102,7 @@ impl Identifier {
     pub fn identify<K: Clone + Eq + std::hash::Hash>(
         &mut self,
         leaders: &[(K, u32)],
-    ) -> HashMap<K, Option<&'static str>> {
+    ) -> HashMap<K, Seen> {
         let kind = ProcessRefreshKind::nothing()
             .with_cmd(UpdateKind::OnlyIfNotSet)
             .with_exe(UpdateKind::OnlyIfNotSet);
@@ -88,7 +115,7 @@ impl Identifier {
         out
     }
 
-    fn describe(&self, pid: Pid) -> Option<(String, Vec<String>)> {
+    fn describe(&self, pid: Pid) -> Option<(String, Vec<String>, u64)> {
         let p = self.sys.process(pid)?;
         let name = p.name().to_string_lossy().into_owned();
         let argv = p
@@ -96,17 +123,23 @@ impl Identifier {
             .iter()
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
-        Some((name, argv))
+        Some((name, argv, p.start_time()))
     }
 
-    fn agent_for(&self, pid: u32) -> Option<&'static str> {
+    fn agent_for(&self, pid: u32) -> Seen {
         let pid = Pid::from_u32(pid);
-        let (name, argv) = self.describe(pid)?;
+        let Some((name, argv, started)) = self.describe(pid) else {
+            return Seen::Other;
+        };
         if let Some(a) = match_agent(&name, &argv) {
-            return Some(a);
+            return Seen::Agent(Running {
+                name: a,
+                argv,
+                started,
+            });
         }
         if !is_shell(&name) {
-            return None;
+            return Seen::Other;
         }
         // Breadth-first over the shell's descendants.
         let mut frontier = vec![pid];
@@ -119,10 +152,14 @@ impl Identifier {
                 .map(|(cpid, _)| *cpid)
                 .collect();
             for c in &children {
-                if let Some((n, a)) = self.describe(*c)
-                    && let Some(agent) = match_agent(&n, &a)
+                if let Some((n, argv, started)) = self.describe(*c)
+                    && let Some(agent) = match_agent(&n, &argv)
                 {
-                    return Some(agent);
+                    return Seen::Agent(Running {
+                        name: agent,
+                        argv,
+                        started,
+                    });
                 }
             }
             if children.is_empty() {
@@ -130,7 +167,7 @@ impl Identifier {
             }
             frontier = children;
         }
-        None
+        Seen::Shell
     }
 }
 
@@ -190,8 +227,37 @@ mod tests {
             .unwrap();
         let mut ident = Identifier::new();
         let got = ident.identify(&[("p1", child.id())]);
-        assert_eq!(got.get("p1"), Some(&None));
+        // Not an agent, and not a shell either.
+        assert_eq!(got.get("p1"), Some(&Seen::Other));
         child.kill().ok();
         child.wait().ok();
+    }
+
+    #[test]
+    fn finds_an_agent_under_a_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nsleep 5\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut shell = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("'{}' --model opus; true", claude.display()))
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut ident = Identifier::new();
+        let got = ident.identify(&[("p1", shell.id())]);
+        let Some(Seen::Agent(r)) = got.get("p1") else {
+            panic!("{got:?}")
+        };
+        assert_eq!(r.name, "claude");
+        assert_eq!(
+            &r.argv[program_index(&r.argv).unwrap() + 1..],
+            ["--model", "opus"]
+        );
+        assert!(r.started > 1_700_000_000);
+        shell.kill().ok();
+        shell.wait().ok();
     }
 }

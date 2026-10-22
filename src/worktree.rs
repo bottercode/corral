@@ -81,7 +81,7 @@ pub fn repo_root(dir: &Path) -> Result<PathBuf> {
     Ok(root.canonicalize().unwrap_or(root))
 }
 
-fn fnv1a(s: &str) -> u64 {
+pub fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.bytes() {
         h ^= u64::from(b);

@@ -375,6 +375,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Normal | Mode::Scroll { .. } | Mode::Diff(_) | Mode::Stories => {}
         Mode::Quit => draw_quit(f, app.running_agents(), areas.pane),
+        Mode::Restore => draw_restore(f, app, areas.pane),
         Mode::Help => draw_help(f, app, areas.pane),
         Mode::Worktree(d) => {
             let d = d.clone();
@@ -869,6 +870,84 @@ fn draw_hooks(f: &mut Frame, agent: crate::integrate::Agent, area: Rect) {
     );
 }
 
+/// After corral stopped (a reboot, an update): bring the panes back?
+fn draw_restore(f: &mut Frame, app: &App, area: Rect) {
+    const SHOWN: usize = 10;
+    let t = theme::get();
+    let n = app.restorable.len();
+    let mut text = vec![
+        Line::styled(
+            format!(
+                " corral stopped with {} open. Bring {} back?",
+                match n {
+                    1 => "1 pane".to_string(),
+                    n => format!("{n} panes"),
+                },
+                if n == 1 { "it" } else { "them" }
+            ),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        Line::default(),
+    ];
+    let name_w = app
+        .restorable
+        .iter()
+        .map(|r| r.name.width())
+        .max()
+        .unwrap_or(0)
+        .min(16);
+    let place_w = app
+        .restorable
+        .iter()
+        .map(|r| r.workspace.width() + if r.worktree { 2 } else { 0 })
+        .max()
+        .unwrap_or(0)
+        .min(20);
+    for r in app.restorable.iter().take(SHOWN) {
+        let name = truncate(&r.name, name_w);
+        let place = truncate(
+            &r.workspace,
+            place_w.saturating_sub(if r.worktree { 2 } else { 0 }),
+        );
+        let place_pad = place_w.saturating_sub(place.width() + if r.worktree { 2 } else { 0 });
+        let mut spans = vec![
+            Span::styled(
+                format!(
+                    "  {name}{}  ",
+                    " ".repeat(name_w.saturating_sub(name.width()))
+                ),
+                if r.agent.is_some() {
+                    t.bold()
+                } else {
+                    Style::new().fg(t.text)
+                },
+            ),
+            Span::styled(place, t.muted()),
+        ];
+        if r.worktree {
+            spans.push(Span::styled(" ⎇", t.fg(t.git)));
+        }
+        spans.push(Span::raw(" ".repeat(place_pad + 2)));
+        spans.push(Span::styled(r.how.clone(), t.muted()));
+        text.push(Line::from(spans));
+    }
+    if n > SHOWN {
+        text.push(Line::styled(format!("  and {} more", n - SHOWN), t.muted()));
+    }
+    text.push(Line::default());
+    text.extend(options(&[
+        ("Enter", "bring them back"),
+        ("n", "start fresh (worktrees stay on disk)"),
+        ("Esc", "decide later (`corral restore`)"),
+    ]));
+    let width = (text.iter().map(Line::width).max().unwrap_or(0) as u16 + 4)
+        .max(44)
+        .min(area.width.saturating_sub(2));
+    let r = centered(area, width, text.len() as u16 + 2);
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(text).block(dialog_block("welcome back")), r);
+}
+
 fn draw_quit(f: &mut Frame, running: usize, area: Rect) {
     let agents = match running {
         0 => "No agents are running.".to_string(),
@@ -894,7 +973,8 @@ fn draw_quit(f: &mut Frame, running: usize, area: Rect) {
     if running > 0 {
         text.push(Line::default());
         text.push(Line::styled(
-            "Stopping ends the agents' processes; worktrees and their changes stay on disk.",
+            "Stopping ends the agents' processes; worktrees and their changes stay on disk, \
+             and next time corral offers to bring the agents back.",
             theme::get().muted(),
         ));
     }
@@ -996,7 +1076,7 @@ fn options(items: &[(&str, &str)]) -> Vec<Line<'static>> {
         .iter()
         .map(|(k, what)| {
             Line::from(vec![
-                Span::styled(format!(" {k:<4}"), theme::get().accent()),
+                Span::styled(format!(" {k:<5} "), theme::get().accent()),
                 Span::raw(what.to_string()),
             ])
         })

@@ -1,6 +1,7 @@
 //! A pane: one child process in a PTY, the server's terminal emulator for
 //! it, and its agent state.
 
+use crate::detect::agents::Running;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -128,6 +129,11 @@ pub struct Pane {
     /// Screen changed since the rules last looked at it.
     pub dirty: bool,
     pub agent: Option<String>,
+    /// The agent process running now (the last one identified), if any.
+    pub running: Option<Running>,
+    /// The session id the agent's hook last reported, and when (Unix
+    /// seconds).
+    pub hook_session: Option<(String, u64)>,
     pub worktree: Option<WorktreeInfo>,
     pub exit_code: Option<i32>,
     pub exited: bool,
@@ -221,6 +227,8 @@ pub fn spawn(spec: SpawnSpec) -> Result<Spawned> {
         detector: Detector::new(),
         dirty: false,
         agent: None,
+        running: None,
+        hook_session: None,
         worktree: spec.worktree,
         exit_code: None,
         exited: false,

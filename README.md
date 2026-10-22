@@ -116,6 +116,35 @@ terminals) to select text.
 Detach, close the terminal, and come back later (or from another machine over
 SSH): run `corral` again and everything is where you left it.
 
+### After a reboot or a stop
+
+If corral itself stops (a reboot, a crash, `corral kill-server` before an
+update), the next `corral` offers to bring your panes back:
+
+```
+╭ welcome back ─────────────────────────────────────────────╮
+│ corral stopped with 2 panes open. Bring them back?        │
+│                                                           │
+│  planner  api ⎇               resumes its conversation    │
+│  notes    corral              shell                       │
+│                                                           │
+│ Enter bring them back                                     │
+│ n     start fresh (worktrees stay on disk)                │
+│ Esc   decide later (`corral restore`)                     │
+╰───────────────────────────────────────────────────────────╯
+```
+
+- Agents pick up their conversation: `claude --resume <id>`, `codex resume
+  <id>`, `opencode --continue`, with the flags they had. corral finds the
+  session from the files the agent writes (and from its hook, with
+  `corral integrate claude`). If it can't tell which conversation was whose
+  (two Claudes in one folder without hooks), the agent asks.
+- Worktree panes come back in their worktree; names and projects are kept.
+- Anything else comes back as a shell in the same folder. Old commands are
+  never run again on their own.
+- `corral restore` does the same from a script, `corral restore --discard`
+  lets them go. The record lives in `~/.corral/sessions/`.
+
 ### Top stories
 
 While your agents work, `^b t` (or **top stories** in the menu) shows the
@@ -302,7 +331,8 @@ name.
 | `corral worktree ls [--json]` / `corral worktree rm <pane\|path> [--force] [--delete-branch]` | worktrees |
 | `corral diff <pane> [--stat] [--json]` | what an agent changed in its worktree |
 | `corral commit <pane> -m MSG` / `corral merge <pane>` / `corral discard <pane> --yes` | land or drop an agent's work |
-| `corral server [--daemon]`, `corral kill-server` | run / stop the server (stopping ends every agent) |
+| `corral server [--daemon]`, `corral kill-server` | run / stop the server (stopping ends every agent; the next start offers to bring them back) |
+| `corral restore [--discard]` | bring back the panes from before corral stopped, or let them go |
 | `corral debug dump <pane> [-o FILE]` | save a pane's screen as replayable bytes (for rule fixtures) |
 
 Example: run an agent unattended and collect its answer.
@@ -402,7 +432,9 @@ loop of running agents in parallel and landing their work:
 - macOS and Linux only.
 - At most four agents on screen at once, in fixed layouts (no free-form
   splits or tabs).
-- Agents don't survive a reboot or `corral kill-server`.
+- Agents don't keep running through a reboot or `corral kill-server`; they
+  come back afterwards (resuming their conversation), but a command an agent
+  was in the middle of isn't finished.
 - Programs inside panes don't receive mouse events; the wheel scrolls
   corral's scrollback instead.
 - Diff review merges with a merge commit only (no squash or rebase yet), and

@@ -125,6 +125,7 @@ impl Session {
             panes: self.hub.infos(),
             focus: self.focus.clone(),
             view_generation: self.view_generation,
+            restorable: self.hub.restorable(),
         });
     }
 
@@ -319,6 +320,12 @@ impl Session {
                     reply(r.map(|(pane, warning)| Reply::Created { pane, warning }));
                 });
             }
+            Command::Restore { discard } => {
+                let client = self.client;
+                tokio::task::spawn_blocking(move || {
+                    reply(hub.restore(discard, Some(client)).map(Reply::Text))
+                });
+            }
             cmd => {
                 tokio::task::spawn_blocking(move || reply(run_blocking(&hub, cmd)));
             }
@@ -347,8 +354,12 @@ fn run_blocking(hub: &Hub, cmd: Command) -> Result<Reply> {
             lines,
             scrollback,
         } => Reply::Text(hub.read(&pane, lines, scrollback)?),
-        Command::Report { pane, state } => {
-            hub.report(&pane, state)?;
+        Command::Report {
+            pane,
+            state,
+            session,
+        } => {
+            hub.report(&pane, state, session)?;
             Reply::Ok
         }
         Command::WorktreeList => Reply::Worktrees(hub.worktrees()),
@@ -362,7 +373,7 @@ fn run_blocking(hub: &Hub, cmd: Command) -> Result<Reply> {
         Command::Commit { ref pane, .. }
         | Command::Merge { ref pane }
         | Command::Discard { ref pane } => Reply::Text(hub.worktree_action(pane, &cmd)?),
-        Command::New(_) | Command::Wait { .. } | Command::KillServer => {
+        Command::New(_) | Command::Restore { .. } | Command::Wait { .. } | Command::KillServer => {
             unreachable!("handled asynchronously")
         }
     })

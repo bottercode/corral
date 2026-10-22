@@ -7,12 +7,13 @@
 
 pub mod conn;
 pub mod pane;
+pub mod restore;
 
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
@@ -20,15 +21,16 @@ use tokio::net::UnixListener;
 use tokio::sync::{Notify, broadcast};
 
 use crate::config::Config;
-use crate::detect::agents::Identifier;
+use crate::detect::agents::{Identifier, Running, Seen};
 use crate::detect::rules::{Rules, View};
 use crate::paths;
 use crate::protocol::{
-    AgentState, Command, DiffReport, NewPane, PaneId, PaneInfo, ServerMsg, Viewport,
+    AgentState, Command, DiffReport, NewPane, PaneId, PaneInfo, Restorable, ServerMsg, Viewport,
     WorktreeAction, WorktreeInfo,
 };
 use crate::worktree::{self, RemoveOpts, WorktreeError};
 use pane::{Pane, SpawnSpec};
+use restore::{Record, Saved, SavedAgent};
 
 pub const DEFAULT_SIZE: (u16, u16) = (120, 36);
 const TICK: Duration = Duration::from_millis(250);
@@ -99,6 +101,14 @@ struct Inner {
     active_client: Option<ClientId>,
     last_size: Option<(u16, u16)>,
     last_focus: Option<PaneId>,
+    /// Panes from before the last stop, until restored or let go.
+    restorable: Option<Record>,
+    /// Where the session record is kept: `None` until `run` sets it, so a
+    /// Hub built in a unit test never writes one.
+    record_path: Option<PathBuf>,
+    last_saved: Option<Record>,
+    /// Shutting down: the record keeps the panes as they were.
+    stopping: bool,
 }
 
 impl Inner {
@@ -459,14 +469,18 @@ impl Hub {
         Ok(())
     }
 
-    pub fn report(&self, pane: &str, state: AgentState) -> Result<()> {
+    pub fn report(&self, pane: &str, state: AgentState, session: Option<String>) -> Result<()> {
         if state == AgentState::Exited {
             bail!("exited can't be reported; it's detected when the process ends");
         }
-        self.lock()
-            .pane(pane)?
-            .detector
-            .report(state, Instant::now());
+        {
+            let mut g = self.lock();
+            let p = g.pane(pane)?;
+            p.detector.report(state, Instant::now());
+            if let Some(s) = session.filter(|s| !s.trim().is_empty()) {
+                p.hook_session = Some((s, unix_now()));
+            }
+        }
         tracing::info!(pane, %state, "state reported");
         self.tick();
         Ok(())
@@ -488,6 +502,16 @@ impl Hub {
         req: NewPane,
         client: Option<ClientId>,
     ) -> Result<(PaneInfo, Option<String>)> {
+        self.spawn_pane(req, client, None)
+    }
+
+    /// `new_pane`, optionally in a worktree that already exists (restore).
+    fn spawn_pane(
+        self: &Arc<Self>,
+        req: NewPane,
+        client: Option<ClientId>,
+        existing_worktree: Option<PathBuf>,
+    ) -> Result<(PaneInfo, Option<String>)> {
         let origin = match &req.cwd {
             Some(c) => c.clone(),
             None => dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
@@ -508,6 +532,21 @@ impl Hub {
         let mut warning = None;
         let mut cwd = origin.clone();
         let mut wt = None;
+        if let Some(path) = existing_worktree {
+            match worktree::info(&path) {
+                Ok(info) => {
+                    cwd = info.path.clone();
+                    wt = Some(info);
+                }
+                Err(_) => {
+                    warning = Some(format!(
+                        "its worktree {} is gone; started in {}",
+                        path.display(),
+                        origin.display()
+                    ))
+                }
+            }
+        }
         if req.worktree {
             // A plain shell's branch is named for the work, not the shell.
             let branch_hint = if argv.is_empty() { "agent" } else { &hint };
@@ -799,6 +838,198 @@ impl Hub {
         Ok(format!("removed {}", path.display()))
     }
 
+    // ---- session restore -----------------------------------------------
+
+    /// Keep the session record at `path`, picking up the one already there:
+    /// its panes can be restored until someone decides.
+    pub fn keep_record(&self, path: PathBuf) {
+        let found = match restore::load(&path) {
+            Ok(r) => r.filter(|r| !r.panes.is_empty()),
+            Err(e) => {
+                tracing::warn!("ignoring the session record: {e:#}");
+                None
+            }
+        };
+        if let Some(r) = &found {
+            tracing::info!(
+                panes = r.panes.len(),
+                "panes from before the last stop can be restored"
+            );
+        }
+        let mut g = self.lock();
+        g.restorable = found;
+        g.record_path = Some(path);
+    }
+
+    pub fn restorable(&self) -> Vec<Restorable> {
+        self.lock()
+            .restorable
+            .as_ref()
+            .map(Record::summary)
+            .unwrap_or_default()
+    }
+
+    /// Write the session record if it changed. Blocking: finding an agent's
+    /// session reads its files.
+    pub fn save_record(&self) {
+        struct Live {
+            saved: Saved,
+            running: Option<Running>,
+            hook_session: Option<(String, u64)>,
+        }
+        let (path, live, pending) = {
+            let g = self.lock();
+            let Some(path) = g.record_path.clone() else {
+                return;
+            };
+            if g.stopping {
+                return;
+            }
+            let live: Vec<Live> = g
+                .panes
+                .iter()
+                .filter(|p| !p.exited)
+                .map(|p| Live {
+                    saved: Saved {
+                        name: p.name.clone(),
+                        named: p.named,
+                        workspace: p.workspace.clone(),
+                        cwd: p.cwd.clone(),
+                        origin: p.origin.clone(),
+                        worktree: p.worktree.as_ref().map(|w| w.path.clone()),
+                        agent: None,
+                    },
+                    running: p.running.clone(),
+                    hook_session: p.hook_session.clone(),
+                })
+                .collect();
+            (path, live, g.restorable.clone())
+        };
+        // Agents of one kind sharing a folder can't be told apart by the
+        // files they write; only their hooks can say.
+        let shares_folder = |l: &Live| {
+            live.iter()
+                .filter(|o| {
+                    o.saved.cwd == l.saved.cwd
+                        && o.running.as_ref().map(|r| r.name) == l.running.as_ref().map(|r| r.name)
+                })
+                .count()
+                > 1
+        };
+        let mut panes: Vec<Saved> = live
+            .iter()
+            .map(|l| {
+                let mut s = l.saved.clone();
+                s.agent = l.running.as_ref().map(|r| {
+                    let from_hook = l
+                        .hook_session
+                        .as_ref()
+                        .filter(|(_, at)| *at >= r.started)
+                        .map(|(id, _)| id.clone());
+                    let session = from_hook.or_else(|| {
+                        let started = UNIX_EPOCH + Duration::from_secs(r.started);
+                        (!shares_folder(l))
+                            .then(|| restore::find_session(r.name, &l.saved.cwd, started))
+                            .flatten()
+                    });
+                    SavedAgent {
+                        name: r.name.to_string(),
+                        argv: r.argv.clone(),
+                        session,
+                    }
+                });
+                s
+            })
+            .collect();
+        // Not brought back yet: still kept.
+        if let Some(p) = pending {
+            panes.extend(p.panes);
+        }
+        let record = Record::new(panes);
+        {
+            let mut g = self.lock();
+            if g.stopping || g.last_saved.as_ref() == Some(&record) {
+                return;
+            }
+            g.last_saved = Some(record.clone());
+        }
+        if let Err(e) = restore::save(&path, &record) {
+            tracing::warn!("saving the session record: {e:#}");
+        }
+    }
+
+    /// Bring back the panes from before the last stop, or (`discard`) let
+    /// them go. Agents resume their conversations; the rest come back as a
+    /// shell in the same folder. Blocking.
+    pub fn restore(self: &Arc<Self>, discard: bool, client: Option<ClientId>) -> Result<String> {
+        let record = {
+            let mut g = self.lock();
+            let r = g.restorable.take();
+            g.last_saved = None;
+            r
+        };
+        let Some(record) = record else {
+            bail!("there's nothing to restore");
+        };
+        if discard {
+            let kept = record.panes.iter().filter(|p| p.worktree.is_some()).count() as u32;
+            self.save_record();
+            tracing::info!(panes = record.panes.len(), "let the old panes go");
+            return Ok(match kept {
+                0 => "started fresh".into(),
+                n => format!(
+                    "started fresh; {n} {} kept (`corral worktree ls`)",
+                    worktree::plural(n, "worktree")
+                ),
+            });
+        }
+        let mut back = 0;
+        let mut problems = Vec::new();
+        for (i, p) in record.panes.iter().enumerate() {
+            let argv = match &p.agent {
+                Some(a) => record
+                    .resume_for(i)
+                    .and_then(|how| restore::resume_argv(a, &how))
+                    .unwrap_or_else(|| restore::restart_argv(a)),
+                None => Vec::new(),
+            };
+            let req = NewPane {
+                name: p.named.then(|| p.name.clone()),
+                workspace: Some(p.workspace.clone()),
+                // Worktree panes start from their repo, then move in.
+                cwd: Some(if p.worktree.is_some() {
+                    p.origin.clone()
+                } else {
+                    p.cwd.clone()
+                }),
+                command: if argv.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![restore::shell_line(&argv)]
+                },
+                shell: true,
+                then_shell: true,
+                ..Default::default()
+            };
+            match self.spawn_pane(req, client, p.worktree.clone()) {
+                Ok((_, warning)) => {
+                    back += 1;
+                    if let Some(w) = warning {
+                        problems.push(format!("{}: {w}", p.name));
+                    }
+                }
+                Err(e) => problems.push(format!("{}: {e:#}", p.name)),
+            }
+        }
+        tracing::info!(back, "restored panes");
+        self.save_record();
+        let mut msg = format!("brought back {back} {}", worktree::plural(back, "pane"));
+        if !problems.is_empty() {
+            msg.push_str(&format!("; {}", problems.join("; ")));
+        }
+        Ok(msg)
+    }
+
     // ---- periodic work -------------------------------------------------
 
     /// Re-run detection on every pane; publish state and notifications.
@@ -861,20 +1092,26 @@ impl Hub {
         {
             let mut g = self.lock();
             for p in g.panes.iter_mut() {
-                let Some(agent) = found.get(&p.id) else {
+                let Some(seen) = found.get(&p.id) else {
                     continue;
                 };
-                // Keep the last agent seen: a shell that ran claude is still
-                // "the claude pane" while claude runs a subprocess.
-                if let Some(a) = agent
-                    && p.agent.as_deref() != Some(a)
-                {
-                    p.agent = Some(a.to_string());
-                    if !p.named {
-                        p.name = a.to_string();
+                match seen {
+                    Seen::Agent(r) => {
+                        p.running = Some(r.clone());
+                        // Keep the last agent seen: a shell that ran claude
+                        // is still "the claude pane" after it quits.
+                        if p.agent.as_deref() != Some(r.name) {
+                            p.agent = Some(r.name.to_string());
+                            if !p.named {
+                                p.name = r.name.to_string();
+                            }
+                            p.dirty = true;
+                            changed = true;
+                        }
                     }
-                    p.dirty = true;
-                    changed = true;
+                    Seen::Shell => p.running = None,
+                    // Something the agent runs, or unreadable: no change.
+                    Seen::Other => {}
                 }
             }
         }
@@ -955,6 +1192,9 @@ impl Hub {
     }
 
     fn shutdown_all(&self) {
+        // The record keeps the panes as they were, to bring back next time.
+        self.save_record();
+        self.lock().stopping = true;
         let mut g = self.lock();
         for p in g.panes.iter_mut() {
             p.kill();
@@ -963,6 +1203,12 @@ impl Hub {
         drop(g);
         self.emit(Event::Shutdown);
     }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -1031,6 +1277,7 @@ pub async fn run(socket: PathBuf, config: Config) -> Result<()> {
     let listener = bind(&socket).await?;
     tracing::info!(socket = %socket.display(), pid = std::process::id(), "server started");
     let hub = Hub::new(config, socket.clone());
+    hub.keep_record(restore::record_path(&socket));
 
     let h = hub.clone();
     tokio::spawn(async move {
@@ -1050,6 +1297,7 @@ pub async fn run(socket: PathBuf, config: Config) -> Result<()> {
             let _ = tokio::task::spawn_blocking(move || {
                 let mut ident = ident.lock().unwrap_or_else(|e| e.into_inner());
                 h.identify(&mut ident);
+                h.save_record();
             })
             .await;
         }

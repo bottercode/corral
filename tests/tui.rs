@@ -310,8 +310,16 @@ fn new_shell_button_opens_a_shell() {
         .as_bytes(),
     );
     eventually("a second pane", || s.panes().len() == 2);
-    t.type_(b"echo from-$((2+2))-button\r");
-    t.wait_for("new shell focused", |x| x.contains("from-4-button"));
+    // A login shell can drop what's typed while it's still starting up
+    // (some prompts do), so type again until it answers.
+    for _ in 0..10 {
+        t.type_(b"echo from-$((2+2))-button\r");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if t.screen().contains("from-4-button") {
+            return;
+        }
+    }
+    panic!("the new shell never answered:\n{}", t.screen());
 }
 
 fn click_text(t: &mut Tui, text: &str) {

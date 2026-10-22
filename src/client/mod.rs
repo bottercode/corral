@@ -31,8 +31,8 @@ use crate::config::{Config, prefix_label};
 use crate::integrate::{self, Agent, HookStatus};
 use crate::paths;
 use crate::protocol::{
-    self, AgentState, ClientMsg, Command, NewPane, PaneId, PaneInfo, Reply, ServerMsg, Viewport,
-    WorktreeAction,
+    self, AgentState, ClientMsg, Command, NewPane, PaneId, PaneInfo, Reply, Restorable, ServerMsg,
+    Viewport, WorktreeAction,
 };
 use conn::Conn;
 use diff::DiffView;
@@ -99,6 +99,8 @@ pub enum Mode {
     Stories,
     /// Detach, or stop corral and every agent.
     Quit,
+    /// Bring back the panes from before corral stopped?
+    Restore,
 }
 
 #[derive(Debug)]
@@ -106,6 +108,7 @@ enum Pending {
     New,
     Kill { pane: PaneId },
     Diff { pane: PaneId },
+    Restore { discard: bool },
     DiffAction { pane: PaneId },
     Other,
 }
@@ -133,6 +136,10 @@ pub struct App {
     /// Generation of the last `View` sent, and what it said.
     view_generation: u64,
     sent_view: Option<(Option<PaneId>, Vec<Viewport>, bool)>,
+    /// Panes from before the server stopped, waiting for a decision.
+    pub restorable: Vec<Restorable>,
+    /// "Later" was picked: don't ask again this time.
+    restore_later: bool,
     pub mode: Mode,
     status: Option<(String, Instant, bool)>,
     pub prefix_label: String,
@@ -192,6 +199,8 @@ impl App {
             screens: HashMap::new(),
             view_generation: 0,
             sent_view: None,
+            restorable: Vec::new(),
+            restore_later: false,
             mode: Mode::Normal,
             status: None,
             prefix_label: prefix_label(prefix),
@@ -670,6 +679,10 @@ impl App {
         }
     }
 
+    fn decide_restore(&mut self, discard: bool) {
+        self.request(Command::Restore { discard }, Pending::Restore { discard });
+    }
+
     /// `^b t`: the top stories page, fetching its feed if it's stale.
     fn open_stories(&mut self) {
         self.mode = Mode::Stories;
@@ -1018,6 +1031,18 @@ impl App {
                 None => self.mode = Mode::Worktree(d),
             },
             Mode::Menu { selected } => self.menu_key(selected, key),
+            Mode::Restore => match key {
+                Key::Enter | Key::Char('y' | 'Y' | 'r') => self.decide_restore(false),
+                Key::Char('n' | 'N' | 'f') => self.decide_restore(true),
+                Key::Esc | Key::Ctrl('c') | Key::Char('l') => {
+                    self.restore_later = true;
+                    self.set_status("bring them back later with `corral restore`", false);
+                    if self.panes.is_empty() {
+                        self.new_shell();
+                    }
+                }
+                _ => self.mode = Mode::Restore,
+            },
             Mode::Stories => self.stories_key(key),
             Mode::Hooks(agent) => match key {
                 Key::Char('y' | 'Y') | Key::Enter => match integrate::install_quietly(agent) {
@@ -1190,7 +1215,17 @@ impl App {
                 panes,
                 focus,
                 view_generation,
+                restorable,
             } => {
+                self.restorable = restorable;
+                if self.restorable.is_empty() {
+                    // Decided (here or by another client).
+                    if matches!(self.mode, Mode::Restore) {
+                        self.mode = Mode::Normal;
+                    }
+                } else if !self.restore_later && matches!(self.mode, Mode::Normal) {
+                    self.mode = Mode::Restore;
+                }
                 self.panes = panes;
                 self.state_at = Instant::now();
                 let exists = |id: &PaneId| self.panes.iter().any(|p| &p.id == id);
@@ -1206,8 +1241,9 @@ impl App {
                 self.screens.retain(|id, _| self.tiles.contains(id));
                 if !self.seen_state {
                     self.seen_state = true;
-                    // Nothing running yet: start with a shell.
-                    if self.panes.is_empty() {
+                    // Nothing running yet (and nothing to bring back): start
+                    // with a shell.
+                    if self.panes.is_empty() && self.restorable.is_empty() {
                         self.new_shell();
                     }
                 }
@@ -1257,6 +1293,13 @@ impl App {
 
     fn on_reply(&mut self, kind: Pending, result: Result<Reply, String>) {
         match (kind, result) {
+            (Pending::Restore { discard }, Ok(Reply::Text(t))) => {
+                self.set_status(t, false);
+                if discard && self.panes.is_empty() {
+                    self.new_shell();
+                }
+            }
+            (Pending::Restore { .. }, Err(e)) => self.set_status(e, true),
             (Pending::New, Ok(Reply::Created { pane, warning })) => match warning {
                 Some(w) => self.set_status(w, true),
                 None => match &pane.worktree {
@@ -1559,6 +1602,7 @@ mod tests {
             ],
             focus: Some("p1".into()),
             view_generation: 0,
+            restorable: vec![],
         });
         a.on_server(ServerMsg::Screen {
             pane: "p1".into(),
@@ -1736,6 +1780,7 @@ mod tests {
             panes,
             focus: Some("p1".into()),
             view_generation: a.view_generation,
+            restorable: vec![],
         });
         a.on_stdin(b"\x02D");
         assert!(matches!(a.mode, Mode::Diff(_)));
@@ -1791,6 +1836,7 @@ mod tests {
             panes: vec![],
             focus: None,
             view_generation: 0,
+            restorable: vec![],
         });
         assert!(matches!(a.mode, Mode::Normal));
         assert!(sent_new(&a).command.is_empty());
@@ -1893,6 +1939,86 @@ mod tests {
         assert!(matches!(a.mode, Mode::Help));
         a.on_stdin(b"q\x02m");
         a.on_stdin(b"\x1b[<0;80;30M");
+        assert!(matches!(a.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn offers_to_bring_panes_back() {
+        let fresh = || {
+            let mut a = App::new(&Config::default(), "/tmp".into()).unwrap();
+            a.term_area = Rect::new(0, 0, 151, 40);
+            a.sidebar_area = Rect::new(0, 0, 30, 39);
+            a.pane_area = Rect::new(30, 0, 121, 39);
+            a.on_server(ServerMsg::State {
+                panes: vec![],
+                focus: None,
+                view_generation: 0,
+                restorable: vec![Restorable {
+                    name: "claude".into(),
+                    workspace: "api".into(),
+                    agent: Some("claude".into()),
+                    how: "resumes its conversation".into(),
+                    worktree: true,
+                }],
+            });
+            a
+        };
+        let restores = |a: &App| -> Vec<bool> {
+            a.outbox
+                .iter()
+                .filter_map(|m| match m {
+                    ClientMsg::Command {
+                        cmd: Command::Restore { discard },
+                        ..
+                    } => Some(*discard),
+                    _ => None,
+                })
+                .collect()
+        };
+        let news = |a: &App| {
+            a.outbox
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        m,
+                        ClientMsg::Command {
+                            cmd: Command::New(_),
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+
+        // Asked first, instead of starting a shell.
+        let mut a = fresh();
+        assert!(matches!(a.mode, Mode::Restore));
+        assert_eq!(news(&a), 0);
+        a.on_stdin(b"\r");
+        assert_eq!(restores(&a), vec![false]);
+
+        // Starting fresh: once the server agrees, a shell.
+        let mut a = fresh();
+        a.on_stdin(b"n");
+        assert_eq!(restores(&a), vec![true]);
+        let id = a.pending.keys().copied().max().unwrap();
+        a.on_server(ServerMsg::Reply {
+            id,
+            result: Ok(Reply::Text("started fresh".into())),
+        });
+        assert_eq!(news(&a), 1);
+
+        // Later: a shell now, and no asking again this time.
+        let mut a = fresh();
+        a.on_stdin(b"\x1b");
+        assert!(matches!(a.mode, Mode::Normal));
+        assert_eq!((restores(&a).len(), news(&a)), (0, 1));
+        a.on_server(ServerMsg::State {
+            panes: vec![],
+            focus: None,
+            view_generation: a.view_generation,
+            restorable: a.restorable.clone(),
+        });
         assert!(matches!(a.mode, Mode::Normal));
     }
 
@@ -2063,6 +2189,7 @@ mod tests {
             panes,
             focus: Some("p1".into()),
             view_generation: a.view_generation,
+            restorable: vec![],
         });
         for _ in 0..5 {
             a.on_stdin(b"\x02s");
@@ -2086,6 +2213,7 @@ mod tests {
             panes: a.panes.clone(),
             focus: Some("p1".into()),
             view_generation: generation - 1,
+            restorable: vec![],
         });
         assert_eq!(a.focus.as_deref(), Some("p2"));
         assert_eq!(a.tiles, vec!["p1", "p2"]);
@@ -2097,6 +2225,7 @@ mod tests {
             panes,
             focus: Some("p4".into()),
             view_generation: generation,
+            restorable: vec![],
         });
         assert_eq!(a.tiles, vec!["p1", "p4"]);
         assert_eq!(a.focus.as_deref(), Some("p4"));
@@ -2113,6 +2242,7 @@ mod tests {
             panes,
             focus: Some("p1".into()),
             view_generation: a.view_generation,
+            restorable: vec![],
         });
         assert_eq!(a.tiles, vec!["p1"]);
         // p1 grows back to the whole area.

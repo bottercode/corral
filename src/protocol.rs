@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Largest frame either side will accept (scrollback snapshots can be large).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -192,6 +192,14 @@ pub enum Command {
     Report {
         pane: PaneId,
         state: AgentState,
+        /// The agent's session id, when its hook says (Claude's do).
+        #[serde(default)]
+        session: Option<String>,
+    },
+    /// Bring back the panes from before the server stopped, or (`discard`)
+    /// let them go.
+    Restore {
+        discard: bool,
     },
     WorktreeList,
     WorktreeRemove {
@@ -238,6 +246,17 @@ pub enum Reply {
     Worktrees(Vec<WorktreeInfo>),
     Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
     Diff(DiffReport),
+}
+
+/// A pane that can be brought back, as a client lists it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Restorable {
+    pub name: String,
+    pub workspace: String,
+    pub agent: Option<String>,
+    /// "resumes its conversation", "shell", …
+    pub how: String,
+    pub worktree: bool,
 }
 
 /// One pane in a client's layout, at the size it's drawn.
@@ -301,6 +320,10 @@ pub enum ServerMsg {
         focus: Option<PaneId>,
         /// The last `View` generation applied when this was sent.
         view_generation: u64,
+        /// Panes from before the server last stopped, waiting for someone
+        /// to bring them back (`Command::Restore`) or let them go.
+        #[serde(default)]
+        restorable: Vec<Restorable>,
     },
     /// A full redraw of a pane: scrollback history, screen contents and
     /// terminal modes. `seq` is the last output chunk it includes.
@@ -501,7 +524,9 @@ mod tests {
             Command::Report {
                 pane: "p1".into(),
                 state: AgentState::Done,
+                session: Some("s".into()),
             },
+            Command::Restore { discard: true },
             Command::WorktreeList,
             Command::WorktreeRemove {
                 target: "p1".into(),
@@ -533,6 +558,13 @@ mod tests {
             panes: vec![pane()],
             focus: Some("p1".into()),
             view_generation: 7,
+            restorable: vec![Restorable {
+                name: "claude".into(),
+                workspace: "api".into(),
+                agent: Some("claude".into()),
+                how: "resumes its conversation".into(),
+                worktree: true,
+            }],
         });
         roundtrip(ServerMsg::Screen {
             pane: "p1".into(),

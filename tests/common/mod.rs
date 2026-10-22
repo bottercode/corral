@@ -7,7 +7,9 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use corral::client::conn::Conn;
-use corral::protocol::{ClientMsg, Command as Cmd, NewPane, PaneInfo, Reply, ServerMsg, Viewport};
+use corral::protocol::{
+    ClientMsg, Command as Cmd, NewPane, PaneInfo, Reply, Restorable, ServerMsg, Viewport,
+};
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_corral");
 
@@ -26,17 +28,31 @@ impl TestServer {
 
     pub fn start_with_config(config: &str) -> Self {
         let mut s = Self::unstarted(config);
+        s.spawn(&[]);
+        s
+    }
+
+    /// Start (or start again) the server, with extra environment.
+    pub fn spawn(&mut self, extra: &[(&str, std::ffi::OsString)]) {
         let child = Command::new(BIN)
             .arg("server")
-            .envs(s.env())
+            .envs(self.env())
+            .envs(extra.iter().map(|(k, v)| (*k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("spawning corral server");
-        s.child = Some(child);
-        s.wait_for_socket();
-        s
+        self.child = Some(child);
+        self.wait_for_socket();
+    }
+
+    /// `corral kill-server`, waiting for the server to exit.
+    pub fn stop(&mut self) {
+        self.ok(&["kill-server"]);
+        if let Some(mut c) = self.child.take() {
+            let _ = c.wait();
+        }
     }
 
     /// Paths and env without a running server (for auto-start tests).
@@ -161,6 +177,9 @@ pub struct Headless {
     pub covered: bool,
     pub focus: Option<String>,
     pub panes: Vec<PaneInfo>,
+    /// Panes the server could bring back.
+    pub restorable: Vec<Restorable>,
+    pub seen_state: bool,
     pub notes: Vec<String>,
     pub last_screen: Option<Vec<u8>>,
 }
@@ -185,6 +204,8 @@ impl Headless {
             covered: false,
             focus: None,
             panes: vec![],
+            restorable: vec![],
+            seen_state: false,
             notes: vec![],
             last_screen: None,
         }
@@ -248,7 +269,14 @@ impl Headless {
 
     pub fn apply(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::State { panes, focus, .. } => {
+            ServerMsg::State {
+                panes,
+                focus,
+                restorable,
+                ..
+            } => {
+                self.restorable = restorable;
+                self.seen_state = true;
                 self.panes = panes;
                 if focus.is_some() && self.parser_pane != focus {
                     // The server moved the keyboard (e.g. to a new pane).

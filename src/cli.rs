@@ -148,8 +148,16 @@ pub enum Cmd {
         #[arg(long)]
         daemon: bool,
     },
-    /// Stop the server and every agent it runs
+    /// Stop the server and every agent it runs (`corral restore` brings
+    /// them back)
     KillServer,
+    /// Bring back the panes from before corral last stopped: agents resume
+    /// their conversations, other panes come back as a shell
+    Restore {
+        /// Let them go instead (worktrees stay on disk)
+        #[arg(long)]
+        discard: bool,
+    },
     /// Debugging helpers
     #[command(subcommand, hide = true)]
     Debug(DebugCmd),
@@ -555,6 +563,12 @@ async fn run_client(cmd: Cmd) -> Result<ExitCode> {
                 }
             }
         }
+        Cmd::Restore { discard } => {
+            let mut c = connect(true).await?;
+            if let Reply::Text(t) = c.request(Command::Restore { discard }).await? {
+                println!("{t}");
+            }
+        }
         Cmd::KillServer => {
             let mut c = connect(false).await?;
             c.request(Command::KillServer).await?;
@@ -629,24 +643,48 @@ async fn report(state: AgentState, pane: Option<String>, hook: bool) -> Result<(
         _ if hook => return Ok(()),
         _ => bail!("no pane given and ${} is not set", paths::PANE_ENV),
     };
-    if hook && state == AgentState::Blocked && !hook_input_is_blocking() {
+    let input = if hook { hook_input() } else { None };
+    // Claude Code's Notification hook also fires for "waiting for your
+    // input" after an idle minute; that isn't a blocked agent.
+    if hook && state == AgentState::Blocked && !input.as_deref().is_none_or(hook_json_is_blocking) {
         return Ok(());
     }
+    let session = input.as_deref().and_then(hook_session);
     let mut c = connect(false).await?;
-    c.request(Command::Report { pane, state }).await?;
+    c.request(Command::Report {
+        pane,
+        state,
+        session,
+    })
+    .await?;
     Ok(())
 }
 
-/// Claude Code's Notification hook also fires for "waiting for your input"
-/// after an idle minute; that isn't a blocked agent.
-fn hook_input_is_blocking() -> bool {
-    let stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return true;
+/// The JSON a hook gets on stdin (Claude Code sends some); `None` from a
+/// terminal or if nothing arrives within a second.
+fn hook_input() -> Option<String> {
+    if std::io::stdin().is_terminal() {
+        return None;
     }
-    let mut buf = String::new();
-    let _ = stdin.take(1 << 20).read_to_string(&mut buf);
-    hook_json_is_blocking(&buf)
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::stdin().take(1 << 20).read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+    rx.recv_timeout(Duration::from_secs(1)).ok()
+}
+
+/// The agent's session id in hook JSON (`session_id`, as Claude sends).
+pub fn hook_session(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let id = v.get("session_id")?.as_str()?;
+    let ok = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    ok.then(|| id.to_string())
 }
 
 pub fn hook_json_is_blocking(json: &str) -> bool {
@@ -851,6 +889,16 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(cli.command, Some(Cmd::Report { hook: true, .. })));
+    }
+
+    #[test]
+    fn hook_session_ids() {
+        assert_eq!(
+            hook_session(r#"{"session_id":"8f2c-11aa","hook_event_name":"Stop"}"#).as_deref(),
+            Some("8f2c-11aa")
+        );
+        assert_eq!(hook_session(r#"{"session_id":"x; rm -rf /"}"#), None);
+        assert_eq!(hook_session("not json"), None);
     }
 
     #[test]
