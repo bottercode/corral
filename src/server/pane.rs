@@ -145,6 +145,27 @@ pub struct Spawned {
     pub child: Box<dyn Child + Send + Sync>,
 }
 
+/// Before the screen loses rows, scroll so the cursor's line stays in view.
+/// Terminals do this, pushing lines off the top into scrollback; vt100 cuts
+/// rows off the bottom instead, which would hide the latest output (and the
+/// prompt) of a pane shrunk after it finished writing. Full-screen programs
+/// on the alternate screen redraw themselves, so they're left alone.
+pub fn keep_cursor_in_view<CB: vt100::Callbacks>(parser: &mut vt100::Parser<CB>, rows: u16) {
+    let screen = parser.screen();
+    let (old_rows, _) = screen.size();
+    let (row, col) = screen.cursor_position();
+    if screen.alternate_screen() || rows >= old_rows || row < rows {
+        return;
+    }
+    let up = row + 1 - rows;
+    // To the bottom row, line feeds to scroll, then back to the cursor's
+    // new place.
+    let mut seq = format!("\x1b[{old_rows};1H");
+    seq.push_str(&"\n".repeat(up as usize));
+    seq.push_str(&format!("\x1b[{};{}H", row - up + 1, col + 1));
+    parser.process(seq.as_bytes());
+}
+
 pub fn spawn(spec: SpawnSpec) -> Result<Spawned> {
     let pty = native_pty_system()
         .openpty(PtySize {
@@ -288,6 +309,7 @@ impl Pane {
             pixel_width: 0,
             pixel_height: 0,
         });
+        keep_cursor_in_view(&mut self.parser, rows);
         self.parser.screen_mut().set_size(rows, cols);
         self.cols = cols;
         self.rows = rows;
@@ -385,6 +407,35 @@ pub fn screen_text(screen: &mut vt100::Screen, lines: Option<usize>, scrollback:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text(p: &vt100::Parser) -> String {
+        p.screen().contents()
+    }
+
+    #[test]
+    fn shrinking_keeps_the_latest_lines() {
+        let mut p = vt100::Parser::new(24, 80, SCROLLBACK);
+        for i in 0..100 {
+            p.process(format!("line{i}\r\n").as_bytes());
+        }
+        p.process(b"$ ");
+        keep_cursor_in_view(&mut p, 10);
+        p.screen_mut().set_size(10, 60);
+        let t = text(&p);
+        assert!(t.contains("line99") && t.trim_end().ends_with('$'), "{t}");
+        assert_eq!(p.screen().cursor_position(), (9, 2));
+        // What scrolled off is in the scrollback.
+        p.screen_mut().set_scrollback(usize::MAX);
+        assert!(p.screen().scrollback() >= 90);
+
+        // Room to spare, or growing: nothing moves.
+        let mut p = vt100::Parser::new(24, 80, SCROLLBACK);
+        p.process(b"one\r\ntwo");
+        keep_cursor_in_view(&mut p, 10);
+        p.screen_mut().set_size(10, 80);
+        assert!(text(&p).starts_with("one\ntwo"));
+        assert_eq!(p.screen().cursor_position(), (1, 3));
+    }
 
     fn feed(p: &mut Parser, s: &str) {
         p.process(s.as_bytes());
