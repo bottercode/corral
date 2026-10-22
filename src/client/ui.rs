@@ -10,7 +10,6 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use tui_term::widget::{Cursor, PseudoTerminal};
 use unicode_width::UnicodeWidthStr;
 
-use super::browser::{BarClick, TILE as BROWSER};
 use super::input::Key;
 use super::sidebar::{RAIL_WIDTH, Sidebar, badge, task_title, truncate};
 use super::{App, MENU, MenuItem, Mode, diff, theme};
@@ -387,10 +386,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             draw_menu(f, app, selected);
         }
         Mode::Hooks(agent) => draw_hooks(f, *agent, areas.pane),
-        Mode::Address(input) => {
-            let input = input.clone();
-            draw_address(f, &input, areas.pane);
-        }
         Mode::Rename { pane, input } => {
             let (pane, input) = (pane.clone(), input.clone());
             draw_rename(f, &pane, &input, areas.pane);
@@ -463,10 +458,6 @@ fn draw_tiles(f: &mut Frame, app: &mut App, area: Rect) {
     };
     for (id, tile, body) in rects {
         let focused = app.focus.as_ref() == Some(&id);
-        if id == BROWSER {
-            draw_browser_tile(f, app, tile, body, focused);
-            continue;
-        }
         let info = app.panes.iter().find(|p| p.id == id).cloned();
         if n > 1
             && let Some(p) = &info
@@ -524,125 +515,6 @@ fn draw_tiles(f: &mut Frame, app: &mut App, area: Rect) {
 
 /// One row above each tile: number, name and title on the left, state on
 /// the right. The focused tile's header carries the accent.
-/// The browser tile: a bar (back, forward, reload, the page, close) over
-/// the page. The page itself is an image the run loop places over the
-/// body after drawing, so the body is left blank here.
-fn draw_browser_tile(f: &mut Frame, app: &mut App, tile: Rect, body: Rect, focused: bool) {
-    let t = theme::get();
-    let graphics = app.graphics;
-    let frame = app.frame;
-    let Some(b) = app.browser.as_mut() else {
-        return;
-    };
-    let bar = Rect::new(tile.x, tile.y, tile.width, 1);
-    f.buffer_mut()
-        .set_style(bar, if focused { t.selected() } else { Style::new() });
-    b.hits.clear();
-    let mut x = bar.x;
-    let mut put = |f: &mut Frame, text: &str, style: Style, click: Option<BarClick>| {
-        let w = (text.width() as u16).min((bar.x + bar.width).saturating_sub(x));
-        let r = Rect::new(x, bar.y, w, 1);
-        f.render_widget(Line::styled(text.to_string(), style), r);
-        if let Some(c) = click {
-            b.hits.push((r, c));
-        }
-        x += w;
-    };
-    put(f, if focused { "▍" } else { " " }, t.accent(), None);
-    put(f, "◂", t.muted(), Some(BarClick::Back));
-    put(f, " ", Style::new(), None);
-    put(f, "▸", t.muted(), Some(BarClick::Forward));
-    put(f, " ", Style::new(), None);
-    let reload = if b.loading {
-        const SPIN: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        SPIN[frame % SPIN.len()]
-    } else {
-        "↻"
-    };
-    put(f, reload, t.fg(t.working), Some(BarClick::Reload));
-    put(f, "  ", Style::new(), None);
-    // The page: its title, then where it is.
-    let close_w = 3;
-    let room = (bar.x + bar.width).saturating_sub(x + close_w) as usize;
-    let shown_url = b
-        .url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string();
-    let title = b.title.trim();
-    let address_x = x;
-    let mut spans = Vec::new();
-    if !title.is_empty() && title != b.url && title != shown_url && room > 20 {
-        let title = truncate(title, room / 2);
-        let rest = room.saturating_sub(title.width() + 2);
-        spans.push(Span::styled(
-            title,
-            if focused {
-                t.bold()
-            } else {
-                Style::new().fg(t.text)
-            },
-        ));
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(truncate(&shown_url, rest), t.muted()));
-    } else {
-        spans.push(Span::styled(truncate(&shown_url, room), t.muted()));
-    }
-    let r = Rect::new(address_x, bar.y, room as u16, 1);
-    f.render_widget(Line::from(spans), r);
-    b.hits.push((r, BarClick::Address));
-    let close = Rect::new((bar.x + bar.width).saturating_sub(2), bar.y, 1, 1);
-    f.render_widget(Line::styled("✕", t.muted()), close);
-    b.hits.push((close, BarClick::Close));
-
-    // The body: blank for the image, or why there isn't one.
-    f.render_widget(Clear, body);
-    let message = if !graphics {
-        Some((
-            "Pages show here in Ghostty, kitty or WezTerm.".to_string(),
-            t.muted(),
-        ))
-    } else if let (Some(e), None) = (&b.error, &b.frame) {
-        Some((format!("couldn't show the page: {e}"), t.fg(t.error)))
-    } else if b.frame.is_none() {
-        Some(("starting the browser…".to_string(), t.muted()))
-    } else {
-        None
-    };
-    if let Some((msg, style)) = message {
-        let r = Rect::new(body.x, body.y + body.height / 2, body.width, 1);
-        f.render_widget(
-            Paragraph::new(Line::styled(truncate(&msg, body.width as usize), style))
-                .alignment(Alignment::Center),
-            r,
-        );
-    }
-}
-
-/// `^b u`: where to go.
-fn draw_address(f: &mut Frame, input: &TextInput, area: Rect) {
-    let width = area.width.saturating_sub(4).clamp(30, 90);
-    let r = centered(area, width, 5);
-    let (line, c) = field_line(
-        "Address",
-        input,
-        true,
-        "a web address, localhost:3000, or words to search",
-        r.width.saturating_sub(2),
-    );
-    let text = vec![
-        line,
-        Line::default(),
-        key_hint(&[("Enter", "open next to your agents"), ("Esc", "cancel")]),
-    ];
-    f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(text).block(dialog_block("Open a page")), r);
-    if let Some(c) = c {
-        f.set_cursor_position((r.x + 1 + c, r.y + 1));
-    }
-}
-
 fn draw_tile_header(f: &mut Frame, app: &App, p: &PaneInfo, row: Rect, focused: bool) {
     let t = theme::get();
     let (badge, badge_style) = badge(p, app.age(p), app.frame);
@@ -708,7 +580,6 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
             ("w", "worktree"),
             ("m", "menu"),
             ("t", "stories"),
-            ("u", "page"),
             ("j/k", "switch"),
             ("b", "blocked"),
             ("s", "split"),
@@ -743,21 +614,10 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
         Line::from(spans)
     } else {
         // Quiet by default: one pointer to the help, on the right.
-        let mut hint = Line::from(vec![
+        let hint = Line::from(vec![
             Span::styled(p.clone(), t.key()),
             Span::styled(" ? keys ", t.muted()),
         ]);
-        if app.focus.as_deref() == Some(BROWSER) {
-            let mut spans = vec![
-                Span::styled("page has the keyboard  ", t.muted()),
-                Span::styled(format!("{p} u"), t.key()),
-                Span::styled(" address  ", t.muted()),
-                Span::styled(format!("{p} x"), t.key()),
-                Span::styled(" close  ", t.muted()),
-            ];
-            spans.append(&mut hint.spans);
-            hint = Line::from(spans);
-        }
         f.render_widget(Paragraph::new(hint).alignment(Alignment::Right), area);
         return;
     };
@@ -803,10 +663,6 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
                     "menu: theme, sidebar order, notifications, agent hooks",
                 ),
                 ("t", "top stories from Hacker News and lobste.rs"),
-                (
-                    "u",
-                    "open a web page next to your agents (address or search)",
-                ),
                 ("d", "detach (agents keep running)"),
                 ("q", "exit: detach, or stop corral and every agent"),
                 ("?", "this help"),

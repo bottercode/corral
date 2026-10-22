@@ -280,8 +280,6 @@ pub enum Click {
     Exit,
     /// The "⇅ by need" / "⇅ by project" switch.
     Order,
-    /// The "◎ web page" button.
-    Page,
     /// The "✦ top stories" button.
     Stories,
     /// The "«" / "»" button that collapses or expands the sidebar.
@@ -516,8 +514,7 @@ impl Sidebar<'_> {
             let new = t.accent().add_modifier(Modifier::BOLD);
             button(2, 1, "+", new, Click::New { worktree: false });
             button(4, 1, "⎇", t.fg(t.git), Click::New { worktree: true });
-            button(2, 2, "◎", t.fg(t.working), Click::Page);
-            button(4, 2, "✦", t.fg(t.done), Click::Stories);
+            button(2, 2, "✦", t.fg(t.done), Click::Stories);
         }
         hits
     }
@@ -664,15 +661,14 @@ fn render_order_switch(row: Rect, order: Order, buf: &mut Buffer) -> Hit {
     }
 }
 
-/// Two rows of buttons, in two columns:
-/// `+ new shell   ⎇ worktree` and `◎ web page    ✦ top stories`,
+/// Two rows of buttons: `+ new shell   ⎇ worktree` over `✦ top stories`,
 /// shortened when the sidebar is narrow.
 fn render_buttons(area: Rect, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
     let wide = area.width >= 28;
     let pick = |long: &'static str, short: &'static str| if wide { long } else { short };
-    let rows = [
-        [
+    let rows: [&[(&str, Style, Click)]; 2] = [
+        &[
             (
                 pick("+ new shell", "+ new"),
                 t.accent().add_modifier(Modifier::BOLD),
@@ -684,31 +680,31 @@ fn render_buttons(area: Rect, buf: &mut Buffer) -> Vec<Hit> {
                 Click::New { worktree: true },
             ),
         ],
-        [
-            (pick("◎ web page", "◎ web"), t.fg(t.working), Click::Page),
-            (
-                pick("✦ top stories", "✦ news"),
-                t.fg(t.done),
-                Click::Stories,
-            ),
-        ],
+        &[(
+            pick("✦ top stories", "✦ news"),
+            t.fg(t.done),
+            Click::Stories,
+        )],
     ];
-    let first_w = rows.iter().map(|r| r[0].0.width()).max().unwrap_or(0) as u16;
-    let columns = [area.x + 1, area.x + 1 + first_w + 3];
     let mut hits = Vec::new();
     for (dy, row) in rows.into_iter().enumerate() {
         let y = area.y + dy as u16;
         if y >= area.y + area.height {
             break;
         }
-        for ((label, style, click), x) in row.into_iter().zip(columns) {
+        let mut x = area.x + 1;
+        for (label, style, click) in row {
             let w = label.width() as u16;
             if x + w > area.x + area.width {
                 break;
             }
             let r = Rect::new(x, y, w, 1);
-            Line::styled(label, style).render(r, buf);
-            hits.push(Hit { area: r, click });
+            Line::styled(*label, *style).render(r, buf);
+            hits.push(Hit {
+                area: r,
+                click: click.clone(),
+            });
+            x += w + 3;
         }
     }
     hits
@@ -854,7 +850,6 @@ mod tests {
                 Click::Order,
                 Click::New { worktree: false },
                 Click::New { worktree: true },
-                Click::Page,
                 Click::Stories,
             ]
         );
@@ -867,9 +862,9 @@ mod tests {
         let (a, b) = (hits[12].area, hits[13].area);
         assert_eq!((a.y, b.y), (20, 20));
         assert!(a.x + a.width < b.x);
-        // The page and stories buttons under them, in the same columns.
-        let (c, d) = (hits[14].area, hits[15].area);
-        assert_eq!((c.y, d.y, c.x, d.x), (21, 21, a.x, b.x));
+        // Top stories under them.
+        let c = hits[14].area;
+        assert_eq!((c.y, c.x), (21, a.x));
     }
 
     #[test]
@@ -884,7 +879,7 @@ mod tests {
         insta::assert_snapshot!(text);
         // Only the buttons are clickable (no order switch with no agents).
         assert!(hits.iter().all(|h| !matches!(h.click, Click::Focus(_))));
-        assert_eq!(hits.len(), 7);
+        assert_eq!(hits.len(), 6);
     }
 
     #[test]
@@ -913,7 +908,6 @@ mod tests {
                 f("p4"),
                 Click::New { worktree: false },
                 Click::New { worktree: true },
-                Click::Page,
                 Click::Stories,
             ]
         );

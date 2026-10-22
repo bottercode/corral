@@ -91,7 +91,6 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b r` | rename it |
 | `^b m` | menu: theme, sidebar order, notifications, agent hooks |
 | `^b t` | top stories from Hacker News and lobste.rs ([below](#top-stories)) |
-| `^b u` | open a web page next to your agents ([below](#web-pages)) |
 | `^b d` | detach (agents keep running) |
 | `^b q` | exit: detach, or stop corral and every agent (also the **✕ exit** button) |
 | `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`) |
@@ -100,8 +99,8 @@ Everything you type goes to the focused agent. corral's own commands are
 
 Click an agent on screen to type into it, or a sidebar row to bring that agent
 into the focused spot. The **+ new shell** / **⎇ worktree** buttons at the
-bottom of the sidebar open one; **◎ web page** and **✦ top stories** under
-them open a page next to your agents and the news. At the top:
+bottom of the sidebar open one; **✦ top stories** under them opens the
+news. At the top:
 
 - **≡ menu** (or `^b m`) changes the theme, the sidebar's order and
   notifications, and installs agent hooks. Changes are saved to your config.
@@ -165,9 +164,8 @@ sidebar still beside it:
 ```
 
 - `j`/`k` or the wheel scroll; `Enter` (or a click on the title) opens the
-  story next to your agents ([web pages](#web-pages)), or in your browser
-  where pages can't be shown; `o` always uses your browser; `c` (or a click
-  on the line under it) opens the comments.
+  story in your browser; `c` (or a click on the line under it) opens the
+  comments.
 - `Tab` switches between the two sites; `r` refreshes; `Esc` goes back to
   your agents. `^b` keys still work from the page, and clicking an agent in
   the sidebar goes straight to it.
@@ -176,35 +174,6 @@ sidebar still beside it:
 - Nothing is fetched until you open the page. corral then asks the sites'
   public APIs directly (no key, no account, nothing else in between) and
   keeps each feed for five minutes.
-
-### Web pages
-
-`^b u` (or **◎ web page** in the sidebar) opens a real web page in a tile next to your agents: the app an agent
-is building on `localhost:3000`, the docs it should read, a story from
-`^b t`. Type an address, `localhost:3000`, or words to search.
-
-```
- corral   ≡ menu  ✕ exit  « │ 1 planner                  idle │▍◂ ▸ ↻  Hacker News  news.ycombinator.com      ✕
- ─────────────── ⇅ by need  │ ⏺ Reading src/app.tsx         │ ┌──────────────────────────────────────────┐
- WORKING  1                 │                               │ │                                          │
- 1 planner            ⠋ 4s  │                               │ │      the page, as Chrome draws it        │
-```
-
-- corral runs your own Chrome (or Chromium, Brave, Edge) headless and draws
-  the page into the tile as an image, so it looks exactly like it does in
-  Chrome: fonts, images, PDFs, JavaScript apps.
-- Click, scroll and type on the page; it has the keyboard while its tile is
-  focused (`^b` keys still drive corral). **◂ ▸ ↻** go back, forward and
-  reload; click the address to go elsewhere; **✕** or `^b x` closes it.
-- It's a tile like any agent: `^b s`/`^b S`/`^b o`/`^b h`/`^b l` arrange
-  and move between them.
-- Pages need a terminal that can show images (the kitty graphics protocol):
-  **Ghostty, kitty or WezTerm**. Elsewhere (Terminal.app, inside tmux),
-  `^b u` and stories open in your usual browser instead. If corral guesses
-  wrong, set `CORRAL_GRAPHICS=1` or `0`.
-- The browser keeps its own profile in `~/.corral/browser`, so logins stick.
-  It belongs to the window you opened it in and closes when you detach.
-  Set `browser = "/path/to/chrome"` to pick which browser runs.
 
 ## Worktrees
 
@@ -393,7 +362,6 @@ sidebar_width = 30
 sidebar_collapsed = false              # just the agent numbers (« / ^b c)
 theme = "ranch"                        # ranch, ink or terminal
 sidebar_order = "need"                 # need or project
-browser = ""                           # Chrome/Chromium/Brave/Edge for web pages; found if empty
 ```
 
 Themes:
@@ -472,9 +440,6 @@ loop of running agents in parallel and landing their work:
   corral's scrollback instead.
 - Diff review merges with a merge commit only (no squash or rebase yet), and
   conflicts must be resolved outside corral.
-- Web pages need a terminal with kitty graphics, don't survive detaching,
-  and one page is open per window. Over SSH they work but are slower (every
-  frame goes through the terminal).
 
 ## Development
 
