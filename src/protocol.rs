@@ -88,6 +88,22 @@ pub struct WorktreeInfo {
     pub pane: Option<PaneId>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct GitInfo {
+    /// Branch name, or a short commit hash when `HEAD` is detached.
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PullRequest>,
+}
+
+/// The branch's most recent pull request on GitHub (found with `gh`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct PullRequest {
+    pub number: u32,
+    /// `OPEN`, `MERGED` or `CLOSED`, as `gh` reports it.
+    pub state: String,
+}
+
 /// One file in a worktree's diff.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct FileDiff {
@@ -127,6 +143,9 @@ pub struct PaneInfo {
     pub exit_code: Option<i32>,
     pub title: Option<String>,
     pub worktree: Option<WorktreeInfo>,
+    /// The branch checked out where the pane runs, and its pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitInfo>,
     pub cols: u16,
     pub rows: u16,
     /// Seconds spent in the current state when this was sent.
@@ -437,6 +456,7 @@ mod tests {
                 removed: 2,
                 pane: Some("p1".into()),
             }),
+            git: None,
             cols: 80,
             rows: 24,
             state_secs: 12,

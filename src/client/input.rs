@@ -322,6 +322,51 @@ fn decode_escape(data: &[u8]) -> (Key, usize) {
     }
 }
 
+/// What a wheel notch over a pane means to the program in it: a mouse
+/// report when it asked for the mouse, `lines` arrow keys on the alternate
+/// screen (as terminals do for full-screen programs, which have no
+/// scrollback), or `None` to scroll corral's own scrollback. `col` and
+/// `row` are 0-based within the pane.
+pub fn wheel_for_pane(
+    screen: &vt100::Screen,
+    up: bool,
+    col: u16,
+    row: u16,
+    lines: usize,
+) -> Option<Vec<u8>> {
+    use vt100::{MouseProtocolEncoding, MouseProtocolMode};
+    let button: u32 = if up { 64 } else { 65 };
+    let (x, y) = (u32::from(col) + 1, u32::from(row) + 1);
+    if screen.mouse_protocol_mode() != MouseProtocolMode::None {
+        return Some(match screen.mouse_protocol_encoding() {
+            MouseProtocolEncoding::Sgr => format!("\x1b[<{button};{x};{y}M").into_bytes(),
+            MouseProtocolEncoding::Utf8 => {
+                let mut out = b"\x1b[M".to_vec();
+                for v in [button, x, y] {
+                    let c = char::from_u32(32 + v).unwrap_or(' ');
+                    out.extend(c.to_string().as_bytes());
+                }
+                out
+            }
+            // One byte each: positions past 223 can't be told apart.
+            MouseProtocolEncoding::Default => {
+                let byte = |v: u32| (32 + v).min(255) as u8;
+                vec![0x1b, b'[', b'M', byte(button), byte(x), byte(y)]
+            }
+        });
+    }
+    if screen.alternate_screen() {
+        let arrow: &[u8] = match (up, screen.application_cursor()) {
+            (true, true) => b"\x1bOA",
+            (true, false) => b"\x1b[A",
+            (false, true) => b"\x1bOB",
+            (false, false) => b"\x1b[B",
+        };
+        return Some(arrow.repeat(lines));
+    }
+    None
+}
+
 /// Adjust bytes bound for a pane to the modes its program asked for: strip
 /// paste markers it didn't enable, and use SS3 arrows in application
 /// cursor mode.
@@ -519,6 +564,40 @@ mod tests {
         assert_eq!(
             adapt_for_pane(b"\x1b[A", false, false, false),
             b"\x1b[A".to_vec()
+        );
+    }
+
+    fn wheel(setup: &[u8], up: bool) -> Option<Vec<u8>> {
+        let mut p = vt100::Parser::new(24, 80, 0);
+        p.process(setup);
+        wheel_for_pane(p.screen(), up, 4, 9, 3)
+    }
+
+    #[test]
+    fn wheel_goes_where_the_program_wants_it() {
+        // Plain shell: corral scrolls its own scrollback.
+        assert_eq!(wheel(b"", true), None);
+        // Full-screen program: arrow keys, in its cursor mode.
+        assert_eq!(
+            wheel(b"\x1b[?1049h", true),
+            Some(b"\x1b[A\x1b[A\x1b[A".to_vec())
+        );
+        assert_eq!(
+            wheel(b"\x1b[?1049h\x1b[?1h", false),
+            Some(b"\x1bOB\x1bOB\x1bOB".to_vec())
+        );
+        // Program that reads the mouse: a wheel report at the pane position.
+        assert_eq!(
+            wheel(b"\x1b[?1000h\x1b[?1006h", true),
+            Some(b"\x1b[<64;5;10M".to_vec())
+        );
+        assert_eq!(
+            wheel(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h", false),
+            Some(b"\x1b[<65;5;10M".to_vec())
+        );
+        assert_eq!(
+            wheel(b"\x1b[?1000h", true),
+            Some(vec![0x1b, b'[', b'M', 96, 37, 42])
         );
     }
 }

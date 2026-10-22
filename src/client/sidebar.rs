@@ -599,21 +599,30 @@ impl Sidebar<'_> {
             Span::raw("  "),
             Span::styled(truncate(&place, room), t.muted()),
         ]));
-        if let Some(w) = &p.worktree {
-            let stats = if w.diff_files > 0 {
-                format!(" +{} −{}", w.added, w.removed)
-            } else {
-                String::new()
-            };
-            let branch = truncate(
-                &format!("⎇ {}", w.branch),
-                room.saturating_sub(stats.width()),
-            );
-            let mut spans = vec![marker(), Span::raw("  "), Span::styled(branch, t.fg(t.git))];
-            if w.diff_files > 0 {
-                spans.push(Span::styled(format!(" +{}", w.added), t.fg(t.added)));
-                spans.push(Span::styled(format!(" −{}", w.removed), t.fg(t.removed)));
+        // A worktree's branch comes with what the agent changed so far.
+        let branch = p
+            .worktree
+            .as_ref()
+            .map(|w| w.branch.as_str())
+            .or_else(|| p.git.as_ref().map(|g| g.branch.as_str()));
+        if let Some(branch) = branch {
+            let mut tail = Vec::new();
+            if let Some(w) = p.worktree.as_ref().filter(|w| w.diff_files > 0) {
+                tail.push(Span::styled(format!(" +{}", w.added), t.fg(t.added)));
+                tail.push(Span::styled(format!(" −{}", w.removed), t.fg(t.removed)));
             }
+            if let Some(pr) = p.git.as_ref().and_then(|g| g.pr.as_ref()) {
+                let (label, style) = match pr.state.as_str() {
+                    "MERGED" => (format!(" #{} merged", pr.number), t.fg(t.done)),
+                    "CLOSED" => (format!(" #{} closed", pr.number), t.muted()),
+                    _ => (format!(" #{}", pr.number), t.accent()),
+                };
+                tail.push(Span::styled(label, style));
+            }
+            let tail_width: usize = tail.iter().map(|s| s.content.width()).sum();
+            let branch = truncate(&format!("⎇ {branch}"), room.saturating_sub(tail_width));
+            let mut spans = vec![marker(), Span::raw("  "), Span::styled(branch, t.fg(t.git))];
+            spans.extend(tail);
             detail(Line::from(spans));
         }
     }
@@ -729,6 +738,7 @@ mod tests {
             exit_code: None,
             title: None,
             worktree: None,
+            git: None,
             cols: 80,
             rows: 24,
             state_secs: 250,
@@ -824,6 +834,28 @@ mod tests {
         assert_eq!(ids(Order::Project), vec!["p1", "p3", "p2", "p4", "p5"]);
         // Numbers follow creation, not position.
         assert_eq!(number(&panes, "p4"), Some(4));
+    }
+
+    #[test]
+    fn branch_and_pull_request() {
+        use crate::protocol::{GitInfo, PullRequest};
+        let mut a = pane("p1", "claude", "corral", AgentState::Working);
+        a.git = Some(GitInfo {
+            branch: "fix/login".into(),
+            pr: Some(PullRequest {
+                number: 42,
+                state: "OPEN".into(),
+            }),
+        });
+        let (text, _) = render(&[a.clone()], Some("p1"), &["p1".into()], 32);
+        assert!(text.contains("⎇ fix/login #42"), "{text}");
+        a.git.as_mut().unwrap().pr.as_mut().unwrap().state = "MERGED".into();
+        let (text, _) = render(&[a.clone()], Some("p1"), &["p1".into()], 32);
+        assert!(text.contains("⎇ fix/login #42 merged"), "{text}");
+        // No repository, no branch line.
+        a.git = None;
+        let (text, _) = render(&[a], Some("p1"), &["p1".into()], 32);
+        assert!(!text.contains("⎇ fix"), "{text}");
     }
 
     #[test]

@@ -25,8 +25,8 @@ use crate::detect::agents::{Identifier, Running, Seen};
 use crate::detect::rules::{Rules, View};
 use crate::paths;
 use crate::protocol::{
-    AgentState, Command, DiffReport, NewPane, PaneId, PaneInfo, Restorable, ServerMsg, Viewport,
-    WorktreeAction, WorktreeInfo,
+    AgentState, Command, DiffReport, GitInfo, NewPane, PaneId, PaneInfo, PullRequest, Restorable,
+    ServerMsg, Viewport, WorktreeAction, WorktreeInfo,
 };
 use crate::worktree::{self, RemoveOpts, WorktreeError};
 use pane::{Pane, SpawnSpec};
@@ -36,6 +36,10 @@ pub const DEFAULT_SIZE: (u16, u16) = (120, 36);
 const TICK: Duration = Duration::from_millis(250);
 const IDENTIFY_EVERY: Duration = Duration::from_secs(2);
 const WORKTREE_POLL_EVERY: Duration = Duration::from_secs(3);
+const GIT_POLL_EVERY: Duration = Duration::from_secs(3);
+/// Pull requests are asked of GitHub every this many git polls (a minute),
+/// and right away when a pane's branch changes.
+const PR_POLL_TICKS: u32 = 20;
 
 pub type ClientId = u64;
 
@@ -1159,6 +1163,56 @@ impl Hub {
         }
     }
 
+    /// Refresh the branch each pane runs on and, with `prs` or when the
+    /// branch changed, its pull request. Blocking: the lookup runs `gh`.
+    pub fn poll_git(&self, prs: bool) {
+        let targets: Vec<(PaneId, PathBuf, Option<GitInfo>)> = self
+            .lock()
+            .panes
+            .iter()
+            .filter(|p| !p.exited)
+            .map(|p| {
+                let dir = p.worktree.as_ref().map_or(&p.cwd, |w| &w.path);
+                (p.id.clone(), dir.clone(), p.git.clone())
+            })
+            .collect();
+        // Panes in the same checkout share one lookup.
+        let mut found: HashMap<(PathBuf, String), Option<PullRequest>> = HashMap::new();
+        let fresh: Vec<(PaneId, Option<GitInfo>)> = targets
+            .into_iter()
+            .map(|(id, dir, old)| {
+                let Some(branch) = worktree::current_branch(&dir) else {
+                    return (id, None);
+                };
+                let old = old.filter(|g| g.branch == branch);
+                let pr = if prs || old.is_none() {
+                    found
+                        .entry((dir.clone(), branch.clone()))
+                        .or_insert_with(|| worktree::pull_request(&dir, &branch))
+                        .clone()
+                } else {
+                    old.and_then(|g| g.pr)
+                };
+                (id, Some(GitInfo { branch, pr }))
+            })
+            .collect();
+        let mut changed = false;
+        {
+            let mut g = self.lock();
+            for (id, git) in fresh {
+                if let Ok(p) = g.pane(&id)
+                    && p.git != git
+                {
+                    p.git = git;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.emit(Event::State);
+        }
+    }
+
     fn worktree_path(&self, pane: &str) -> Result<PathBuf> {
         let mut g = self.lock();
         let p = g.pane(pane)?;
@@ -1310,6 +1364,16 @@ pub async fn run(socket: PathBuf, config: Config) -> Result<()> {
             t.tick().await;
             let h = h.clone();
             let _ = tokio::task::spawn_blocking(move || h.poll_worktrees()).await;
+        }
+    });
+    let h = hub.clone();
+    tokio::spawn(async move {
+        let mut t = tokio::time::interval(GIT_POLL_EVERY);
+        for n in 0u32.. {
+            t.tick().await;
+            let h = h.clone();
+            let prs = n % PR_POLL_TICKS == 0;
+            let _ = tokio::task::spawn_blocking(move || h.poll_git(prs)).await;
         }
     });
 

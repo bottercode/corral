@@ -929,6 +929,7 @@ mod tests {
             exit_code: Some(1),
             title: None,
             worktree: None,
+            git: None,
             cols: 80,
             rows: 24,
             state_secs: 0,

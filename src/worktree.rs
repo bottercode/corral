@@ -6,9 +6,9 @@
 //! own tree stays clean.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use crate::protocol::{DiffReport, FileDiff, WorktreeInfo};
+use crate::protocol::{DiffReport, FileDiff, PullRequest, WorktreeInfo};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorktreeError {
@@ -506,6 +506,38 @@ pub fn unmerged_commits(repo: &Path, branch: &str) -> Result<u32> {
         ],
     )?;
     Ok(out.trim().parse().unwrap_or(0))
+}
+
+/// The branch checked out in `dir`, or a short commit hash when `HEAD` is
+/// detached. `None` outside a repository.
+pub fn current_branch(dir: &Path) -> Option<String> {
+    git(dir, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .or_else(|_| git(dir, &["rev-parse", "--short", "HEAD"]))
+        .ok()
+        .filter(|b| !b.is_empty())
+}
+
+/// The newest pull request whose head is `branch`, asked of GitHub with
+/// `gh`. `None` when `gh` is missing or signed out, the repository isn't on
+/// GitHub, or the branch has no pull request.
+pub fn pull_request(dir: &Path, branch: &str) -> Option<PullRequest> {
+    let out = Command::new("gh")
+        .args([
+            "pr", "list", "--head", branch, "--state", "all", "--limit", "1",
+        ])
+        .args(["--json", "number,state"])
+        .current_dir(dir)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_NO_UPDATE_NOTIFIER", "1")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let prs: Vec<PullRequest> = serde_json::from_slice(&out.stdout).ok()?;
+    prs.into_iter().next()
 }
 
 /// Describe an existing worktree.

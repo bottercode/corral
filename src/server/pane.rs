@@ -11,7 +11,7 @@ use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, nativ
 
 use crate::detect::Detector;
 use crate::paths;
-use crate::protocol::{PaneId, PaneInfo, WorktreeInfo};
+use crate::protocol::{GitInfo, PaneId, PaneInfo, WorktreeInfo};
 
 pub const SCROLLBACK: usize = 10_000;
 
@@ -135,6 +135,8 @@ pub struct Pane {
     /// seconds).
     pub hook_session: Option<(String, u64)>,
     pub worktree: Option<WorktreeInfo>,
+    /// Branch and pull request where the pane runs, refreshed by polling.
+    pub git: Option<GitInfo>,
     pub exit_code: Option<i32>,
     pub exited: bool,
 }
@@ -251,6 +253,7 @@ pub fn spawn(spec: SpawnSpec) -> Result<Spawned> {
         running: None,
         hook_session: None,
         worktree: spec.worktree,
+        git: None,
         exit_code: None,
         exited: false,
     };
@@ -275,6 +278,7 @@ impl Pane {
             exit_code: self.exit_code,
             title: self.parser.callbacks().title.clone(),
             worktree: self.worktree.clone(),
+            git: self.git.clone(),
             cols: self.cols,
             rows: self.rows,
             state_secs: self.detector.state_age(std::time::Instant::now()).as_secs(),

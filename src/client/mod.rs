@@ -966,6 +966,19 @@ impl App {
             .map(|(id, ..)| id)
     }
 
+    /// The bytes a wheel notch sends to the focused pane's program, when
+    /// it takes the wheel itself.
+    fn wheel_bytes(&self, m: Mouse) -> Option<Vec<u8>> {
+        let focus = self.focus.as_ref()?;
+        let (_, _, body) = self.tile_rects().into_iter().find(|(id, ..)| id == focus)?;
+        if !body.contains((m.x, m.y).into()) {
+            return None;
+        }
+        let up = m.kind == MouseKind::WheelUp;
+        let screen = self.screen()?.screen();
+        input::wheel_for_pane(screen, up, m.x - body.x, m.y - body.y, WHEEL_LINES)
+    }
+
     fn on_mouse(&mut self, m: Mouse) {
         let in_sidebar = m.x < self.sidebar_area.x + self.sidebar_area.width;
         // Clicking or scrolling over another tile moves the keyboard there.
@@ -978,6 +991,18 @@ impl App {
             && self.focus.as_ref() != Some(&id)
         {
             self.set_focus(id);
+        }
+        // Programs that read the mouse, or run full screen (most agents),
+        // scroll themselves; corral's scrollback is for the rest.
+        if !in_sidebar
+            && matches!(m.kind, MouseKind::WheelUp | MouseKind::WheelDown)
+            && matches!(self.mode, Mode::Normal)
+            && let Some(bytes) = self.wheel_bytes(m)
+        {
+            if let Some(pane) = self.focus.clone() {
+                self.outbox.push(ClientMsg::Input { pane, bytes });
+            }
+            return;
         }
         match m.kind {
             MouseKind::LeftDown if in_sidebar => {
@@ -1584,6 +1609,7 @@ mod tests {
             exit_code: None,
             title: None,
             worktree: None,
+            git: None,
             cols: 80,
             rows: 24,
             state_secs: 0,
@@ -2021,6 +2047,40 @@ mod tests {
             restorable: a.restorable.clone(),
         });
         assert!(matches!(a.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn wheel_goes_to_programs_that_scroll_themselves() {
+        let mut a = app();
+        let wheel_down = b"\x1b[<65;50;10M";
+        let inputs = |a: &App| -> Vec<Vec<u8>> {
+            a.outbox
+                .iter()
+                .filter_map(|m| match m {
+                    ClientMsg::Input { bytes, .. } => Some(bytes.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // A plain shell: the wheel scrolls corral's scrollback.
+        a.on_stdin(b"\x1b[<64;50;10M");
+        assert!(inputs(&a).is_empty());
+        a.on_stdin(b"q");
+        a.outbox.clear();
+        // A full-screen program: arrow keys, so it scrolls itself.
+        a.screens.get_mut("p1").unwrap().process(b"\x1b[?1049h");
+        a.on_stdin(wheel_down);
+        assert!(matches!(a.mode, Mode::Normal));
+        assert_eq!(inputs(&a), vec![b"\x1b[B".repeat(WHEEL_LINES)]);
+        a.outbox.clear();
+        // One that reads the mouse: the wheel itself, where it happened
+        // (column 50 is the pane's 20th).
+        a.screens
+            .get_mut("p1")
+            .unwrap()
+            .process(b"\x1b[?1000h\x1b[?1006h");
+        a.on_stdin(wheel_down);
+        assert_eq!(inputs(&a), vec![b"\x1b[<65;20;10M".to_vec()]);
     }
 
     #[test]
