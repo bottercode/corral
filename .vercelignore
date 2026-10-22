@@ -1,0 +1,5 @@
+# Only the landing page (docs/) is deployed; keep the Rust project out of
+# CLI uploads.
+/*
+!/docs
+!/vercel.json

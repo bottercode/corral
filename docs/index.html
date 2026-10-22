@@ -4,71 +4,665 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>corral: a terminal runtime for coding agents</title>
-<meta name="description" content="Keep Claude Code, Codex and other coding agents running, see which one needs you, and give each its own git worktree.">
+<meta name="description" content="Run Claude Code, Codex and opencode side by side in one terminal. corral keeps them running when you close the laptop, puts the agent that needs you on top, and gives each one its own git worktree.">
+<meta property="og:title" content="corral: a terminal runtime for coding agents">
+<meta property="og:description" content="Keep your coding agents running, see which one needs you, and land their work from one terminal.">
+<meta property="og:image" content="https://bottercode.github.io/corral/brand/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#14110d">
+<link rel="icon" href="brand/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="brand/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600;0,9..144,700;1,9..144,600&family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
+  /* corral's "ranch" theme. The terminal surfaces stay dark in both modes. */
   :root {
-    --bg: #1e1b16; --panel: #2d2924; --text: #ece6da; --muted: #8e877c;
-    --faint: #4b463f; --hay: #e3b25b; --rust: #db6b47; --sage: #93b57f;
-    --creek: #6fafb8; --heather: #b79bc9;
+    --bg: #f5efe3; --bg-2: #efe7d8; --line: #e0d5c2; --line-2: #d2c4ad;
+    --ink: #221d17; --ink-2: #4a4238; --muted: #7c7061;
+    --accent: #a8721a; --accent-soft: rgba(168,114,26,.10);
+    --t-bg: #1a1713; --t-bg-2: #221e19; --t-line: #37312a; --t-text: #ece6da;
+    --t-muted: #8e877c; --t-faint: #4b463f;
+    --hay: #e3b25b; --rust: #db6b47; --sage: #93b57f; --creek: #6fafb8; --heather: #b79bc9;
+    --display: "Fraunces", Georgia, serif;
+    --sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14110d; --bg-2: #1a1713; --line: #2a251f; --line-2: #3a342c;
+      --ink: #efe9dd; --ink-2: #c9c0b1; --muted: #8f8778;
+      --accent: #e3b25b; --accent-soft: rgba(227,178,91,.10);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14110d; --bg-2: #1a1713; --line: #2a251f; --line-2: #3a342c;
+    --ink: #efe9dd; --ink-2: #c9c0b1; --muted: #8f8778;
+    --accent: #e3b25b; --accent-soft: rgba(227,178,91,.10);
   }
   * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 16px/1.6 ui-monospace, "SF Mono", Menlo, "JetBrains Mono", monospace;
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+  a { color: inherit; }
+  code, kbd { font-family: var(--mono); }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 32px; }
+  .label { font: 500 12px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .label b { color: var(--accent); font-weight: 600; }
+
+  /* nav */
+  header.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: saturate(1.4) blur(12px); -webkit-backdrop-filter: saturate(1.4) blur(12px); border-bottom: 1px solid var(--line); }
+  .nav { display: flex; align-items: center; height: 64px; gap: 28px; }
+  .nav .logo img { height: 30px; width: auto; display: block; }
+  .nav ul { list-style: none; display: flex; gap: 24px; margin: 0 0 0 12px; padding: 0; font-size: 14px; }
+  .nav ul a { color: var(--muted); text-decoration: none; transition: color .15s; }
+  .nav ul a:hover { color: var(--ink); }
+  .nav .end { margin-left: auto; display: flex; gap: 10px; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 8px; font: 500 14px var(--sans); text-decoration: none; border: 1px solid var(--line-2); color: var(--ink); background: transparent; cursor: pointer; transition: background .15s, border-color .15s; }
+  .btn:hover { background: var(--bg-2); border-color: var(--muted); }
+  .btn.solid { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  .btn.solid:hover { background: var(--ink-2); }
+  .btn svg { width: 16px; height: 16px; }
+
+  /* hero */
+  .hero { position: relative; padding: 96px 0 72px; overflow: hidden; }
+  .hero::before { content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: radial-gradient(var(--line-2) 1px, transparent 1.2px); background-size: 22px 22px;
+    -webkit-mask-image: radial-gradient(ellipse 70% 80% at 85% 10%, #000 10%, transparent 70%);
+            mask-image: radial-gradient(ellipse 70% 80% at 85% 10%, #000 10%, transparent 70%); opacity: .7; }
+  .hero .wrap { position: relative; }
+  .pill { display: inline-flex; align-items: center; gap: 10px; padding: 5px 12px 5px 6px; border: 1px solid var(--line-2); border-radius: 999px; font-size: 13px; color: var(--ink-2); text-decoration: none; background: var(--bg); max-width: 100%; }
+  .pill span { font: 600 11px var(--mono); letter-spacing: .06em; padding: 3px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+  .pill:hover { border-color: var(--muted); }
+  h1 { font: 700 clamp(46px, 7.4vw, 92px)/.98 var(--display); letter-spacing: -0.025em; word-spacing: .06em; margin: 0; max-width: 12.5ch; font-variation-settings: "opsz" 144; }
+  h1 em { font-style: italic; font-weight: 600; color: var(--accent); }
+  .sub { font-size: clamp(17px, 1.6vw, 20px); line-height: 1.55; color: var(--ink-2); max-width: 600px; margin: 26px 0 0; }
+  .cta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 18px; margin-top: 36px; }
+  .cmd { display: flex; align-items: stretch; border: 1px solid var(--line-2); border-radius: 10px; background: var(--t-bg); color: var(--t-text); overflow: hidden; max-width: 100%; min-width: 0; }
+  .cmd code { display: block; padding: 13px 16px; font-size: 14px; white-space: nowrap; overflow-x: auto; scrollbar-width: none; min-width: 0; }
+  .cmd code::-webkit-scrollbar { display: none; }
+  .cmd .p { color: var(--hay); user-select: none; }
+  .cmd button { flex: none; border: 0; border-left: 1px solid var(--t-line); background: transparent; color: var(--t-muted); font: 500 12px var(--mono); letter-spacing: .1em; text-transform: uppercase; padding: 0 16px; cursor: pointer; transition: color .15s, background .15s; }
+  .cmd button:hover { color: var(--hay); background: var(--t-bg-2); }
+  .meta { font: 13px var(--mono); color: var(--muted); margin: 16px 0 0; }
+  .meta a { color: var(--muted); text-underline-offset: 3px; }
+  .meta a:hover { color: var(--ink); }
+
+  /* demo */
+  .demo { padding: 0 0 24px; }
+  .win { border: 1px solid var(--t-line); border-radius: 14px; background: var(--t-bg); color: var(--t-text); overflow: hidden; font: 12.5px/1.6 var(--mono);
+    box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 40px 80px -40px rgba(20,12,0,.55); }
+  .chrome { display: flex; align-items: center; height: 38px; padding: 0 14px; gap: 8px; border-bottom: 1px solid var(--t-line); background: #16130f; }
+  .chrome i { width: 11px; height: 11px; border-radius: 50%; background: #3a342c; }
+  .chrome .t { flex: 1; text-align: center; color: var(--t-muted); font-size: 12px; margin-right: 40px; }
+  .scr { display: grid; grid-template-columns: 268px 1fr 1fr; height: 440px; }
+  .scr > * { min-width: 0; }
+  .sb { border-right: 1px solid var(--t-line); display: flex; flex-direction: column; padding-top: 6px; }
+  .r { padding: 0 12px; white-space: pre; display: flex; gap: 8px; overflow: hidden; }
+  .r.head { justify-content: space-between; }
+  .r.head b { color: var(--hay); }
+  .r.rail { color: var(--t-muted); align-items: center; }
+  .r.rail::before { content: ""; flex: 1; border-top: 1px solid var(--t-faint); }
+  .r.sec { color: var(--t-muted); font-weight: 600; margin-top: 10px; }
+  .ag { cursor: pointer; border-left: 2px solid transparent; padding-left: 10px; transition: background .12s; }
+  .ag:hover { background: #211d18; }
+  .ag.on { background: var(--t-bg-2); border-left-color: var(--hay); }
+  .ag.alt { border-left-color: var(--t-faint); }
+  .ag .n { color: var(--t-muted); }
+  .ag .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .ag.on .nm { font-weight: 600; }
+  .dt { background: var(--t-bg-2); border-left: 2px solid var(--hay); padding-left: 32px; color: var(--t-muted); }
+  .dt.t { color: var(--t-text); }
+  .dt .g { color: var(--heather); }
+  .sw { color: var(--creek); } .sbk { color: var(--rust); font-weight: 600; } .sd { color: var(--sage); } .si { color: var(--t-muted); }
+  .sb .ft { margin-top: auto; border-top: 1px solid var(--t-faint); padding: 6px 12px 8px; display: grid; gap: 1px; }
+  .ft .a { color: var(--hay); font-weight: 600; } .ft .b { color: var(--heather); } .ft .c { color: var(--sage); }
+  .tile { display: flex; flex-direction: column; border-right: 1px solid var(--t-line); }
+  .tile:last-child { border-right: 0; }
+  .th { display: flex; justify-content: space-between; gap: 10px; padding: 0 12px; height: 24px; align-items: center; color: var(--t-muted); white-space: nowrap; overflow: hidden; }
+  .tile.on .th { background: var(--t-bg-2); }
+  .th .nm { color: var(--t-muted); overflow: hidden; text-overflow: ellipsis; }
+  .tile.on .th .nm { color: var(--t-text); font-weight: 600; }
+  .tile.on .th .nm::before { content: "▍"; color: var(--hay); }
+  .tb { padding: 10px 14px; white-space: pre-wrap; overflow: hidden; flex: 1; }
+  .tb .o { color: var(--sage); } .tb .d { color: var(--t-muted); } .tb .q { color: var(--hay); font-weight: 600; }
+  .tb .s { color: var(--creek); } .tb .ad { color: var(--sage); } .tb .rm { color: var(--rust); }
+  .tb button { font: inherit; color: var(--t-bg); background: var(--hay); border: 0; border-radius: 4px; padding: 0 8px; margin-left: 8px; cursor: pointer; }
+  .hintbar { display: flex; justify-content: space-between; padding: 4px 14px 6px; border-top: 1px solid var(--t-line); color: var(--t-muted); }
+  .hintbar #status { color: var(--hay); }
+  .hintbar b { color: var(--hay); font-weight: 400; }
+  .cap { display: flex; justify-content: space-between; gap: 16px; margin-top: 14px; font-size: 14px; color: var(--muted); }
+  .cap .live { display: inline-flex; align-items: center; gap: 8px; }
+  .cap .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--sage); box-shadow: 0 0 0 4px color-mix(in srgb, var(--sage) 25%, transparent); }
+
+  /* facts */
+  .facts { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin-top: 72px; }
+  .fact { padding: 28px 28px 26px; border-left: 1px solid var(--line); }
+  .fact:first-child { border-left: 0; padding-left: 0; }
+  .fact .v { font: 600 44px/1 var(--display); letter-spacing: -0.02em; }
+  .fact .k { margin-top: 10px; font-size: 14px; color: var(--muted); }
+
+  /* features */
+  section.block { padding: 112px 0 0; }
+  .shead { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: end; margin-bottom: 56px; }
+  h2 { font: 700 clamp(34px, 4.6vw, 54px)/1.04 var(--display); letter-spacing: -0.03em; margin: 14px 0 0; font-variation-settings: "opsz" 144; }
+  h2 em { font-style: italic; font-weight: 600; color: var(--accent); }
+  .shead p { margin: 0; color: var(--ink-2); font-size: 17px; max-width: 46ch; justify-self: end; }
+  .feat { display: grid; grid-template-columns: 5fr 7fr; gap: 64px; align-items: center; padding: 56px 0; border-top: 1px solid var(--line); }
+  .feat > * { min-width: 0; }
+  .feat:nth-of-type(even) .copy { order: 2; }
+  .feat h3 { font: 700 30px/1.12 var(--display); letter-spacing: -0.02em; margin: 14px 0 14px; }
+  .feat p { margin: 0; color: var(--ink-2); font-size: 16.5px; }
+  .feat p code, .sub code, .final p code { font-size: .88em; padding: 2px 6px; border-radius: 5px; background: var(--bg-2); border: 1px solid var(--line); color: var(--ink); }
+  .feat .more { display: inline-flex; gap: 6px; margin-top: 18px; font-size: 14px; color: var(--accent); text-decoration: none; font-weight: 500; }
+  .feat .more:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .panel { border: 1px solid var(--t-line); border-radius: 12px; background: var(--t-bg); color: var(--t-text); font: 12.5px/1.7 var(--mono); overflow: hidden; }
+  .panel .ph { display: flex; justify-content: space-between; gap: 12px; padding: 9px 16px; border-bottom: 1px solid var(--t-line); color: var(--t-muted); font-size: 12px; }
+  .panel pre { margin: 0; padding: 16px; white-space: pre; overflow-x: auto; font: inherit; }
+  .m { color: var(--t-muted); } .h { color: var(--hay); } .rr { color: var(--rust); } .ss { color: var(--sage); } .cc { color: var(--creek); } .vv { color: var(--heather); }
+  .hl { background: var(--t-bg-2); display: inline-block; min-width: 100%; }
+  .bold { font-weight: 600; }
+  .toast { margin: 0 16px 16px; padding: 10px 12px; border: 1px solid var(--t-line); border-radius: 8px; display: flex; gap: 10px; align-items: center; background: #211d18; }
+  .toast img { width: 22px; height: 22px; }
+  .toast div { line-height: 1.35; } .toast small { color: var(--t-muted); }
+
+  /* with / without */
+  .vs { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .vs > div { padding: 32px 36px; }
+  .vs > div + div { border-left: 1px solid var(--line); background: var(--bg-2); }
+  .vs h4 { margin: 0 0 18px; font: 500 12px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .vs div + div h4 { color: var(--accent); }
+  .vs ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+  .vs li { display: grid; grid-template-columns: 22px 1fr; color: var(--ink-2); font-size: 15.5px; }
+  .vs li::before { font: 14px var(--mono); padding-top: 2px; }
+  .vs .no li::before { content: "×"; color: var(--muted); }
+  .vs .yes li::before { content: "◆"; color: var(--accent); font-size: 11px; padding-top: 5px; }
+
+  /* agents */
+  .agents { display: flex; flex-wrap: wrap; gap: 10px; }
+  .agents span { font: 14px var(--mono); padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink-2); background: var(--bg); }
+  .agents span:nth-child(-n+3) { border-color: var(--line-2); color: var(--ink); }
+  .agents-note { margin: 18px 0 0; color: var(--muted); font-size: 14px; }
+  .agents-note code { font-size: 13px; color: var(--ink-2); }
+
+  /* keys */
+  .keys { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); }
+  .keys div { display: flex; align-items: baseline; gap: 14px; padding: 16px 0; border-bottom: 1px solid var(--line); color: var(--ink-2); font-size: 15px; }
+  .keys div:nth-child(3n+2), .keys div:nth-child(3n+3) { padding-left: 24px; border-left: 1px solid var(--line); }
+  kbd { font-size: 12.5px; color: var(--ink); background: var(--bg-2); border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 6px; padding: 2px 8px; white-space: nowrap; min-width: 52px; text-align: center; }
+
+  /* final */
+  .final { margin-top: 128px; border-top: 1px solid var(--line); position: relative; overflow: hidden; }
+  .final .wrap { padding-top: 112px; padding-bottom: 112px; position: relative; }
+  .final h2 { font-size: clamp(44px, 7vw, 88px); line-height: .98; max-width: 11ch; margin: 18px 0 0; }
+  .final p { color: var(--ink-2); font-size: 18px; max-width: 52ch; margin: 24px 0 0; }
+  .final .meta { font-size: 13px; color: var(--muted); }
+  .final .mark { position: absolute; right: -40px; bottom: -60px; width: 420px; opacity: .07; pointer-events: none; }
+  footer { border-top: 1px solid var(--line); }
+  footer .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; padding-top: 28px; padding-bottom: 36px; font-size: 14px; color: var(--muted); }
+  footer img { height: 22px; display: block; }
+  footer a { color: var(--muted); text-decoration: none; }
+  footer a:hover { color: var(--ink); }
+  footer .sp { margin-left: auto; font-family: var(--mono); font-size: 13px; }
+
+  @media (max-width: 1000px) {
+    .scr { grid-template-columns: 240px 1fr; }
+    .tile.second { display: none; }
+    .tile.main { border-right: 0; }
+    .feat { grid-template-columns: 1fr; gap: 28px; }
+    .feat:nth-of-type(even) .copy { order: 0; }
+    .shead { grid-template-columns: 1fr; }
+    .shead p { justify-self: start; }
   }
-  main { max-width: 760px; margin: 0 auto; padding: 72px 24px 96px; }
-  h1 { color: var(--hay); font-size: 40px; margin: 0 0 4px; letter-spacing: -1px; }
-  .tag { color: var(--muted); margin: 0 0 40px; }
-  h2 { color: var(--muted); font-size: 13px; letter-spacing: 2px; text-transform: uppercase; margin: 40px 0 12px; }
-  .cmd {
-    display: flex; align-items: center; gap: 12px; background: var(--panel);
-    border: 1px solid var(--faint); border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+  @media (max-width: 760px) {
+    .wrap { padding: 0 16px; }
+    .nav { gap: 12px; }
+    .nav ul { display: none; }
+    .nav .end .gh { display: none; }
+    .hero { padding: 56px 0 48px; }
+    .scr { grid-template-columns: 1fr; height: auto; }
+    .sb { border-right: 0; border-bottom: 1px solid var(--t-line); }
+    .tile.main { min-height: 280px; }
+    .cap { flex-direction: column; gap: 4px; }
+    .facts { grid-template-columns: 1fr 1fr; }
+    .fact { padding: 22px 16px; }
+    .fact:nth-child(3) { border-left: 0; padding-left: 0; }
+    .fact:nth-child(n+3) { border-top: 1px solid var(--line); }
+    .fact .v { font-size: 36px; }
+    section.block { padding-top: 80px; }
+    .shead { margin-bottom: 32px; }
+    .feat { padding: 40px 0; }
+    .vs { grid-template-columns: 1fr; }
+    .vs > div { padding: 24px 20px; }
+    .vs > div + div { border-left: 0; border-top: 1px solid var(--line); }
+    .keys { grid-template-columns: 1fr; }
+    .keys div:nth-child(n) { padding-left: 0; border-left: 0; }
+    .final { margin-top: 88px; }
+    .final .wrap { padding-top: 72px; padding-bottom: 72px; }
+    .final .mark { width: 260px; }
+    footer .sp { margin-left: 0; }
   }
-  .cmd code { white-space: nowrap; flex: 1; }
-  .cmd .p { color: var(--muted); user-select: none; }
-  button {
-    font: inherit; font-size: 13px; color: var(--bg); background: var(--hay);
-    border: 0; border-radius: 6px; padding: 4px 10px; cursor: pointer;
-  }
-  .note { color: var(--muted); font-size: 14px; margin-top: 10px; }
-  ul { list-style: none; padding: 0; margin: 0; }
-  li { padding: 6px 0 6px 22px; position: relative; }
-  li::before { position: absolute; left: 0; }
-  li.b::before { content: "◆"; color: var(--rust); }
-  li.d::before { content: "✓"; color: var(--sage); }
-  li.w::before { content: "⠋"; color: var(--creek); }
-  li.g::before { content: "⎇"; color: var(--heather); }
-  li.s::before { content: "✦"; color: var(--hay); }
-  a { color: var(--hay); }
-  footer { margin-top: 56px; color: var(--muted); font-size: 14px; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; } }
 </style>
 </head>
 <body>
-<main>
-  <h1>corral</h1>
-  <p class="tag">A terminal runtime for coding agents.</p>
 
-  <h2>Install</h2>
-  <div class="cmd">
-    <code><span class="p">$ </span><span id="install">curl -fsSL https://bottercode.github.io/corral/install.sh | sh</span></code>
-    <button onclick="navigator.clipboard.writeText(document.getElementById('install').textContent);this.textContent='copied'">copy</button>
+<header class="top">
+  <div class="wrap nav">
+    <a class="logo" href="./" aria-label="corral home">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="brand/logo-dark.svg">
+        <img src="brand/logo-light.svg" alt="corral" width="102" height="30">
+      </picture>
+    </a>
+    <ul>
+      <li><a href="#features">Features</a></li>
+      <li><a href="#keys">Keys</a></li>
+      <li><a href="https://github.com/bottercode/corral#readme">Docs</a></li>
+      <li><a href="https://github.com/bottercode/corral/releases">Releases</a></li>
+    </ul>
+    <div class="end">
+      <a class="btn gh" href="https://github.com/bottercode/corral">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <a class="btn solid" href="#install">Install</a>
+    </div>
   </div>
-  <p class="note">macOS and Linux. Then run <code>corral</code>.</p>
+</header>
 
-  <h2>What it does</h2>
-  <ul>
-    <li class="w">Run Claude Code, Codex, opencode and others side by side; they keep running when you close the window or lose SSH.</li>
-    <li class="b">See which agent needs you: blocked and finished agents rise to the top, with a bell when one you aren't watching stops.</li>
-    <li class="g">Give each agent its own git worktree, then review, commit and merge its work without leaving the terminal.</li>
-    <li class="d">After a reboot or an update, bring every agent back into its conversation.</li>
-    <li class="s">Script it all: <code>corral new</code>, <code>send</code>, <code>read</code>, <code>wait</code>, with <code>--json</code>.</li>
-  </ul>
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <h1>Keep every agent in <em>one pen.</em></h1>
+      <p class="sub">corral is a terminal runtime for coding agents. Run Claude Code, Codex and opencode side by side, see at a glance which one is waiting on you, and keep them running when you close the laptop.</p>
+      <div class="cta" id="install">
+        <div class="cmd">
+          <code><span class="p">$ </span><span class="line">curl -fsSL https://bottercode.github.io/corral/install.sh | sh</span></code>
+          <button type="button" class="copy">Copy</button>
+        </div>
+      </div>
+      <p class="meta">macOS and Linux · MIT · then run <code>corral</code> · <a href="https://github.com/bottercode/corral#install">other ways to install</a></p>
+    </div>
+  </section>
 
-  <footer>
-    <a href="https://github.com/bottercode/corral">Source on GitHub</a> ·
-    <a href="https://github.com/bottercode/corral/releases">Releases</a> ·
-    MIT licence
-  </footer>
+  <section class="demo">
+    <div class="wrap">
+      <div class="win" role="img" aria-label="The corral terminal UI: a sidebar of agents grouped by what they need, next to two agents' screens">
+        <div class="chrome"><i></i><i></i><i></i><span class="t">~/src/api — corral</span></div>
+        <div class="scr">
+          <div class="sb" id="sb"></div>
+          <div class="tile main on"><div class="th" id="t1h"></div><div class="tb" id="t1b"></div></div>
+          <div class="tile second"><div class="th" id="t2h"></div><div class="tb" id="t2b"></div></div>
+        </div>
+        <div class="hintbar"><span id="status"></span><span><b>^b</b> ? keys</span></div>
+      </div>
+      <div class="cap"><span class="live">Playing back corral's real layout.</span><span>Click an agent in the sidebar, or answer the blocked one.</span></div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <div class="facts">
+      <div class="fact"><div class="v">10</div><div class="k">agent CLIs recognised on sight</div></div>
+      <div class="fact"><div class="v">4</div><div class="k">agents on screen side by side</div></div>
+      <div class="fact"><div class="v">0</div><div class="k">config files to get started</div></div>
+      <div class="fact"><div class="v">1</div><div class="k">binary for macOS and Linux</div></div>
+    </div>
+  </div>
+
+  <section class="block" id="features">
+    <div class="wrap">
+      <div class="shead">
+        <div>
+          <span class="label"><b>01</b> &nbsp;what it does</span>
+          <h2>Less tab-hunting. <em>More landing.</em></h2>
+        </div>
+        <p>Running several agents breaks down fast: one sits blocked in a tab you aren't looking at, closing the terminal kills the work, and two of them edit the same files. corral fixes all three.</p>
+      </div>
+
+      <article class="feat">
+        <div class="copy">
+          <span class="label">triage</span>
+          <h3>The one that needs you comes first.</h3>
+          <p>The sidebar sorts agents by what they need: blocked and finished on top, then the busy ones, then the quiet ones, each with how long it has waited. Agents you aren't watching ring the bell and send a desktop notification.</p>
+          <a class="more" href="https://github.com/bottercode/corral#quick-start">How the sidebar works →</a>
+        </div>
+        <div class="panel">
+          <div class="ph"><span>sidebar · by need</span><span><span class="h">^b b</span> next blocked</span></div>
+<pre><span class="m bold">NEEDS YOU</span>  <span class="rr">2</span>
+<span class="m">2</span> fixer             <span class="rr bold">◆ blocked 4m</span>
+<span class="m">3</span> docs                 <span class="ss">✓ done 1m</span>
+
+<span class="m bold">WORKING</span>  <span class="cc">1</span>
+<span class="m">1</span> api                       <span class="cc">⠋ 32s</span>
+
+<span class="m bold">QUIET</span>  <span class="m">1</span>
+<span class="m">4</span> tests                      <span class="m">idle</span></pre>
+          <div class="toast"><img src="brand/favicon.svg" alt=""><div>corral<br><small>fixer (p2) needs your input</small></div></div>
+        </div>
+      </article>
+
+      <article class="feat">
+        <div class="copy">
+          <span class="label">worktrees</span>
+          <h3>A branch of its own for every agent.</h3>
+          <p><code>^b w</code> starts an agent in a fresh git worktree, so parallel agents never edit the same checkout or break each other's builds. The sidebar shows each one's branch, its pull request, and how much it has changed.</p>
+          <a class="more" href="https://github.com/bottercode/corral#worktrees">Worktrees in depth →</a>
+        </div>
+        <div class="panel">
+          <div class="ph"><span>~/src/api</span><span>zsh</span></div>
+<pre><span class="m">$</span> corral new --worktree --branch fix/login -- claude
+<span class="m">p5 started in worktree</span> <span class="vv">fix/login</span>
+
+<span class="hl"><span class="h">▍</span><span class="m">5</span> <span class="bold">claude</span>                    <span class="cc">⠋ 2m</span></span>
+<span class="hl"><span class="h">▍</span>   Fix the login redirect</span>
+<span class="hl"><span class="h">▍</span>   <span class="m">api · claude</span></span>
+<span class="hl"><span class="h">▍</span>   <span class="vv">⎇ fix/login</span> <span class="ss">+42</span> <span class="rr">−7</span> <span class="h">#118</span></span></pre>
+        </div>
+      </article>
+
+      <article class="feat">
+        <div class="copy">
+          <span class="label">review</span>
+          <h3>Read the diff. Land it.</h3>
+          <p><code>^b D</code> opens what the agent changed since its branch started, committed work and new files included. Commit it, merge it into the branch it came from, or throw it away, without leaving the terminal.</p>
+          <a class="more" href="https://github.com/bottercode/corral#diff-review">Diff review →</a>
+        </div>
+        <div class="panel">
+          <div class="ph"><span><span class="h bold">diff</span> fixer  <span class="vv">⎇ fix/token-refresh → main</span></span></div>
+<pre><span class="hl"><span class="h">▍</span><span class="h">M</span> src/auth/refresh.rs        <span class="ss">+12</span> <span class="rr">−3</span></span>
+ <span class="ss">A</span> tests/refresh_race.rs      <span class="ss">+31</span> <span class="rr">−0</span>
+
+<span class="m">@@ -41,6 +41,9 @@ impl Refresher {</span>
+<span class="ss">+     let _guard = self.lock.acquire().await;</span>
+<span class="rr">-     if self.expired() {</span>
+<span class="ss">+     if self.expired() &amp;&amp; !self.in_flight() {</span>
+
+<span class="m"> 2 files +43 −3 · 1 commit · 2 uncommitted </span>
+<span class="h">c</span> commit  <span class="h">m</span> merge  <span class="h">x</span> discard  <span class="h">r</span> refresh</pre>
+        </div>
+      </article>
+
+      <article class="feat">
+        <div class="copy">
+          <span class="label">always running</span>
+          <h3>Close the lid. They keep going.</h3>
+          <p>A small background server owns every agent's terminal; the UI just attaches to it. Detach, lose SSH, come back from another machine. If corral itself stops for a reboot or an update, it offers to bring every agent back into its conversation.</p>
+          <a class="more" href="https://github.com/bottercode/corral#after-a-reboot-or-a-stop">Restoring after a stop →</a>
+        </div>
+        <div class="panel">
+          <div class="ph"><span>welcome back</span></div>
+<pre><span class="bold">corral stopped with 3 panes open. Bring them back?</span>
+
+  <span class="bold">fixer</span>   api <span class="vv">⎇</span>    <span class="m">resumes its conversation</span>
+  <span class="bold">api</span>     api       <span class="m">continues its latest conversation</span>
+  zsh     website   <span class="m">shell</span>
+
+ <span class="h">Enter</span> bring them back
+ <span class="h">n</span>     start fresh (worktrees stay on disk)
+ <span class="h">Esc</span>   decide later</pre>
+        </div>
+      </article>
+
+      <article class="feat" id="archive">
+        <div class="copy">
+          <span class="label">archive</span>
+          <h3>Put work away, not out.</h3>
+          <p>Done with an agent for now? <code>^b a</code> archives it: the process ends, but its folder, worktree and conversation are kept, even across restarts. <code>^b A</code> lists them and brings one back where it left off.</p>
+          <a class="more" href="https://github.com/bottercode/corral#archive">Archiving →</a>
+        </div>
+        <div class="panel">
+          <div class="ph"><span>archived</span><span>2</span></div>
+<pre><span class="hl"><span class="h">▍</span> <span class="bold">fixer</span>  api <span class="vv">⎇</span>    <span class="m">2h ago</span>  <span class="m">resumes its conversation</span></span>
+  <span class="bold">docs</span>   website  <span class="m">1d ago</span>  <span class="m">continues its latest conversation</span>
+
+ <span class="h">↑↓</span> pick  <span class="h">Enter</span> bring back  <span class="h">x</span> forget  <span class="h">Esc</span> close</pre>
+        </div>
+      </article>
+
+      <article class="feat">
+        <div class="copy">
+          <span class="label">scriptable</span>
+          <h3>Agents can drive it too.</h3>
+          <p>Everything the UI does is also a command, with <code>--json</code> where it helps. Hand a task to an agent from a script, wait until it needs you, then read its screen. Hooks for Claude and Codex let them report their own state.</p>
+          <a class="more" href="https://github.com/bottercode/corral#scripting">The CLI →</a>
+        </div>
+        <div class="panel">
+          <div class="ph"><span>task.sh</span><span>sh</span></div>
+<pre>p=$(corral new --worktree -- claude)
+corral send "$p" <span class="h">"add input validation"</span> --enter
+corral wait "$p" --state blocked --timeout 600
+corral read "$p" --lines 30
+corral diff "$p" &amp;&amp; corral merge "$p"</pre>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="wrap">
+      <div class="shead">
+        <div>
+          <span class="label"><b>02</b> &nbsp;the difference</span>
+          <h2>Tabs were fine for <em>one</em> agent.</h2>
+        </div>
+      </div>
+      <div class="vs">
+        <div class="no">
+          <h4>Terminal tabs</h4>
+          <ul>
+            <li>An agent asks for permission in a tab you aren't on, and waits twenty minutes.</li>
+            <li>Closing the window or dropping SSH ends every agent.</li>
+            <li>Two agents edit the same checkout and break each other's builds.</li>
+            <li>Reviewing their work means juggling branches by hand.</li>
+          </ul>
+        </div>
+        <div class="yes">
+          <h4>corral</h4>
+          <ul>
+            <li>Blocked agents rise to the top of the sidebar and ring a bell.</li>
+            <li>A background server keeps them running; reattach from anywhere.</li>
+            <li>Each agent can work in its own git worktree and branch.</li>
+            <li>Review, commit and merge each agent's diff in place.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="wrap">
+      <div class="shead">
+        <div>
+          <span class="label"><b>03</b> &nbsp;no wrappers</span>
+          <h2>Your agents, <em>unchanged.</em></h2>
+        </div>
+        <p>corral opens a normal shell. Start an agent the way you always do and corral notices, reads its screen to tell whether it's working, blocked or done, and tracks it.</p>
+      </div>
+      <div class="agents">
+        <span>claude</span><span>codex</span><span>opencode</span><span>gemini</span><span>amp</span><span>cursor-agent</span><span>copilot</span><span>pi</span><span>droid</span><span>grok</span>
+      </div>
+      <p class="agents-note">Anything else runs too, as a plain shell. Optional hooks: <code>corral integrate claude</code>, <code>corral integrate codex</code>.</p>
+    </div>
+  </section>
+
+  <section class="block" id="keys">
+    <div class="wrap">
+      <div class="shead">
+        <div>
+          <span class="label"><b>04</b> &nbsp;the keys</span>
+          <h2>Ctrl-b, then <em>one letter.</em></h2>
+        </div>
+        <p>Everything you type goes to the focused agent. corral's own commands sit behind one prefix, and the mouse works too.</p>
+      </div>
+      <div class="keys">
+        <div><kbd>^b n</kbd> new shell</div>
+        <div><kbd>^b w</kbd> new shell in a worktree</div>
+        <div><kbd>^b b</kbd> jump to the next blocked agent</div>
+        <div><kbd>^b j k</kbd> next / previous agent</div>
+        <div><kbd>^b s</kbd> show another alongside</div>
+        <div><kbd>^b D</kbd> review the diff</div>
+        <div><kbd>^b a</kbd> archive the agent</div>
+        <div><kbd>^b d</kbd> detach, agents keep running</div>
+        <div><kbd>^b ?</kbd> every key</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="final">
+    <img class="mark" src="brand/favicon.svg" alt="">
+    <div class="wrap">
+      <span class="label">get started</span>
+      <h2>Open the gate. <em>Let them run.</em></h2>
+      <p>One command installs corral. Run <code>corral</code> in your project and start an agent the way you normally would.</p>
+      <div class="cta">
+        <div class="cmd">
+          <code><span class="p">$ </span><span class="line">curl -fsSL https://bottercode.github.io/corral/install.sh | sh</span></code>
+          <button type="button" class="copy">Copy</button>
+        </div>
+      </div>
+      <p class="meta">or <code>cargo install --git https://github.com/bottercode/corral</code></p>
+    </div>
+  </section>
 </main>
+
+<footer>
+  <div class="wrap">
+    <img src="brand/favicon.svg" alt="corral">
+    <a href="https://github.com/bottercode/corral#readme">Docs</a>
+    <a href="https://github.com/bottercode/corral/releases">Releases</a>
+    <a href="https://github.com/bottercode/corral">GitHub</a>
+    <span class="sp">v0.1.1 · MIT</span>
+  </div>
+</footer>
+
+<script>
+  // Wherever this page is served from (its own domain, a preview), install
+  // from there: the site serves install.sh next to it.
+  if (location.protocol === 'https:' && location.hostname !== 'bottercode.github.io') {
+    document.querySelectorAll('.line').forEach(function (l) {
+      l.textContent = l.textContent.replace('https://bottercode.github.io/corral/install.sh', location.origin + '/install.sh');
+    });
+  }
+
+  document.querySelectorAll('.copy').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var text = b.parentNode.querySelector('.line').textContent;
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1600); };
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, done); else done();
+    });
+  });
+
+  // The demo: a played-back corral session.
+  var SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+  var agents = [
+    { n: 1, name: 'api', agent: 'claude', ws: 'api', title: 'Add rate limiting', branch: 'corral/api-81c2', diff: [42, 7], state: 'working', age: 32 },
+    { n: 2, name: 'fixer', agent: 'claude', ws: 'api', title: 'Fix token refresh', branch: 'fix/token-refresh', diff: [12, 3], state: 'blocked', age: 240 },
+    { n: 3, name: 'docs', agent: 'codex', ws: 'website', title: 'Update the install guide', branch: 'main', state: 'done', age: 60 },
+    { n: 4, name: 'tests', agent: 'opencode', ws: 'api', title: 'Cover the retry path', branch: 'corral/tests-0d4e', diff: [0, 0], state: 'idle', age: 0 }
+  ];
+  var focus = 2, frame = 0, status = '';
+  function spin() { return '<span class="s">' + SPIN[frame % 10] + '</span> '; }
+  var screens = {
+    api: function (a) {
+      return '<span class="o">⏺</span> Reading src/limits.rs\n  <span class="d">⎿ Read 120 lines</span>\n\n' +
+        '<span class="o">⏺</span> Adding a token bucket per API key\n  <span class="ad">+ let bucket = Bucket::new(rate, burst);</span>\n  <span class="rm">- check_quota(req)?;</span>\n\n' +
+        (a.state === 'working' ? spin() + '<span class="d">Running cargo test…</span>' : '<span class="o">⏺</span> All 48 tests pass. Rate limiting is in place.');
+    },
+    fixer: function (a) {
+      if (a.state === 'blocked') return '<span class="o">⏺</span> I\'ll hold the refresh lock so two requests can\'t race.\n\n' +
+        '  <span class="d">src/auth/refresh.rs</span>\n  <span class="ad">+ let _guard = self.lock.acquire().await;</span>\n\n' +
+        '<span class="q">Do you want to make this edit?</span>\n<span class="s">❯ 1. Yes</span><button type="button" data-yes>answer</button>\n  2. No, tell Claude what to do instead';
+      return '<span class="o">⏺</span> Edited src/auth/refresh.rs\n  <span class="d">⎿ +1 line</span>\n\n' +
+        (a.state === 'working' ? spin() + '<span class="d">Running the auth tests…</span>' : '<span class="o">⏺</span> The refresh race is fixed and covered by a test.');
+    },
+    docs: function () {
+      return '<span class="o">•</span> Updated docs/install.md with the one-line installer.\n<span class="o">•</span> Checked every link: all good.\n\n<span class="d">Done. Anything else?</span>';
+    },
+    tests: function (a) {
+      if (a.state === 'blocked') return '<span class="q">Allow running `cargo test retry`?</span>\n<span class="s">❯ allow once</span>\n  always allow\n  reject';
+      return a.state === 'working' ? spin() + '<span class="d">Writing tests for retry backoff…</span>' : '<span class="d">opencode · waiting for a prompt</span>\n\n<span class="d">&gt;</span> ';
+    }
+  };
+  function esc(s) { return s.replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+  function dur(s) { return s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm' : Math.floor(s / 3600) + 'h'; }
+  function badge(a) {
+    switch (a.state) {
+      case 'working': return '<span class="sw">' + SPIN[frame % 10] + ' ' + dur(a.age) + '</span>';
+      case 'blocked': return '<span class="sbk">◆ blocked ' + dur(a.age) + '</span>';
+      case 'done': return '<span class="sd">✓ done ' + dur(a.age) + '</span>';
+      default: return '<span class="si">idle</span>';
+    }
+  }
+  function byN(n) { return agents[n - 1]; }
+  function second() { return focus === 1 ? 4 : 1; }
+  var groups = [['NEEDS YOU', ['blocked', 'done']], ['WORKING', ['working']], ['QUIET', ['idle']]];
+  function render() {
+    var h = '<div class="r head"><b>corral</b><span style="color:var(--t-muted)">≡ menu  ✕ exit  «</span></div><div class="r rail"><span>⇅ by need</span></div>';
+    groups.forEach(function (g) {
+      var m = agents.filter(function (a) { return g[1].indexOf(a.state) >= 0; })
+        .sort(function (x, y) { return g[1].indexOf(x.state) - g[1].indexOf(y.state); });
+      if (!m.length) return;
+      var color = g[0] === 'NEEDS YOU' ? (m.some(function (a) { return a.state === 'blocked'; }) ? 'var(--rust)' : 'var(--sage)') : g[0] === 'WORKING' ? 'var(--creek)' : 'var(--t-muted)';
+      h += '<div class="r sec">' + g[0] + '  <span style="color:' + color + '">' + m.length + '</span></div>';
+      m.forEach(function (a) {
+        var on = a.n === focus, alt = a.n === second();
+        h += '<div class="r ag' + (on ? ' on' : alt ? ' alt' : '') + '" data-n="' + a.n + '"><span class="n">' + a.n + '</span><span class="nm">' + esc(a.name) + '</span>' + badge(a) + '</div>';
+        if (on) {
+          h += '<div class="r dt t" data-n="' + a.n + '">' + esc(a.title) + '</div>';
+          h += '<div class="r dt" data-n="' + a.n + '">' + esc(a.ws + ' · ' + a.agent) + '</div>';
+          var d = a.diff && a.diff[0] ? ' <span class="sd">+' + a.diff[0] + '</span> <span class="sbk" style="font-weight:400">−' + a.diff[1] + '</span>' : '';
+          h += '<div class="r dt" data-n="' + a.n + '"><span class="g">⎇ ' + esc(a.branch) + '</span>' + d + '</div>';
+        }
+      });
+    });
+    h += '<div class="ft"><span><span class="a">+ new shell</span>   <span class="b">⎇ worktree</span></span><span class="c">✦ top stories</span></div>';
+    document.getElementById('sb').innerHTML = h;
+    [[focus, 't1'], [second(), 't2']].forEach(function (p) {
+      var a = byN(p[0]);
+      document.getElementById(p[1] + 'h').innerHTML = '<span class="nm">' + a.n + ' ' + esc(a.name) + ' <span style="color:var(--t-muted);font-weight:400">· ' + esc(a.title) + '</span></span>' + badge(a);
+      document.getElementById(p[1] + 'b').innerHTML = screens[a.name](a);
+    });
+    document.getElementById('status').textContent = status;
+  }
+  document.getElementById('sb').addEventListener('click', function (e) {
+    var r = e.target.closest('[data-n]');
+    if (!r) return;
+    focus = +r.getAttribute('data-n');
+    var a = byN(focus);
+    if (a.state === 'done') { a.state = 'idle'; a.age = 0; }
+    status = ''; paused = 8; render();
+  });
+  document.querySelector('.scr').addEventListener('click', function (e) {
+    if (!e.target.hasAttribute('data-yes')) return;
+    var a = byN(2); a.state = 'working'; a.age = 0; status = ''; paused = 6; render();
+  });
+  var script = [
+    [5, function () { agents[3].state = 'working'; agents[3].age = 0; }],
+    [11, function () { agents[0].state = 'done'; agents[0].age = 0; status = 'api (p1) is done'; }],
+    [16, function () { status = ''; if (agents[1].state === 'working') { agents[1].state = 'done'; agents[1].age = 0; } }],
+    [21, function () { agents[3].state = 'blocked'; agents[3].age = 0; status = 'tests (p4) needs your input'; }],
+    [30, function () {
+      agents[0].state = 'working'; agents[0].age = 0;
+      agents[1].state = 'blocked'; agents[1].age = 240;
+      agents[2].state = 'done'; agents[2].age = 60;
+      agents[3].state = 'idle'; agents[3].age = 0;
+      focus = 2; status = '';
+    }]
+  ];
+  var t = 0, sub = 0, paused = 0;
+  var still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  render();
+  setInterval(function () {
+    if (!still) frame++;
+    if (++sub % 10 === 0) {
+      agents.forEach(function (a) { if (a.state !== 'idle') a.age++; });
+      if (paused > 0) paused--;
+      else { t = t % 30 + 1; script.forEach(function (s) { if (s[0] === t) s[1](); }); }
+    }
+    render();
+  }, 100);
+</script>
 </body>
 </html>
