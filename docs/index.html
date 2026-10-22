@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>corral: a terminal runtime for coding agents</title>
+<meta name="description" content="Keep Claude Code, Codex and other coding agents running, see which one needs you, and give each its own git worktree.">
+<style>
+  :root {
+    --bg: #1e1b16; --panel: #2d2924; --text: #ece6da; --muted: #8e877c;
+    --faint: #4b463f; --hay: #e3b25b; --rust: #db6b47; --sage: #93b57f;
+    --creek: #6fafb8; --heather: #b79bc9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 ui-monospace, "SF Mono", Menlo, "JetBrains Mono", monospace;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 72px 24px 96px; }
+  h1 { color: var(--hay); font-size: 40px; margin: 0 0 4px; letter-spacing: -1px; }
+  .tag { color: var(--muted); margin: 0 0 40px; }
+  h2 { color: var(--muted); font-size: 13px; letter-spacing: 2px; text-transform: uppercase; margin: 40px 0 12px; }
+  .cmd {
+    display: flex; align-items: center; gap: 12px; background: var(--panel);
+    border: 1px solid var(--faint); border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+  }
+  .cmd code { white-space: nowrap; flex: 1; }
+  .cmd .p { color: var(--muted); user-select: none; }
+  button {
+    font: inherit; font-size: 13px; color: var(--bg); background: var(--hay);
+    border: 0; border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  }
+  .note { color: var(--muted); font-size: 14px; margin-top: 10px; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: 6px 0 6px 22px; position: relative; }
+  li::before { position: absolute; left: 0; }
+  li.b::before { content: "◆"; color: var(--rust); }
+  li.d::before { content: "✓"; color: var(--sage); }
+  li.w::before { content: "⠋"; color: var(--creek); }
+  li.g::before { content: "⎇"; color: var(--heather); }
+  li.s::before { content: "✦"; color: var(--hay); }
+  a { color: var(--hay); }
+  footer { margin-top: 56px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>corral</h1>
+  <p class="tag">A terminal runtime for coding agents.</p>
+
+  <h2>Install</h2>
+  <div class="cmd">
+    <code><span class="p">$ </span><span id="install">curl -fsSL https://bottercode.github.io/corral/install.sh | sh</span></code>
+    <button onclick="navigator.clipboard.writeText(document.getElementById('install').textContent);this.textContent='copied'">copy</button>
+  </div>
+  <p class="note">macOS and Linux. Then run <code>corral</code>.</p>
+
+  <h2>What it does</h2>
+  <ul>
+    <li class="w">Run Claude Code, Codex, opencode and others side by side; they keep running when you close the window or lose SSH.</li>
+    <li class="b">See which agent needs you: blocked and finished agents rise to the top, with a bell when one you aren't watching stops.</li>
+    <li class="g">Give each agent its own git worktree, then review, commit and merge its work without leaving the terminal.</li>
+    <li class="d">After a reboot or an update, bring every agent back into its conversation.</li>
+    <li class="s">Script it all: <code>corral new</code>, <code>send</code>, <code>read</code>, <code>wait</code>, with <code>--json</code>.</li>
+  </ul>
+
+  <footer>
+    <a href="https://github.com/bottercode/corral">Source on GitHub</a> ·
+    <a href="https://github.com/bottercode/corral/releases">Releases</a> ·
+    MIT licence
+  </footer>
+</main>
+</body>
+</html>

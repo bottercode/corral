@@ -51,15 +51,37 @@ UI is a client that attaches and detaches; the agents don't notice.
 
 ## Install
 
-macOS (Apple silicon or Intel) and Linux (x86_64 or ARM):
+On macOS or Linux, run:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bottercode/corral/releases/latest/download/corral-agents-installer.sh | sh
+curl -fsSL https://bottercode.github.io/corral/install.sh | sh
 ```
 
-This puts a `corral` binary in `~/.cargo/bin`. The binaries are also on the
-[releases page](https://github.com/bottercode/corral/releases). Or build it
-from source (Rust 1.88+):
+It downloads the latest release for your machine (Apple silicon or Intel,
+x86_64 or ARM Linux), puts `corral` in `~/.cargo/bin` and adds that to your
+`PATH` if needed. Then run `corral`.
+
+### Download manually
+
+Binaries are on the [releases page](https://github.com/bottercode/corral/releases):
+
+| System | Asset |
+|---|---|
+| macOS Apple silicon | `corral-agents-aarch64-apple-darwin.tar.xz` |
+| macOS Intel | `corral-agents-x86_64-apple-darwin.tar.xz` |
+| Linux x86_64 | `corral-agents-x86_64-unknown-linux-gnu.tar.xz` |
+| Linux aarch64 | `corral-agents-aarch64-unknown-linux-gnu.tar.xz` |
+
+Unpack it and move `corral` somewhere on your `PATH`:
+
+```sh
+tar xf corral-agents-*.tar.xz
+mv corral-agents-*/corral ~/.local/bin/
+```
+
+### From source
+
+With Rust 1.88 or newer:
 
 ```sh
 cargo install --git https://github.com/bottercode/corral
