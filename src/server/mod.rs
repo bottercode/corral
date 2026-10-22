@@ -1369,10 +1369,12 @@ pub async fn run(socket: PathBuf, config: Config) -> Result<()> {
     let h = hub.clone();
     tokio::spawn(async move {
         let mut t = tokio::time::interval(GIT_POLL_EVERY);
-        for n in 0u32.. {
+        let mut n: u32 = 0;
+        loop {
             t.tick().await;
             let h = h.clone();
-            let prs = n % PR_POLL_TICKS == 0;
+            let prs = n.is_multiple_of(PR_POLL_TICKS);
+            n = n.wrapping_add(1);
             let _ = tokio::task::spawn_blocking(move || h.poll_git(prs)).await;
         }
     });
