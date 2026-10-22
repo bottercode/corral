@@ -174,6 +174,8 @@ pub struct Headless {
     pub others: HashMap<String, vt100::Parser>,
     pub size: (u16, u16),
     pub generation: u64,
+    /// The last view generation the server says it applied.
+    pub applied: u64,
     /// Sent with every view: something is drawn over the panes.
     pub covered: bool,
     pub focus: Option<String>,
@@ -204,6 +206,7 @@ impl Headless {
             others: HashMap::new(),
             size: (cols, rows),
             generation: 0,
+            applied: 0,
             covered: false,
             focus: None,
             panes: vec![],
@@ -239,6 +242,10 @@ impl Headless {
             })
             .await
             .unwrap();
+        // Other connections (reports, commands) must see the new view.
+        let generation = self.generation;
+        self.until("view applied", move |c| c.applied >= generation)
+            .await;
     }
 
     /// Show several panes at the given sizes, with the keyboard on `focus`.
@@ -278,8 +285,10 @@ impl Headless {
                 focus,
                 restorable,
                 archived,
+                view_generation,
                 ..
             } => {
+                self.applied = view_generation;
                 self.restorable = restorable;
                 self.archived = archived;
                 self.seen_state = true;
