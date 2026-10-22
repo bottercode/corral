@@ -280,6 +280,10 @@ pub enum Click {
     Exit,
     /// The "⇅ by need" / "⇅ by project" switch.
     Order,
+    /// The "◎ web page" button.
+    Page,
+    /// The "✦ top stories" button.
+    Stories,
     /// The "«" / "»" button that collapses or expands the sidebar.
     Collapse,
 }
@@ -376,10 +380,10 @@ impl Sidebar<'_> {
             }
         }
 
-        // Buttons on the last row, under a rule.
-        let show_buttons = inner.height >= 6;
+        // Buttons on the last two rows, under a rule.
+        let show_buttons = inner.height >= 7;
         let list_rows = if show_buttons {
-            inner.height - 2
+            inner.height - 3
         } else {
             inner.height
         } as usize;
@@ -409,14 +413,14 @@ impl Sidebar<'_> {
             ));
         }
         if show_buttons {
-            let y = inner.y + inner.height - 2;
+            let y = inner.y + inner.height - 3;
             Line::styled(
                 format!(" {}", "─".repeat(width.saturating_sub(2))),
                 t.faint(),
             )
             .render(Rect::new(inner.x, y, inner.width, 1), buf);
             hits.extend(render_buttons(
-                Rect::new(inner.x, y + 1, inner.width, 1),
+                Rect::new(inner.x, y + 1, inner.width, 2),
                 buf,
             ));
         }
@@ -456,8 +460,8 @@ impl Sidebar<'_> {
             }
             rows.extend(section.members.into_iter().map(Some));
         }
-        let show_buttons = inner.height >= 6;
-        let bottom = inner.y + inner.height - if show_buttons { 2 } else { 0 };
+        let show_buttons = inner.height >= 7;
+        let bottom = inner.y + inner.height - if show_buttons { 3 } else { 0 };
         for (i, p) in rows.into_iter().enumerate() {
             let y = inner.y + 2 + i as u16;
             if y >= bottom {
@@ -502,18 +506,18 @@ impl Sidebar<'_> {
         }
 
         if show_buttons {
-            let y = inner.y + inner.height - 2;
+            let y = inner.y + inner.height - 3;
             rule().render(Rect::new(inner.x, y, inner.width, 1), buf);
-            let mut button = |x: u16, label: &str, style: Style, worktree| {
-                let area = Rect::new(inner.x + x, y + 1, 1, 1);
+            let mut button = |x: u16, dy: u16, label: &str, style: Style, click: Click| {
+                let area = Rect::new(inner.x + x, y + dy, 1, 1);
                 Line::styled(label.to_string(), style).render(area, buf);
-                hits.push(Hit {
-                    area,
-                    click: Click::New { worktree },
-                });
+                hits.push(Hit { area, click });
             };
-            button(2, "+", t.accent().add_modifier(Modifier::BOLD), false);
-            button(4, "⎇", t.fg(t.git), true);
+            let new = t.accent().add_modifier(Modifier::BOLD);
+            button(2, 1, "+", new, Click::New { worktree: false });
+            button(4, 1, "⎇", t.fg(t.git), Click::New { worktree: true });
+            button(2, 2, "◎", t.fg(t.working), Click::Page);
+            button(4, 2, "✦", t.fg(t.done), Click::Stories);
         }
         hits
     }
@@ -660,32 +664,52 @@ fn render_order_switch(row: Rect, order: Order, buf: &mut Buffer) -> Hit {
     }
 }
 
-/// `+ new shell   ⎇ worktree`, shortened when the sidebar is narrow.
-fn render_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
+/// Two rows of buttons, in two columns:
+/// `+ new shell   ⎇ worktree` and `◎ web page    ✦ top stories`,
+/// shortened when the sidebar is narrow.
+fn render_buttons(area: Rect, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
-    let (new, wt) = if row.width >= 24 {
-        ("+ new shell", "⎇ worktree")
-    } else {
-        ("+ new", "⎇ wt")
-    };
-    let buttons = [
-        (new, t.accent().add_modifier(Modifier::BOLD), false),
-        (wt, t.fg(t.git), true),
+    let wide = area.width >= 28;
+    let pick = |long: &'static str, short: &'static str| if wide { long } else { short };
+    let rows = [
+        [
+            (
+                pick("+ new shell", "+ new"),
+                t.accent().add_modifier(Modifier::BOLD),
+                Click::New { worktree: false },
+            ),
+            (
+                pick("⎇ worktree", "⎇ wt"),
+                t.fg(t.git),
+                Click::New { worktree: true },
+            ),
+        ],
+        [
+            (pick("◎ web page", "◎ web"), t.fg(t.working), Click::Page),
+            (
+                pick("✦ top stories", "✦ news"),
+                t.fg(t.done),
+                Click::Stories,
+            ),
+        ],
     ];
+    let first_w = rows.iter().map(|r| r[0].0.width()).max().unwrap_or(0) as u16;
+    let columns = [area.x + 1, area.x + 1 + first_w + 3];
     let mut hits = Vec::new();
-    let mut x = row.x + 1;
-    for (label, style, worktree) in buttons {
-        let w = label.width() as u16;
-        if x + w > row.x + row.width {
+    for (dy, row) in rows.into_iter().enumerate() {
+        let y = area.y + dy as u16;
+        if y >= area.y + area.height {
             break;
         }
-        let area = Rect::new(x, row.y, w, 1);
-        Line::styled(label, style).render(area, buf);
-        hits.push(Hit {
-            area,
-            click: Click::New { worktree },
-        });
-        x += w + 3;
+        for ((label, style, click), x) in row.into_iter().zip(columns) {
+            let w = label.width() as u16;
+            if x + w > area.x + area.width {
+                break;
+            }
+            let r = Rect::new(x, y, w, 1);
+            Line::styled(label, style).render(r, buf);
+            hits.push(Hit { area: r, click });
+        }
     }
     hits
 }
@@ -830,6 +854,8 @@ mod tests {
                 Click::Order,
                 Click::New { worktree: false },
                 Click::New { worktree: true },
+                Click::Page,
+                Click::Stories,
             ]
         );
         // Menu, exit and collapse on the title row, the order switch on the
@@ -839,8 +865,11 @@ mod tests {
         assert!(hits[8].area.x + hits[8].area.width < hits[9].area.x);
         assert!(hits[9].area.x + hits[9].area.width < hits[10].area.x);
         let (a, b) = (hits[12].area, hits[13].area);
-        assert_eq!((a.y, b.y), (21, 21));
+        assert_eq!((a.y, b.y), (20, 20));
         assert!(a.x + a.width < b.x);
+        // The page and stories buttons under them, in the same columns.
+        let (c, d) = (hits[14].area, hits[15].area);
+        assert_eq!((c.y, d.y, c.x, d.x), (21, 21, a.x, b.x));
     }
 
     #[test]
@@ -855,7 +884,7 @@ mod tests {
         insta::assert_snapshot!(text);
         // Only the buttons are clickable (no order switch with no agents).
         assert!(hits.iter().all(|h| !matches!(h.click, Click::Focus(_))));
-        assert_eq!(hits.len(), 5);
+        assert_eq!(hits.len(), 7);
     }
 
     #[test]
@@ -884,6 +913,8 @@ mod tests {
                 f("p4"),
                 Click::New { worktree: false },
                 Click::New { worktree: true },
+                Click::Page,
+                Click::Stories,
             ]
         );
         // A blank row between groups.

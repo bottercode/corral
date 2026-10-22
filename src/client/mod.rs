@@ -1285,6 +1285,8 @@ impl App {
                     Some(sidebar::Click::Menu) => self.open_menu(),
                     Some(sidebar::Click::Exit) => self.mode = Mode::Quit,
                     Some(sidebar::Click::Order) => self.toggle_order(),
+                    Some(sidebar::Click::Page) => self.open_address(),
+                    Some(sidebar::Click::Stories) => self.open_stories(),
                     Some(sidebar::Click::Collapse) => self.toggle_sidebar(),
                     None => {}
                 }
@@ -2407,6 +2409,27 @@ mod tests {
             restorable: a.restorable.clone(),
         });
         assert!(matches!(a.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn page_and_stories_buttons() {
+        let mut a = app();
+        let button = |x, click| sidebar::Hit {
+            area: Rect::new(x, 38, 10, 1),
+            click,
+        };
+        a.hits = vec![
+            button(1, sidebar::Click::Page),
+            button(15, sidebar::Click::Stories),
+        ];
+        a.on_stdin(b"\x1b[<0;3;39M");
+        assert!(matches!(a.mode, Mode::Address(_)));
+        a.on_stdin(b"\x1b");
+        a.on_stdin(b"\x1b[<0;17;39M");
+        assert!(matches!(a.mode, Mode::Stories));
+        // From the stories page, the page button asks for an address.
+        a.on_stdin(b"\x1b[<0;3;39M");
+        assert!(matches!(a.mode, Mode::Address(_)));
     }
 
     #[test]

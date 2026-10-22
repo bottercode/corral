@@ -100,7 +100,8 @@ Everything you type goes to the focused agent. corral's own commands are
 
 Click an agent on screen to type into it, or a sidebar row to bring that agent
 into the focused spot. The **+ new shell** / **⎇ worktree** buttons at the
-bottom of the sidebar open one. At the top:
+bottom of the sidebar open one; **◎ web page** and **✦ top stories** under
+them open a page next to your agents and the news. At the top:
 
 - **≡ menu** (or `^b m`) changes the theme, the sidebar's order and
   notifications, and installs agent hooks. Changes are saved to your config.
@@ -148,7 +149,7 @@ update), the next `corral` offers to bring your panes back:
 
 ### Top stories
 
-While your agents work, `^b t` (or **top stories** in the menu) shows the
+While your agents work, `^b t` (or **✦ top stories** in the sidebar) shows the
 front pages of Hacker News and lobste.rs in place of the agents, with the
 sidebar still beside it:
 
@@ -178,7 +179,7 @@ sidebar still beside it:
 
 ### Web pages
 
-`^b u` opens a real web page in a tile next to your agents: the app an agent
+`^b u` (or **◎ web page** in the sidebar) opens a real web page in a tile next to your agents: the app an agent
 is building on `localhost:3000`, the docs it should read, a story from
 `^b t`. Type an address, `localhost:3000`, or words to search.
 
