@@ -344,6 +344,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             collapsed: app.sidebar_collapsed,
             frame: app.frame,
             age_offset: app.state_at.elapsed(),
+            archived: app.archived.len(),
         }
         .render(areas.sidebar, f.buffer_mut());
     } else {
@@ -376,6 +377,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Normal | Mode::Scroll { .. } | Mode::Diff(_) | Mode::Stories => {}
         Mode::Quit => draw_quit(f, app.running_agents(), areas.pane),
         Mode::Restore => draw_restore(f, app, areas.pane),
+        Mode::Archive { selected } => {
+            let selected = *selected;
+            draw_archive(f, app, selected, areas.pane);
+        }
         Mode::Help => draw_help(f, app, areas.pane),
         Mode::Worktree(d) => {
             let d = d.clone();
@@ -586,6 +591,7 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
             ("o", "only"),
             ("D", "diff"),
             ("x", "close"),
+            ("a", "archive"),
             ("r", "rename"),
             ("q", "quit"),
             ("?", "help"),
@@ -641,6 +647,8 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
                     "review the agent's worktree diff (commit, merge, discard)",
                 ),
                 ("x", "close the agent"),
+                ("a", "archive the agent: end it, keep it to bring back"),
+                ("A", "archived agents: bring one back, or forget it"),
                 ("r", "rename the agent"),
             ],
         ),
@@ -946,6 +954,105 @@ fn draw_restore(f: &mut Frame, app: &App, area: Rect) {
     let r = centered(area, width, text.len() as u16 + 2);
     f.render_widget(Clear, r);
     f.render_widget(Paragraph::new(text).block(dialog_block("welcome back")), r);
+}
+
+/// The archived panes: pick one to bring back.
+fn draw_archive(f: &mut Frame, app: &mut App, selected: usize, area: Rect) {
+    let t = theme::get();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let name_w = app
+        .archived
+        .iter()
+        .map(|a| a.pane.name.width())
+        .max()
+        .unwrap_or(0)
+        .min(16);
+    let place_w = app
+        .archived
+        .iter()
+        .map(|a| a.pane.workspace.width() + if a.pane.worktree { 2 } else { 0 })
+        .max()
+        .unwrap_or(0)
+        .min(20);
+    let rows: Vec<Line> = app
+        .archived
+        .iter()
+        .map(|a| {
+            let r = &a.pane;
+            let name = truncate(&r.name, name_w);
+            let place = truncate(
+                &r.workspace,
+                place_w.saturating_sub(if r.worktree { 2 } else { 0 }),
+            );
+            let place_pad = place_w.saturating_sub(place.width() + if r.worktree { 2 } else { 0 });
+            let ago = super::sidebar::short_duration(std::time::Duration::from_millis(
+                now.saturating_sub(a.id),
+            ));
+            let mut spans = vec![
+                Span::styled(
+                    format!(
+                        " {name}{}  ",
+                        " ".repeat(name_w.saturating_sub(name.width()))
+                    ),
+                    if r.agent.is_some() {
+                        t.bold()
+                    } else {
+                        Style::new().fg(t.text)
+                    },
+                ),
+                Span::styled(place, t.muted()),
+            ];
+            if r.worktree {
+                spans.push(Span::styled(" ⎇", t.fg(t.git)));
+            }
+            spans.push(Span::raw(" ".repeat(place_pad + 2)));
+            spans.push(Span::styled(format!("{ago:>4} ago  "), t.faint()));
+            spans.push(Span::styled(r.how.clone(), t.muted()));
+            Line::from(spans)
+        })
+        .collect();
+    let hint = key_hint(&[
+        ("↑↓", "pick"),
+        ("Enter", "bring back"),
+        ("x", "forget (worktree stays)"),
+        ("Esc", "close"),
+    ]);
+    let width = (rows
+        .iter()
+        .map(Line::width)
+        .max()
+        .unwrap_or(0)
+        .max(hint.width()) as u16
+        + 4)
+    .min(area.width.saturating_sub(2));
+    let height = (rows.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let r = centered(area, width, height);
+    f.render_widget(Clear, r);
+    let block = dialog_block("archived");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    // The list scrolls to keep the selection in view.
+    let list_h = inner.height.saturating_sub(2) as usize;
+    let first = selected.saturating_sub(list_h.saturating_sub(1));
+    app.archive_hits.clear();
+    for (i, line) in rows.into_iter().enumerate().skip(first).take(list_h) {
+        let row = Rect::new(inner.x, inner.y + (i - first) as u16, inner.width, 1);
+        let sel = i == selected;
+        if sel {
+            f.buffer_mut().set_style(row, t.selected());
+        }
+        let mut spans = vec![Span::styled(if sel { "▍" } else { " " }, t.accent())];
+        spans.extend(line.spans);
+        f.render_widget(Line::from(spans), row);
+        app.archive_hits.push((row, i));
+    }
+    let hint_y = inner.y + inner.height.saturating_sub(1);
+    f.render_widget(
+        hint,
+        Rect::new(inner.x + 1, hint_y, inner.width.saturating_sub(1), 1),
+    );
 }
 
 fn draw_quit(f: &mut Frame, running: usize, area: Rect) {

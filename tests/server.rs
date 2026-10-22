@@ -334,6 +334,71 @@ async fn panes_come_back_after_a_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn archived_panes_keep_through_a_restart_and_come_back() {
+    let mut server = TestServer::unstarted("");
+    let env = fake_agents(&server);
+    server.spawn(&env);
+    let a = server.dir.path().join("a");
+    std::fs::create_dir_all(&a).unwrap();
+    let mut conn = server.conn().await;
+    let p = new_pane(
+        &mut conn,
+        vec!["claude".into(), "--model".into(), "haiku".into()],
+        &a,
+    )
+    .await;
+    // Once corral has seen claude in it.
+    wait_for_record(&server, "--model");
+
+    let r = conn.request(Command::Archive { pane: p.id }).await.unwrap();
+    assert_eq!(r, Reply::Text("archived claude".into()));
+    assert!(server.panes().is_empty());
+    let mut c = Headless::attach(&server, 80, 24).await;
+    c.until("archived", |c| c.archived.len() == 1).await;
+    assert_eq!(c.archived[0].pane.agent.as_deref(), Some("claude"));
+    assert_eq!(c.archived[0].pane.how, "continues its latest conversation");
+    drop(c);
+
+    // A restart keeps it archived, not something to restore.
+    server.stop();
+    server.spawn(&env);
+    let mut c = Headless::attach(&server, 80, 24).await;
+    c.until("archived", |c| c.seen_state && c.archived.len() == 1)
+        .await;
+    assert!(c.restorable.is_empty());
+
+    let mut conn = server.conn().await;
+    let id = c.archived[0].id;
+    let pane = match conn.request(Command::Unarchive { id }).await.unwrap() {
+        Reply::Created { pane, .. } => pane,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(pane.cwd, a.canonicalize().unwrap());
+    c.until("unarchived", |c| c.archived.is_empty()).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let out = server.ok(&["read", &pane.id]);
+        if out.contains("claude started: --model haiku --continue") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "claude screen: {out}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Archive again and forget it: gone for good.
+    conn.request(Command::Archive { pane: pane.id })
+        .await
+        .unwrap();
+    c.until("archived", |c| c.archived.len() == 1).await;
+    let id = c.archived[0].id;
+    let r = conn.request(Command::ForgetArchived { id }).await.unwrap();
+    assert_eq!(r, Reply::Text("forgot claude".into()));
+    c.until("forgotten", |c| c.archived.is_empty()).await;
+    let r = conn.request(Command::Unarchive { id }).await;
+    assert!(r.unwrap_err().to_string().contains("nothing archived"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn starting_fresh_lets_the_old_panes_go() {
     let mut server = TestServer::unstarted("");
     let env = fake_agents(&server);

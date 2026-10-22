@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use corral::client::conn::Conn;
 use corral::protocol::{
-    ClientMsg, Command as Cmd, NewPane, PaneInfo, Reply, Restorable, ServerMsg, Viewport,
+    ArchivedPane, ClientMsg, Command as Cmd, NewPane, PaneInfo, Reply, Restorable, ServerMsg,
+    Viewport,
 };
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_corral");
@@ -179,6 +180,8 @@ pub struct Headless {
     pub panes: Vec<PaneInfo>,
     /// Panes the server could bring back.
     pub restorable: Vec<Restorable>,
+    /// Panes put away with `Archive`.
+    pub archived: Vec<ArchivedPane>,
     pub seen_state: bool,
     pub notes: Vec<String>,
     pub last_screen: Option<Vec<u8>>,
@@ -205,6 +208,7 @@ impl Headless {
             focus: None,
             panes: vec![],
             restorable: vec![],
+            archived: vec![],
             seen_state: false,
             notes: vec![],
             last_screen: None,
@@ -273,9 +277,11 @@ impl Headless {
                 panes,
                 focus,
                 restorable,
+                archived,
                 ..
             } => {
                 self.restorable = restorable;
+                self.archived = archived;
                 self.seen_state = true;
                 self.panes = panes;
                 if focus.is_some() && self.parser_pane != focus {

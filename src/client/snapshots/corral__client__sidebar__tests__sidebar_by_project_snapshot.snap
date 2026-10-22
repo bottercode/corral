@@ -7,7 +7,7 @@ expression: text
  corral  2                     │
 ▍1 claude         ◆ blocked 4m │
 ▍  Fix token refresh           │
-▍  claude                      │
+▍  claude            ↓ archive │
 ▍  ⎇ corral/claude-3f9a +42 −7 │
  3 a-very-long-agen… ✓ done 4m │
                                │

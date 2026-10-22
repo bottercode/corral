@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::detect::agents::program_index;
 use crate::paths;
-use crate::protocol::Restorable;
+use crate::protocol::{ArchivedPane, Restorable};
 
 const RECORD_VERSION: u32 = 1;
 
@@ -22,6 +22,32 @@ const RECORD_VERSION: u32 = 1;
 pub struct Record {
     pub version: u32,
     pub panes: Vec<Saved>,
+    /// Panes put away by hand, newest first: they stay until brought back
+    /// or forgotten, whatever happens to the server.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived: Vec<Archived>,
+}
+
+/// An archived pane.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Archived {
+    /// When it was archived, in Unix milliseconds; unique, so it names the
+    /// pane in commands too.
+    pub id: u64,
+    #[serde(flatten)]
+    pub pane: Saved,
+}
+
+impl Archived {
+    /// What a client is shown. `alone`: no other agent of its kind runs in
+    /// its folder.
+    pub fn summary(&self, alone: bool) -> ArchivedPane {
+        let how = self.pane.agent.as_ref().map(|a| resume_with(a, alone));
+        ArchivedPane {
+            id: self.id,
+            pane: describe(&self.pane, how),
+        }
+    }
 }
 
 /// One pane, as much as it takes to bring it back.
@@ -96,10 +122,11 @@ pub fn save(path: &Path, record: &Record) -> Result<()> {
 }
 
 impl Record {
-    pub fn new(panes: Vec<Saved>) -> Record {
+    pub fn new(panes: Vec<Saved>, archived: Vec<Archived>) -> Record {
         Record {
             version: RECORD_VERSION,
             panes,
+            archived,
         }
     }
 
@@ -107,9 +134,6 @@ impl Record {
     /// latest in its folder if it was alone there, else the agent's picker.
     pub fn resume_for(&self, i: usize) -> Option<Resume> {
         let agent = self.panes[i].agent.as_ref()?;
-        if let Some(id) = &agent.session {
-            return Some(Resume::Session(id.clone()));
-        }
         let alone = self
             .panes
             .iter()
@@ -117,34 +141,46 @@ impl Record {
             .filter(|p| p.agent.as_ref().is_some_and(|a| a.name == agent.name))
             .count()
             == 1;
-        Some(if alone { Resume::Latest } else { Resume::Pick })
+        Some(resume_with(agent, alone))
     }
 
     /// What a client is shown before deciding.
     pub fn summary(&self) -> Vec<Restorable> {
         (0..self.panes.len())
-            .map(|i| {
-                let p = &self.panes[i];
-                let how = match (&p.agent, self.resume_for(i)) {
-                    (Some(a), Some(r)) => match resume_argv(a, &r) {
-                        Some(_) => match r {
-                            Resume::Session(_) => "resumes its conversation",
-                            Resume::Latest => "continues its latest conversation",
-                            Resume::Pick => "asks which conversation",
-                        },
-                        None => "starts again",
-                    },
-                    _ => "shell",
-                };
-                Restorable {
-                    name: p.name.clone(),
-                    workspace: p.workspace.clone(),
-                    agent: p.agent.as_ref().map(|a| a.name.clone()),
-                    how: how.into(),
-                    worktree: p.worktree.is_some(),
-                }
-            })
+            .map(|i| describe(&self.panes[i], self.resume_for(i)))
             .collect()
+    }
+}
+
+/// How `agent` picks up its conversation: its session if known, else the
+/// latest in its folder if it was `alone` there, else the agent's picker.
+pub fn resume_with(agent: &SavedAgent, alone: bool) -> Resume {
+    match &agent.session {
+        Some(id) => Resume::Session(id.clone()),
+        None if alone => Resume::Latest,
+        None => Resume::Pick,
+    }
+}
+
+/// A pane as a client lists it, coming back the way `how` says.
+fn describe(p: &Saved, how: Option<Resume>) -> Restorable {
+    let how = match (&p.agent, how) {
+        (Some(a), Some(r)) => match resume_argv(a, &r) {
+            Some(_) => match r {
+                Resume::Session(_) => "resumes its conversation",
+                Resume::Latest => "continues its latest conversation",
+                Resume::Pick => "asks which conversation",
+            },
+            None => "starts again",
+        },
+        _ => "shell",
+    };
+    Restorable {
+        name: p.name.clone(),
+        workspace: p.workspace.clone(),
+        agent: p.agent.as_ref().map(|a| a.name.clone()),
+        how: how.into(),
+        worktree: p.worktree.is_some(),
     }
 }
 
@@ -500,13 +536,16 @@ mod tests {
     fn resume_picks_the_session_then_the_folder() {
         let mut known = agent("claude", &["claude"]);
         known.session = Some("s1".into());
-        let r = Record::new(vec![
-            saved("/a", Some(known)),
-            saved("/a", Some(agent("claude", &["claude"]))),
-            saved("/a", Some(agent("claude", &["claude"]))),
-            saved("/b", Some(agent("claude", &["claude"]))),
-            saved("/b", None),
-        ]);
+        let r = Record::new(
+            vec![
+                saved("/a", Some(known)),
+                saved("/a", Some(agent("claude", &["claude"]))),
+                saved("/a", Some(agent("claude", &["claude"]))),
+                saved("/b", Some(agent("claude", &["claude"]))),
+                saved("/b", None),
+            ],
+            vec![],
+        );
         assert_eq!(r.resume_for(0), Some(Resume::Session("s1".into())));
         // Three claudes in /a: no telling the other two apart.
         assert_eq!(r.resume_for(1), Some(Resume::Pick));
@@ -526,13 +565,43 @@ mod tests {
     }
 
     #[test]
+    fn archived_panes_resume_by_session_then_folder() {
+        let mut a = Archived {
+            id: 1,
+            pane: saved("/a", Some(agent("claude", &["claude"]))),
+        };
+        assert_eq!(
+            a.summary(true).pane.how,
+            "continues its latest conversation"
+        );
+        assert_eq!(a.summary(false).pane.how, "asks which conversation");
+        a.pane.agent.as_mut().unwrap().session = Some("s1".into());
+        assert_eq!(a.summary(false).pane.how, "resumes its conversation");
+        a.pane.agent = None;
+        assert_eq!(a.summary(true).pane.how, "shell");
+    }
+
+    #[test]
     fn records_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("sessions/default-1.json");
         assert_eq!(load(&path).unwrap(), None);
-        let r = Record::new(vec![saved("/a", Some(agent("codex", &["codex"])))]);
+        let r = Record::new(vec![saved("/a", Some(agent("codex", &["codex"])))], vec![]);
         save(&path, &r).unwrap();
         assert_eq!(load(&path).unwrap(), Some(r));
+        // Archived panes come back too; records from before archiving read
+        // as having none.
+        let r = Record::new(
+            vec![],
+            vec![Archived {
+                id: 1_700_000_000_000,
+                pane: saved("/b", Some(agent("claude", &["claude"]))),
+            }],
+        );
+        save(&path, &r).unwrap();
+        assert_eq!(load(&path).unwrap(), Some(r));
+        std::fs::write(&path, r#"{"version":1,"panes":[]}"#).unwrap();
+        assert_eq!(load(&path).unwrap(), Some(Record::new(vec![], vec![])));
         // A record from another version is ignored, not misread.
         std::fs::write(&path, r#"{"version":99,"panes":[]}"#).unwrap();
         assert_eq!(load(&path).unwrap(), None);

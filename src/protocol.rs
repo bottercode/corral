@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Largest frame either side will accept (scrollback snapshots can be large).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -220,6 +220,19 @@ pub enum Command {
     Restore {
         discard: bool,
     },
+    /// End the pane's process but keep what it takes to bring it back
+    /// (its folder, worktree and agent conversation).
+    Archive {
+        pane: PaneId,
+    },
+    /// Bring an archived pane back as a new pane.
+    Unarchive {
+        id: u64,
+    },
+    /// Drop an archived pane (its worktree stays on disk).
+    ForgetArchived {
+        id: u64,
+    },
     WorktreeList,
     WorktreeRemove {
         target: String,
@@ -276,6 +289,14 @@ pub struct Restorable {
     /// "resumes its conversation", "shell", …
     pub how: String,
     pub worktree: bool,
+}
+
+/// A pane put away with `Command::Archive`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedPane {
+    /// When it was archived, in Unix milliseconds; names it in commands.
+    pub id: u64,
+    pub pane: Restorable,
 }
 
 /// One pane in a client's layout, at the size it's drawn.
@@ -343,6 +364,9 @@ pub enum ServerMsg {
         /// to bring them back (`Command::Restore`) or let them go.
         #[serde(default)]
         restorable: Vec<Restorable>,
+        /// Archived panes, newest first.
+        #[serde(default)]
+        archived: Vec<ArchivedPane>,
     },
     /// A full redraw of a pane: scrollback history, screen contents and
     /// terminal modes. `seq` is the last output chunk it includes.
@@ -585,6 +609,7 @@ mod tests {
                 how: "resumes its conversation".into(),
                 worktree: true,
             }],
+            archived: vec![],
         });
         roundtrip(ServerMsg::Screen {
             pane: "p1".into(),

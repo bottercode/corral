@@ -31,8 +31,8 @@ use crate::config::{Config, prefix_label};
 use crate::integrate::{self, Agent, HookStatus};
 use crate::paths;
 use crate::protocol::{
-    self, AgentState, ClientMsg, Command, NewPane, PaneId, PaneInfo, Reply, Restorable, ServerMsg,
-    Viewport, WorktreeAction,
+    self, AgentState, ArchivedPane, ClientMsg, Command, NewPane, PaneId, PaneInfo, Reply,
+    Restorable, ServerMsg, Viewport, WorktreeAction,
 };
 use conn::Conn;
 use diff::DiffView;
@@ -101,6 +101,10 @@ pub enum Mode {
     Quit,
     /// Bring back the panes from before corral stopped?
     Restore,
+    /// Archived panes, with the selected row.
+    Archive {
+        selected: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -109,6 +113,8 @@ enum Pending {
     Kill { pane: PaneId },
     Diff { pane: PaneId },
     Restore { discard: bool },
+    Archive,
+    Unarchive,
     DiffAction { pane: PaneId },
     Other,
 }
@@ -140,6 +146,10 @@ pub struct App {
     pub restorable: Vec<Restorable>,
     /// "Later" was picked: don't ask again this time.
     restore_later: bool,
+    /// Panes put away with `^b a`, newest first.
+    pub archived: Vec<ArchivedPane>,
+    /// Where the archive list's rows were drawn, for clicks.
+    pub archive_hits: Vec<(Rect, usize)>,
     pub mode: Mode,
     status: Option<(String, Instant, bool)>,
     pub prefix_label: String,
@@ -201,6 +211,8 @@ impl App {
             sent_view: None,
             restorable: Vec::new(),
             restore_later: false,
+            archived: Vec::new(),
+            archive_hits: Vec::new(),
             mode: Mode::Normal,
             status: None,
             prefix_label: prefix_label(prefix),
@@ -677,6 +689,20 @@ impl App {
                 None => self.mode = Mode::Normal,
             }
         }
+        // A row of the archive brings that pane back.
+        if let Mode::Archive { .. } = self.mode {
+            match self
+                .archive_hits
+                .iter()
+                .find(|(r, _)| r.contains((m.x, m.y).into()))
+            {
+                Some(&(_, i)) => {
+                    self.mode = Mode::Normal;
+                    self.unarchive(i);
+                }
+                None => self.mode = Mode::Normal,
+            }
+        }
     }
 
     fn decide_restore(&mut self, discard: bool) {
@@ -798,6 +824,64 @@ impl App {
         };
     }
 
+    /// `^b a`: put the focused agent away, to bring back later.
+    fn archive(&mut self, pane: PaneId) {
+        self.request(Command::Archive { pane }, Pending::Archive);
+    }
+
+    /// `^b A`: the archived panes.
+    fn open_archive(&mut self) {
+        if self.archived.is_empty() {
+            self.set_status(
+                format!(
+                    "nothing archived; {} a archives the focused agent",
+                    self.prefix_label
+                ),
+                false,
+            );
+            return;
+        }
+        self.mode = Mode::Archive { selected: 0 };
+    }
+
+    fn unarchive(&mut self, selected: usize) {
+        if let Some(a) = self.archived.get(selected) {
+            self.request(Command::Unarchive { id: a.id }, Pending::Unarchive);
+        }
+    }
+
+    fn archive_key(&mut self, selected: usize, key: Key) {
+        let n = self.archived.len();
+        if n == 0 {
+            return;
+        }
+        let selected = selected.min(n - 1);
+        match key {
+            Key::Esc | Key::Ctrl('c') | Key::Char('q') => {}
+            Key::Up | Key::Char('k') | Key::BackTab => {
+                self.mode = Mode::Archive {
+                    selected: (selected + n - 1) % n,
+                }
+            }
+            Key::Down | Key::Char('j') | Key::Tab => {
+                self.mode = Mode::Archive {
+                    selected: (selected + 1) % n,
+                }
+            }
+            Key::Enter | Key::Char(' ') => self.unarchive(selected),
+            Key::Char('x') | Key::Delete | Key::Backspace => {
+                let id = self.archived[selected].id;
+                self.request(Command::ForgetArchived { id }, Pending::Other);
+                // Stays open on the next one; the state update closes it
+                // when that was the last.
+                self.mode = Mode::Archive {
+                    selected: selected.min(n.saturating_sub(2)),
+                };
+            }
+            _ => self.mode = Mode::Archive { selected },
+        }
+    }
+
     fn kill(&mut self, pane: PaneId, worktree: WorktreeAction, force: bool) {
         self.request(
             Command::Kill {
@@ -889,6 +973,13 @@ impl App {
             Key::Char('h') | Key::Left | Key::BackTab => self.cycle_tile(-1),
             Key::Char('l') | Key::Right | Key::Tab => self.cycle_tile(1),
             Key::Char('x') => self.open_close(),
+            Key::Char('a') => {
+                if let Some(p) = self.focused() {
+                    let id = p.id.clone();
+                    self.archive(id);
+                }
+            }
+            Key::Char('A') => self.open_archive(),
             Key::Char('r') => {
                 if let Some(p) = self.focused() {
                     self.mode = Mode::Rename {
@@ -1020,6 +1111,8 @@ impl App {
                     Some(sidebar::Click::Order) => self.toggle_order(),
                     Some(sidebar::Click::Stories) => self.open_stories(),
                     Some(sidebar::Click::Collapse) => self.toggle_sidebar(),
+                    Some(sidebar::Click::Archive(id)) => self.archive(id),
+                    Some(sidebar::Click::Archived) => self.open_archive(),
                     None => {}
                 }
             }
@@ -1057,6 +1150,7 @@ impl App {
                 None => self.mode = Mode::Worktree(d),
             },
             Mode::Menu { selected } => self.menu_key(selected, key),
+            Mode::Archive { selected } => self.archive_key(selected, key),
             Mode::Restore => match key {
                 Key::Enter | Key::Char('y' | 'Y' | 'r') => self.decide_restore(false),
                 Key::Char('n' | 'N' | 'f') => self.decide_restore(true),
@@ -1242,8 +1336,16 @@ impl App {
                 focus,
                 view_generation,
                 restorable,
+                archived,
             } => {
                 self.restorable = restorable;
+                self.archived = archived;
+                if let Mode::Archive { selected } = &mut self.mode {
+                    match self.archived.len() {
+                        0 => self.mode = Mode::Normal,
+                        n => *selected = (*selected).min(n - 1),
+                    }
+                }
                 if self.restorable.is_empty() {
                     // Decided (here or by another client).
                     if matches!(self.mode, Mode::Restore) {
@@ -1326,6 +1428,19 @@ impl App {
                 }
             }
             (Pending::Restore { .. }, Err(e)) => self.set_status(e, true),
+            (Pending::Archive, Ok(Reply::Text(t))) => self.set_status(
+                format!("{t} · {} A brings it back", self.prefix_label),
+                false,
+            ),
+            (Pending::Unarchive, Ok(Reply::Created { pane, warning })) => {
+                if matches!(self.mode, Mode::Archive { .. }) {
+                    self.mode = Mode::Normal;
+                }
+                match warning {
+                    Some(w) => self.set_status(w, true),
+                    None => self.set_status(format!("brought back {}", pane.name), false),
+                }
+            }
             (Pending::New, Ok(Reply::Created { pane, warning })) => match warning {
                 Some(w) => self.set_status(w, true),
                 None => match &pane.worktree {
@@ -1630,6 +1745,7 @@ mod tests {
             focus: Some("p1".into()),
             view_generation: 0,
             restorable: vec![],
+            archived: vec![],
         });
         a.on_server(ServerMsg::Screen {
             pane: "p1".into(),
@@ -1795,6 +1911,85 @@ mod tests {
         ));
     }
 
+    fn archived(id: u64, name: &str) -> ArchivedPane {
+        ArchivedPane {
+            id,
+            pane: Restorable {
+                name: name.into(),
+                workspace: "w".into(),
+                agent: Some("claude".into()),
+                how: "resumes its conversation".into(),
+                worktree: false,
+            },
+        }
+    }
+
+    fn sent_commands(a: &App) -> Vec<Command> {
+        a.outbox
+            .iter()
+            .filter_map(|m| match m {
+                ClientMsg::Command { cmd, .. } => Some(cmd.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn archiving_and_bringing_back() {
+        let mut a = app();
+        // ^b a archives the focused agent.
+        a.on_stdin(b"\x02a");
+        assert_eq!(
+            sent_commands(&a),
+            vec![Command::Archive { pane: "p1".into() }]
+        );
+        a.outbox.clear();
+        // So does its button in the sidebar.
+        a.hits = vec![sidebar::Hit {
+            area: Rect::new(20, 4, 9, 1),
+            click: sidebar::Click::Archive("p2".into()),
+        }];
+        a.on_stdin(b"\x1b[<0;22;5M");
+        assert_eq!(
+            sent_commands(&a),
+            vec![Command::Archive { pane: "p2".into() }]
+        );
+        a.outbox.clear();
+
+        // Nothing archived: ^b A just says so.
+        a.on_stdin(b"\x02A");
+        assert!(matches!(a.mode, Mode::Normal));
+        assert!(a.status().unwrap().0.contains("nothing archived"));
+
+        a.on_server(ServerMsg::State {
+            panes: a.panes.clone(),
+            focus: Some("p1".into()),
+            view_generation: a.view_generation,
+            restorable: vec![],
+            archived: vec![archived(20, "new"), archived(10, "old")],
+        });
+        a.outbox.clear();
+        // ^b A lists them; Enter on the second brings it back.
+        a.on_stdin(b"\x02A");
+        assert!(matches!(a.mode, Mode::Archive { selected: 0 }));
+        a.on_stdin(b"j\r");
+        assert_eq!(sent_commands(&a), vec![Command::Unarchive { id: 10 }]);
+        a.outbox.clear();
+        // x forgets one and stays open on the rest.
+        a.on_stdin(b"\x02Ax");
+        assert_eq!(sent_commands(&a), vec![Command::ForgetArchived { id: 20 }]);
+        assert!(matches!(a.mode, Mode::Archive { selected: 0 }));
+        // The last one gone, the list closes.
+        a.on_server(ServerMsg::State {
+            panes: a.panes.clone(),
+            focus: Some("p1".into()),
+            view_generation: a.view_generation,
+            restorable: vec![],
+            archived: vec![],
+        });
+        assert!(matches!(a.mode, Mode::Normal));
+    }
+
     #[test]
     fn prefix_shift_d_opens_diff_review() {
         let mut a = app();
@@ -1808,6 +2003,7 @@ mod tests {
             focus: Some("p1".into()),
             view_generation: a.view_generation,
             restorable: vec![],
+            archived: vec![],
         });
         a.on_stdin(b"\x02D");
         assert!(matches!(a.mode, Mode::Diff(_)));
@@ -1864,6 +2060,7 @@ mod tests {
             focus: None,
             view_generation: 0,
             restorable: vec![],
+            archived: vec![],
         });
         assert!(matches!(a.mode, Mode::Normal));
         assert!(sent_new(&a).command.is_empty());
@@ -1987,6 +2184,7 @@ mod tests {
                     how: "resumes its conversation".into(),
                     worktree: true,
                 }],
+                archived: vec![],
             });
             a
         };
@@ -2045,6 +2243,7 @@ mod tests {
             focus: None,
             view_generation: a.view_generation,
             restorable: a.restorable.clone(),
+            archived: vec![],
         });
         assert!(matches!(a.mode, Mode::Normal));
     }
@@ -2262,6 +2461,7 @@ mod tests {
             focus: Some("p1".into()),
             view_generation: a.view_generation,
             restorable: vec![],
+            archived: vec![],
         });
         for _ in 0..5 {
             a.on_stdin(b"\x02s");
@@ -2286,6 +2486,7 @@ mod tests {
             focus: Some("p1".into()),
             view_generation: generation - 1,
             restorable: vec![],
+            archived: vec![],
         });
         assert_eq!(a.focus.as_deref(), Some("p2"));
         assert_eq!(a.tiles, vec!["p1", "p2"]);
@@ -2298,6 +2499,7 @@ mod tests {
             focus: Some("p4".into()),
             view_generation: generation,
             restorable: vec![],
+            archived: vec![],
         });
         assert_eq!(a.tiles, vec!["p1", "p4"]);
         assert_eq!(a.focus.as_deref(), Some("p4"));
@@ -2315,6 +2517,7 @@ mod tests {
             focus: Some("p1".into()),
             view_generation: a.view_generation,
             restorable: vec![],
+            archived: vec![],
         });
         assert_eq!(a.tiles, vec!["p1"]);
         // p1 grows back to the whole area.

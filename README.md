@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-dark.svg">
+    <img src="docs/brand/logo-light.svg" alt="corral" height="72">
+  </picture>
+</p>
+
 # corral
 
 A terminal runtime for coding agents. Run Claude Code, Codex, opencode and
@@ -114,6 +121,8 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b c` | collapse the sidebar to agent numbers, or expand it |
 | `^b D` | review the agent's worktree diff ([below](#diff-review)) |
 | `^b x` | close the agent's pane |
+| `^b a` | archive the agent: end it but keep it to bring back later ([below](#archive)) |
+| `^b A` | archived agents: bring one back, or forget it |
 | `^b r` | rename it |
 | `^b m` | menu: theme, sidebar order, notifications, agent hooks |
 | `^b t` | top stories from Hacker News and lobste.rs ([below](#top-stories)) |
@@ -142,6 +151,15 @@ terminals) to select text.
 
 Detach, close the terminal, and come back later (or from another machine over
 SSH): run `corral` again and everything is where you left it.
+
+### Archive
+
+Done with an agent for now, but not with its work? Press `^b a` (or click
+**↓ archive** next to the focused agent in the sidebar) to archive it.
+corral ends its process but keeps its folder, its worktree, and its
+conversation. Archived agents survive restarts. `^b A` (or the
+**↺ archived** button) lists them: Enter brings one back, resuming its
+conversation, and `x` forgets it (its worktree stays on disk).
 
 ### After a reboot or a stop
 

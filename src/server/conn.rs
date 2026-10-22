@@ -126,6 +126,7 @@ impl Session {
             focus: self.focus.clone(),
             view_generation: self.view_generation,
             restorable: self.hub.restorable(),
+            archived: self.hub.archived(),
         });
     }
 
@@ -320,6 +321,17 @@ impl Session {
                     reply(r.map(|(pane, warning)| Reply::Created { pane, warning }));
                 });
             }
+            Command::Unarchive { id } => {
+                let client = self.client;
+                let internal = self.internal.clone();
+                tokio::task::spawn_blocking(move || {
+                    let r = hub.unarchive(id, Some(client));
+                    if let Ok((info, _)) = &r {
+                        let _ = internal.send(info.id.clone());
+                    }
+                    reply(r.map(|(pane, warning)| Reply::Created { pane, warning }));
+                });
+            }
             Command::Restore { discard } => {
                 let client = self.client;
                 tokio::task::spawn_blocking(move || {
@@ -362,6 +374,8 @@ fn run_blocking(hub: &Hub, cmd: Command) -> Result<Reply> {
             hub.report(&pane, state, session)?;
             Reply::Ok
         }
+        Command::Archive { pane } => Reply::Text(hub.archive_pane(&pane)?),
+        Command::ForgetArchived { id } => Reply::Text(hub.forget_archived(id)?),
         Command::WorktreeList => Reply::Worktrees(hub.worktrees()),
         Command::WorktreeRemove {
             target,
@@ -373,7 +387,11 @@ fn run_blocking(hub: &Hub, cmd: Command) -> Result<Reply> {
         Command::Commit { ref pane, .. }
         | Command::Merge { ref pane }
         | Command::Discard { ref pane } => Reply::Text(hub.worktree_action(pane, &cmd)?),
-        Command::New(_) | Command::Restore { .. } | Command::Wait { .. } | Command::KillServer => {
+        Command::New(_)
+        | Command::Restore { .. }
+        | Command::Unarchive { .. }
+        | Command::Wait { .. }
+        | Command::KillServer => {
             unreachable!("handled asynchronously")
         }
     })

@@ -25,12 +25,12 @@ use crate::detect::agents::{Identifier, Running, Seen};
 use crate::detect::rules::{Rules, View};
 use crate::paths;
 use crate::protocol::{
-    AgentState, Command, DiffReport, GitInfo, NewPane, PaneId, PaneInfo, PullRequest, Restorable,
-    ServerMsg, Viewport, WorktreeAction, WorktreeInfo,
+    AgentState, ArchivedPane, Command, DiffReport, GitInfo, NewPane, PaneId, PaneInfo, PullRequest,
+    Restorable, ServerMsg, Viewport, WorktreeAction, WorktreeInfo,
 };
 use crate::worktree::{self, RemoveOpts, WorktreeError};
 use pane::{Pane, SpawnSpec};
-use restore::{Record, Saved, SavedAgent};
+use restore::{Archived, Record, Resume, Saved, SavedAgent};
 
 pub const DEFAULT_SIZE: (u16, u16) = (120, 36);
 const TICK: Duration = Duration::from_millis(250);
@@ -107,6 +107,8 @@ struct Inner {
     last_focus: Option<PaneId>,
     /// Panes from before the last stop, until restored or let go.
     restorable: Option<Record>,
+    /// Panes put away by hand, newest first.
+    archived: Vec<Archived>,
     /// Where the session record is kept: `None` until `run` sets it, so a
     /// Hub built in a unit test never writes one.
     record_path: Option<PathBuf>,
@@ -126,6 +128,16 @@ impl Inner {
     /// On some client's screen (so a finished agent counts as seen).
     fn shown_to_anyone(&self, id: &str) -> bool {
         self.clients.values().any(|c| c.shows(id))
+    }
+
+    /// No live pane other than `except` runs agent `name` in `cwd`.
+    fn alone_in(&self, name: &str, cwd: &Path, except: Option<&str>) -> bool {
+        !self.panes.iter().any(|p| {
+            Some(p.id.as_str()) != except
+                && !p.exited
+                && p.cwd == cwd
+                && p.running.as_ref().is_some_and(|r| r.name == name)
+        })
     }
 
     fn refresh_focus_flags(&mut self) {
@@ -847,13 +859,18 @@ impl Hub {
     /// Keep the session record at `path`, picking up the one already there:
     /// its panes can be restored until someone decides.
     pub fn keep_record(&self, path: PathBuf) {
-        let found = match restore::load(&path) {
-            Ok(r) => r.filter(|r| !r.panes.is_empty()),
+        let mut found = match restore::load(&path) {
+            Ok(r) => r,
             Err(e) => {
                 tracing::warn!("ignoring the session record: {e:#}");
                 None
             }
         };
+        let archived = found
+            .as_mut()
+            .map(|r| std::mem::take(&mut r.archived))
+            .unwrap_or_default();
+        let found = found.filter(|r| !r.panes.is_empty());
         if let Some(r) = &found {
             tracing::info!(
                 panes = r.panes.len(),
@@ -862,6 +879,7 @@ impl Hub {
         }
         let mut g = self.lock();
         g.restorable = found;
+        g.archived = archived;
         g.record_path = Some(path);
     }
 
@@ -876,12 +894,7 @@ impl Hub {
     /// Write the session record if it changed. Blocking: finding an agent's
     /// session reads its files.
     pub fn save_record(&self) {
-        struct Live {
-            saved: Saved,
-            running: Option<Running>,
-            hook_session: Option<(String, u64)>,
-        }
-        let (path, live, pending) = {
+        let (path, live, pending, archived) = {
             let g = self.lock();
             let Some(path) = g.record_path.clone() else {
                 return;
@@ -889,25 +902,8 @@ impl Hub {
             if g.stopping {
                 return;
             }
-            let live: Vec<Live> = g
-                .panes
-                .iter()
-                .filter(|p| !p.exited)
-                .map(|p| Live {
-                    saved: Saved {
-                        name: p.name.clone(),
-                        named: p.named,
-                        workspace: p.workspace.clone(),
-                        cwd: p.cwd.clone(),
-                        origin: p.origin.clone(),
-                        worktree: p.worktree.as_ref().map(|w| w.path.clone()),
-                        agent: None,
-                    },
-                    running: p.running.clone(),
-                    hook_session: p.hook_session.clone(),
-                })
-                .collect();
-            (path, live, g.restorable.clone())
+            let live: Vec<Live> = g.panes.iter().filter(|p| !p.exited).map(Live::of).collect();
+            (path, live, g.restorable.clone(), g.archived.clone())
         };
         // Agents of one kind sharing a folder can't be told apart by the
         // files they write; only their hooks can say.
@@ -920,36 +916,12 @@ impl Hub {
                 .count()
                 > 1
         };
-        let mut panes: Vec<Saved> = live
-            .iter()
-            .map(|l| {
-                let mut s = l.saved.clone();
-                s.agent = l.running.as_ref().map(|r| {
-                    let from_hook = l
-                        .hook_session
-                        .as_ref()
-                        .filter(|(_, at)| *at >= r.started)
-                        .map(|(id, _)| id.clone());
-                    let session = from_hook.or_else(|| {
-                        let started = UNIX_EPOCH + Duration::from_secs(r.started);
-                        (!shares_folder(l))
-                            .then(|| restore::find_session(r.name, &l.saved.cwd, started))
-                            .flatten()
-                    });
-                    SavedAgent {
-                        name: r.name.to_string(),
-                        argv: r.argv.clone(),
-                        session,
-                    }
-                });
-                s
-            })
-            .collect();
+        let mut panes: Vec<Saved> = live.iter().map(|l| l.to_saved(shares_folder(l))).collect();
         // Not brought back yet: still kept.
         if let Some(p) = pending {
             panes.extend(p.panes);
         }
-        let record = Record::new(panes);
+        let record = Record::new(panes, archived);
         {
             let mut g = self.lock();
             if g.stopping || g.last_saved.as_ref() == Some(&record) {
@@ -990,33 +962,7 @@ impl Hub {
         let mut back = 0;
         let mut problems = Vec::new();
         for (i, p) in record.panes.iter().enumerate() {
-            let argv = match &p.agent {
-                Some(a) => record
-                    .resume_for(i)
-                    .and_then(|how| restore::resume_argv(a, &how))
-                    .map(restore::with_full_path)
-                    .unwrap_or_else(|| restore::with_full_path(restore::restart_argv(a))),
-                None => Vec::new(),
-            };
-            let req = NewPane {
-                name: p.named.then(|| p.name.clone()),
-                workspace: Some(p.workspace.clone()),
-                // Worktree panes start from their repo, then move in.
-                cwd: Some(if p.worktree.is_some() {
-                    p.origin.clone()
-                } else {
-                    p.cwd.clone()
-                }),
-                command: if argv.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![restore::shell_line(&argv)]
-                },
-                shell: true,
-                then_shell: true,
-                ..Default::default()
-            };
-            match self.spawn_pane(req, client, p.worktree.clone()) {
+            match self.bring_back(p, record.resume_for(i), client) {
                 Ok((_, warning)) => {
                     back += 1;
                     if let Some(w) = warning {
@@ -1033,6 +979,162 @@ impl Hub {
             msg.push_str(&format!("; {}", problems.join("; ")));
         }
         Ok(msg)
+    }
+
+    /// Start a recorded pane again: an agent resumes its conversation the
+    /// way `how` says, anything else comes back as a shell in its folder.
+    fn bring_back(
+        self: &Arc<Self>,
+        p: &Saved,
+        how: Option<Resume>,
+        client: Option<ClientId>,
+    ) -> Result<(PaneInfo, Option<String>)> {
+        let argv = match &p.agent {
+            Some(a) => how
+                .and_then(|how| restore::resume_argv(a, &how))
+                .map(restore::with_full_path)
+                .unwrap_or_else(|| restore::with_full_path(restore::restart_argv(a))),
+            None => Vec::new(),
+        };
+        let req = NewPane {
+            name: p.named.then(|| p.name.clone()),
+            workspace: Some(p.workspace.clone()),
+            // Worktree panes start from their repo, then move in.
+            cwd: Some(if p.worktree.is_some() {
+                p.origin.clone()
+            } else {
+                p.cwd.clone()
+            }),
+            command: if argv.is_empty() {
+                Vec::new()
+            } else {
+                vec![restore::shell_line(&argv)]
+            },
+            shell: true,
+            then_shell: true,
+            ..Default::default()
+        };
+        self.spawn_pane(req, client, p.worktree.clone())
+    }
+
+    // ---- archive -------------------------------------------------------
+
+    pub fn archived(&self) -> Vec<ArchivedPane> {
+        let g = self.lock();
+        g.archived
+            .iter()
+            .map(|a| {
+                let alone = a
+                    .pane
+                    .agent
+                    .as_ref()
+                    .is_none_or(|ag| g.alone_in(&ag.name, &a.pane.cwd, None));
+                a.summary(alone)
+            })
+            .collect()
+    }
+
+    /// End a pane but keep what it takes to bring it back: its folder, its
+    /// worktree (left on disk) and its agent's conversation. Blocking.
+    pub fn archive_pane(&self, id: &str) -> Result<String> {
+        let (live, shared) = {
+            let mut g = self.lock();
+            let p = g.pane(id)?;
+            let mut live = Live::of(p);
+            if p.exited {
+                live.running = None;
+            }
+            let shared = live
+                .running
+                .as_ref()
+                .is_some_and(|r| !g.alone_in(r.name, &live.saved.cwd, Some(id)));
+            (live, shared)
+        };
+        let saved = live.to_saved(shared);
+        let name = saved.name.clone();
+        let archive_id = {
+            let mut g = self.lock();
+            // Milliseconds name it; two in the same one take the next.
+            let newest = g.archived.iter().map(|a| a.id).max().unwrap_or(0);
+            let archive_id = unix_millis().max(newest + 1);
+            g.archived.insert(
+                0,
+                Archived {
+                    id: archive_id,
+                    pane: saved,
+                },
+            );
+            archive_id
+        };
+        if let Err(e) = self.kill_pane(id, WorktreeAction::Keep, false) {
+            self.lock().archived.retain(|a| a.id != archive_id);
+            return Err(e);
+        }
+        tracing::info!(pane = id, archive_id, "archived pane");
+        self.emit(Event::State);
+        self.save_record();
+        Ok(format!("archived {name}"))
+    }
+
+    /// Bring an archived pane back. Blocking.
+    pub fn unarchive(
+        self: &Arc<Self>,
+        id: u64,
+        client: Option<ClientId>,
+    ) -> Result<(PaneInfo, Option<String>)> {
+        let (i, a, how) = {
+            let mut g = self.lock();
+            let i = g
+                .archived
+                .iter()
+                .position(|a| a.id == id)
+                .ok_or_else(|| anyhow!("nothing archived as {id}"))?;
+            let a = g.archived.remove(i);
+            let how = a
+                .pane
+                .agent
+                .as_ref()
+                .map(|ag| restore::resume_with(ag, g.alone_in(&ag.name, &a.pane.cwd, None)));
+            (i, a, how)
+        };
+        match self.bring_back(&a.pane, how, client) {
+            Ok(r) => {
+                tracing::info!(archive_id = id, pane = %r.0.id, "unarchived pane");
+                self.save_record();
+                Ok(r)
+            }
+            Err(e) => {
+                let mut g = self.lock();
+                let i = i.min(g.archived.len());
+                g.archived.insert(i, a);
+                drop(g);
+                self.emit(Event::State);
+                Err(e)
+            }
+        }
+    }
+
+    /// Drop an archived pane; its worktree stays on disk.
+    pub fn forget_archived(&self, id: u64) -> Result<String> {
+        let a = {
+            let mut g = self.lock();
+            let i = g
+                .archived
+                .iter()
+                .position(|a| a.id == id)
+                .ok_or_else(|| anyhow!("nothing archived as {id}"))?;
+            g.archived.remove(i)
+        };
+        self.emit(Event::State);
+        self.save_record();
+        Ok(match &a.pane.worktree {
+            Some(w) => format!(
+                "forgot {}; its worktree stays at {} (`corral worktree rm` removes it)",
+                a.pane.name,
+                w.display()
+            ),
+            None => format!("forgot {}", a.pane.name),
+        })
     }
 
     // ---- periodic work -------------------------------------------------
@@ -1258,6 +1360,64 @@ impl Hub {
         drop(g);
         self.emit(Event::Shutdown);
     }
+}
+
+/// A pane as the record keeps it, read under the lock.
+#[derive(Clone)]
+struct Live {
+    saved: Saved,
+    running: Option<Running>,
+    hook_session: Option<(String, u64)>,
+}
+
+impl Live {
+    fn of(p: &Pane) -> Live {
+        Live {
+            saved: Saved {
+                name: p.name.clone(),
+                named: p.named,
+                workspace: p.workspace.clone(),
+                cwd: p.cwd.clone(),
+                origin: p.origin.clone(),
+                worktree: p.worktree.as_ref().map(|w| w.path.clone()),
+                agent: None,
+            },
+            running: p.running.clone(),
+            hook_session: p.hook_session.clone(),
+        }
+    }
+
+    /// With its agent and that agent's session: from its hook, else from
+    /// the files it writes unless another of its kind `shares` its folder
+    /// (they can't be told apart). Blocking.
+    fn to_saved(&self, shares: bool) -> Saved {
+        let mut s = self.saved.clone();
+        s.agent = self.running.as_ref().map(|r| {
+            let from_hook = self
+                .hook_session
+                .as_ref()
+                .filter(|(_, at)| *at >= r.started)
+                .map(|(id, _)| id.clone());
+            let session = from_hook.or_else(|| {
+                let started = UNIX_EPOCH + Duration::from_secs(r.started);
+                (!shares)
+                    .then(|| restore::find_session(r.name, &s.cwd, started))
+                    .flatten()
+            });
+            SavedAgent {
+                name: r.name.to_string(),
+                argv: r.argv.clone(),
+                session,
+            }
+        });
+        s
+    }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn unix_now() -> u64 {
