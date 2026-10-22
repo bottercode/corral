@@ -316,7 +316,7 @@ pub fn codex_session(dir: &Path, cwd: &Path, started: SystemTime) -> Option<Stri
         .filter_map(|p| Some((modified(&p)?, p)))
         .filter(|(m, _)| *m >= since)
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
     files.into_iter().find_map(|(_, p)| {
         let (id, folder) = codex_meta(&p)?;
         (Path::new(&folder) == cwd).then_some(id)

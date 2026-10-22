@@ -139,17 +139,13 @@ impl DiffView {
                 self.busy = true;
                 return Action::Refresh;
             }
-            Key::Char('c') => {
-                if self.report.as_ref().is_some_and(|r| r.uncommitted > 0) {
-                    let msg = format!("Work from {}", self.name);
-                    self.prompt = Some(Prompt::Commit(TextInput::new(&msg)));
-                }
+            Key::Char('c') if self.report.as_ref().is_some_and(|r| r.uncommitted > 0) => {
+                let msg = format!("Work from {}", self.name);
+                self.prompt = Some(Prompt::Commit(TextInput::new(&msg)));
             }
             Key::Char('m') => self.prompt = Some(Prompt::Merge),
-            Key::Char('x') => {
-                if self.report.as_ref().is_some_and(|r| r.uncommitted > 0) {
-                    self.prompt = Some(Prompt::Discard);
-                }
+            Key::Char('x') if self.report.as_ref().is_some_and(|r| r.uncommitted > 0) => {
+                self.prompt = Some(Prompt::Discard);
             }
             _ => {}
         }
