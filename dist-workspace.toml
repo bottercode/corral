@@ -1,7 +1,8 @@
 # Release configuration for cargo-dist (https://opensource.axo.dev/cargo-dist/).
-# Not active yet: nothing is published until releases are approved. When they
-# are, run `dist generate` to create .github/workflows/release.yml, then tag
-# a version (git tag v0.1.0 && git push --tags).
+# Pushing a version tag (git tag v0.1.0 && git push origin v0.1.0) runs
+# .github/workflows/release.yml, which builds the binaries and the installer
+# and attaches them to a GitHub Release. After changing this file, run
+# `dist generate` to update the workflow.
 
 [workspace]
 members = ["cargo:."]

@@ -51,15 +51,19 @@ UI is a client that attaches and detaches; the agents don't notice.
 
 ## Install
 
-corral is not published yet. Build it from source (Rust 1.88+, macOS or
-Linux):
+macOS (Apple silicon or Intel) and Linux (x86_64 or ARM):
 
 ```sh
-git clone <this repo> corral && cd corral
-cargo install --path .
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bottercode/corral/releases/latest/download/corral-agents-installer.sh | sh
 ```
 
-This installs a `corral` binary into `~/.cargo/bin`.
+This puts a `corral` binary in `~/.cargo/bin`. The binaries are also on the
+[releases page](https://github.com/bottercode/corral/releases). Or build it
+from source (Rust 1.88+):
+
+```sh
+cargo install --git https://github.com/bottercode/corral
+```
 
 ## Quick start
 
