@@ -10,6 +10,7 @@
 pub mod conn;
 pub mod diff;
 pub mod input;
+pub mod select;
 pub mod sidebar;
 pub mod stories;
 pub mod theme;
@@ -198,6 +199,8 @@ pub struct App {
     pub outbox: Vec<ClientMsg>,
     /// Raw bytes for the outer terminal (bell, OSC 9).
     pub term_writes: Vec<u8>,
+    /// Text selected with the mouse, highlighted until the next click or key.
+    pub selection: Option<select::Selection>,
     pub exit: Option<Exit>,
     /// Asked the server to stop; its shutdown is expected.
     stopping: Option<usize>,
@@ -251,6 +254,7 @@ impl App {
             seen_state: false,
             outbox: Vec::new(),
             term_writes: Vec::new(),
+            selection: None,
             exit: None,
             stopping: None,
             dirty: true,
@@ -957,6 +961,7 @@ impl App {
     }
 
     fn forward(&mut self, bytes: &[u8], is_paste: bool) {
+        self.selection = None;
         let Some(pane) = self.focus.clone() else {
             return;
         };
@@ -1093,8 +1098,86 @@ impl App {
         input::wheel_for_pane(screen, up, m.x - body.x, m.y - body.y, WHEEL_LINES)
     }
 
+    /// The cell under the mouse in a pane's terminal, if it's over one.
+    fn cell_at(&self, x: u16, y: u16) -> Option<(PaneId, (u16, u16))> {
+        self.tile_rects()
+            .into_iter()
+            .find(|(_, _, body)| body.contains((x, y).into()))
+            .map(|(id, _, body)| (id, (y - body.y, x - body.x)))
+    }
+
+    /// Drag to select inside a pane; letting go copies. Returns true when
+    /// the event was part of a selection.
+    fn select_mouse(&mut self, m: Mouse) -> bool {
+        match m.kind {
+            MouseKind::LeftDown => {
+                self.selection = None;
+                if matches!(self.mode, Mode::Normal | Mode::Scroll { .. })
+                    && let Some((pane, at)) = self.cell_at(m.x, m.y)
+                {
+                    self.selection = Some(select::Selection::new(pane, at));
+                }
+                false
+            }
+            MouseKind::Drag => {
+                let Some(s) = self.selection.as_ref().filter(|s| s.dragging) else {
+                    return false;
+                };
+                // Stay inside the pane the drag started in.
+                let Some((_, _, body)) =
+                    self.tile_rects().into_iter().find(|(id, ..)| *id == s.pane)
+                else {
+                    return true;
+                };
+                let col = m.x.clamp(body.x, body.x + body.width.saturating_sub(1)) - body.x;
+                let row = m.y.clamp(body.y, body.y + body.height.saturating_sub(1)) - body.y;
+                if let Some(s) = self.selection.as_mut() {
+                    s.head = (row, col);
+                }
+                true
+            }
+            MouseKind::LeftUp => {
+                let Some(s) = self.selection.as_mut().filter(|s| s.dragging) else {
+                    return false;
+                };
+                s.dragging = false;
+                if s.is_empty() {
+                    self.selection = None;
+                } else {
+                    self.copy_selection();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn copy_selection(&mut self) {
+        let Some(s) = &self.selection else { return };
+        let Some(parser) = self.screens.get(&s.pane) else {
+            return;
+        };
+        let text = s.text(parser.screen());
+        if text.trim().is_empty() {
+            return;
+        }
+        self.term_writes.extend(select::osc52(&text));
+        select::copy_locally(&text);
+        let n = text.chars().count();
+        self.set_status(
+            format!("copied {n} character{}", if n == 1 { "" } else { "s" }),
+            false,
+        );
+    }
+
     fn on_mouse(&mut self, m: Mouse) {
         let in_sidebar = m.x < self.sidebar_area.x + self.sidebar_area.width;
+        if !in_sidebar && self.select_mouse(m) {
+            return;
+        }
+        if matches!(m.kind, MouseKind::WheelUp | MouseKind::WheelDown) {
+            self.selection = None;
+        }
         // Clicking or scrolling over another tile moves the keyboard there.
         if !in_sidebar
             && matches!(
@@ -1556,8 +1639,10 @@ impl App {
 /// bracketed paste reporting, and restores it on drop (and on panic).
 struct TerminalGuard;
 
-const ENTER: &[u8] = b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h";
-const LEAVE: &[u8] = b"\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l";
+// Mouse: 1000 clicks and the wheel, 1002 drags (for selecting text), 1006
+// the SGR encoding.
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h";
+const LEAVE: &[u8] = b"\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l";
 
 fn restore_terminal() {
     let mut out = std::io::stdout();
@@ -2321,6 +2406,36 @@ mod tests {
             .process(b"\x1b[?1000h\x1b[?1006h");
         a.on_stdin(wheel_down);
         assert_eq!(inputs(&a), vec![b"\x1b[<65;20;10M".to_vec()]);
+    }
+
+    #[test]
+    fn drag_selects_and_copies() {
+        let mut a = app();
+        a.screens
+            .get_mut("p1")
+            .unwrap()
+            .process(b"hello world\r\nsecond");
+        // The pane's terminal starts at column 30 (31 in mouse terms).
+        a.on_stdin(b"\x1b[<0;31;1M\x1b[<32;33;1M\x1b[<32;35;1M");
+        let s = a.selection.clone().unwrap();
+        assert_eq!((s.anchor, s.head, s.dragging), ((0, 0), (0, 4), true));
+        a.on_stdin(b"\x1b[<0;35;1m");
+        let osc = String::from_utf8(a.term_writes.clone()).unwrap();
+        assert_eq!(osc, "\x1b]52;c;aGVsbG8=\x07"); // "hello"
+        assert!(a.status().unwrap().0.contains("copied 5 characters"));
+        // Still highlighted; typing clears it.
+        assert!(a.selection.is_some());
+        a.on_stdin(b"x");
+        assert!(a.selection.is_none());
+
+        // A plain click selects nothing and copies nothing.
+        a.term_writes.clear();
+        a.on_stdin(b"\x1b[<0;40;2M\x1b[<0;40;2m");
+        assert!(a.selection.is_none() && a.term_writes.is_empty());
+
+        // Dragging past the pane's edge stops at the edge.
+        a.on_stdin(b"\x1b[<0;31;2M\x1b[<32;5;2M");
+        assert_eq!(a.selection.as_ref().unwrap().head, (1, 0));
     }
 
     #[test]

@@ -514,6 +514,18 @@ fn draw_tiles(f: &mut Frame, app: &mut App, area: Rect) {
             PseudoTerminal::new(screen).cursor(Cursor::default().visibility(false)),
             body,
         );
+        // Text being selected with the mouse.
+        if let Some(s) = app.selection.as_ref().filter(|s| s.pane == id) {
+            let buf = f.buffer_mut();
+            for row in 0..body.height {
+                for col in 0..body.width {
+                    if s.contains(row, col) {
+                        let cell = &mut buf[(body.x + col, body.y + row)];
+                        cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                    }
+                }
+            }
+        }
         let (row, col) = screen.cursor_position();
         if focused
             && scroll == 0
@@ -731,7 +743,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         t.muted(),
     ));
     text.push(Line::styled(
-        "Hold Shift (Option in some terminals) to select text with the mouse.",
+        "Drag in a pane to select text; letting go copies it. Hold Shift for the terminal's own selection.",
         t.muted(),
     ));
     text.push(Line::default());

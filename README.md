@@ -145,9 +145,13 @@ news. At the top:
   marks (`◆` blocked, `✓` done, a spinner while working), giving the room to
   your agents; **»** brings it back. `^b c` does the same.
 - **✕ exit** asks whether to detach, leaving agents running, or stop corral
-  and every agent; worktrees are kept either way. Scroll the wheel for
-scrollback. corral captures the mouse, so hold Shift (Option in some
-terminals) to select text.
+  and every agent; worktrees are kept either way.
+
+Scroll the wheel for scrollback. **Drag in a pane to select text**: the
+selection stays inside that pane, and letting go copies it to the
+clipboard (through the terminal, which works over SSH too, and with
+`pbcopy`, `wl-copy` or `xclip` on your own machine). Holding Shift (Option
+in some terminals) still gives you the terminal's own selection.
 
 Detach, close the terminal, and come back later (or from another machine over
 SSH): run `corral` again and everything is where you left it.

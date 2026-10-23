@@ -10,6 +10,8 @@
 pub enum MouseKind {
     LeftDown,
     LeftUp,
+    /// Moved with the left button held (a drag).
+    Drag,
     WheelUp,
     WheelDown,
     Other,
@@ -74,6 +76,7 @@ fn parse_sgr_mouse(data: &[u8]) -> Seq {
                 let kind = match (b & !(4 | 8 | 16), release) {
                     (0, false) => MouseKind::LeftDown,
                     (0, true) => MouseKind::LeftUp,
+                    (32, false) => MouseKind::Drag,
                     (64, _) => MouseKind::WheelUp,
                     (65, _) => MouseKind::WheelDown,
                     _ => MouseKind::Other,
@@ -564,6 +567,19 @@ mod tests {
         assert_eq!(
             adapt_for_pane(b"\x1b[A", false, false, false),
             b"\x1b[A".to_vec()
+        );
+    }
+
+    #[test]
+    fn drags_are_recognised() {
+        let mut s = Splitter::new(0x02);
+        assert_eq!(
+            s.feed(b"\x1b[<32;7;3M"),
+            vec![Chunk::Mouse(Mouse {
+                kind: MouseKind::Drag,
+                x: 6,
+                y: 2
+            })]
         );
     }
 
