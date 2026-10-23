@@ -1,6 +1,6 @@
 //! Session restore. The server keeps a record of its panes on disk (where
-//! each runs, its worktree, and the agent in it with that agent's session),
-//! rewritten whenever it changes and once more on the way down. A server
+//! each runs, and the agent in it with that agent's session), rewritten
+//! whenever it changes and once more on the way down. A server
 //! that starts and finds a record offers to bring the panes back: agents
 //! resume their conversation, everything else comes back as a shell in the
 //! same folder. Old commands are never re-run on their own.
@@ -58,10 +58,6 @@ pub struct Saved {
     pub named: bool,
     pub workspace: String,
     pub cwd: PathBuf,
-    /// Where it was started from: the repo, for worktree panes.
-    pub origin: PathBuf,
-    /// The worktree corral made for it.
-    pub worktree: Option<PathBuf>,
     /// The agent running in it, if one was.
     pub agent: Option<SavedAgent>,
 }
@@ -91,12 +87,38 @@ pub enum Resume {
 pub fn record_path(socket: &Path) -> PathBuf {
     let stem = socket
         .file_stem()
-        .map(|s| crate::worktree::sanitize(&s.to_string_lossy()))
+        .map(|s| sanitize(&s.to_string_lossy()))
         .unwrap_or_default();
-    let hash = crate::worktree::fnv1a(&socket.to_string_lossy()) as u32;
+    let hash = fnv1a(&socket.to_string_lossy()) as u32;
     paths::corral_home()
         .join("sessions")
         .join(format!("{stem}-{hash:08x}.json"))
+}
+
+/// Lowercase, `[a-z0-9._-]` only, no leading/trailing separators.
+fn sanitize(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches(|c| c == '-' || c == '.')
+        .chars()
+        .take(48)
+        .collect()
+}
+
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 pub fn load(path: &Path) -> Result<Option<Record>> {
@@ -180,7 +202,6 @@ fn describe(p: &Saved, how: Option<Resume>) -> Restorable {
         workspace: p.workspace.clone(),
         agent: p.agent.as_ref().map(|a| a.name.clone()),
         how: how.into(),
-        worktree: p.worktree.is_some(),
     }
 }
 
@@ -439,6 +460,13 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_names() {
+        assert_eq!(sanitize("Feature/Fix Bug!"), "feature-fix-bug");
+        assert_eq!(sanitize("--x--"), "x");
+        assert_eq!(sanitize("claude"), "claude");
+    }
+
+    #[test]
     fn claude_resumes_with_its_flags() {
         let a = agent(
             "claude",
@@ -526,8 +554,6 @@ mod tests {
             named: false,
             workspace: "w".into(),
             cwd: cwd.into(),
-            origin: cwd.into(),
-            worktree: None,
             agent,
         }
     }
@@ -610,10 +636,8 @@ mod tests {
     #[test]
     fn claude_sessions_by_folder() {
         let tmp = tempfile::tempdir().unwrap();
-        let cwd = Path::new("/Users/me/.corral/worktrees/api-1/fix_it");
-        let project = tmp
-            .path()
-            .join("projects/-Users-me--corral-worktrees-api-1-fix-it");
+        let cwd = Path::new("/Users/me/.config/api-1/fix_it");
+        let project = tmp.path().join("projects/-Users-me--config-api-1-fix-it");
         std::fs::create_dir_all(&project).unwrap();
         let before = SystemTime::now() - Duration::from_secs(3600);
         std::fs::write(project.join("old.jsonl"), "{}").unwrap();

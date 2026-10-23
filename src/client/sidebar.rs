@@ -1,7 +1,7 @@
 //! The sidebar. By default it's organised for triage: agents that need you
 //! (blocked, or finished and unseen) on top, then the ones working, then the
 //! quiet ones. It can list them by project instead. The focused agent opens
-//! up to show its title, project and worktree. Collapsed, it shrinks to a
+//! up to show its title, project and branch. Collapsed, it shrinks to a
 //! rail of agent numbers and state marks. Rendering returns what each row
 //! does when clicked.
 
@@ -270,10 +270,8 @@ pub fn task_title(p: &PaneInfo) -> Option<&str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Click {
     Focus(PaneId),
-    /// The "+ new" / "⎇ worktree" buttons.
-    New {
-        worktree: bool,
-    },
+    /// The "+ new shell" button.
+    New,
     /// The "≡ menu" button.
     Menu,
     /// The "✕ exit" button.
@@ -539,8 +537,7 @@ impl Sidebar<'_> {
                 hits.push(Hit { area, click });
             };
             let new = t.accent().add_modifier(Modifier::BOLD);
-            button(2, 1, "+", new, Click::New { worktree: false });
-            button(4, 1, "⎇", t.fg(t.git), Click::New { worktree: true });
+            button(2, 1, "+", new, Click::New);
             button(2, 2, "✦", t.fg(t.done), Click::Stories);
             if self.archived > 0 {
                 button(4, 2, "↺", t.muted(), Click::Archived);
@@ -642,19 +639,9 @@ impl Sidebar<'_> {
             ]),
             Some((archive, Click::Archive(p.id.clone()))),
         );
-        // A worktree's branch comes with what the agent changed so far.
-        let branch = p
-            .worktree
-            .as_ref()
-            .map(|w| w.branch.as_str())
-            .or_else(|| p.git.as_ref().map(|g| g.branch.as_str()));
-        if let Some(branch) = branch {
+        if let Some(git) = &p.git {
             let mut tail = Vec::new();
-            if let Some(w) = p.worktree.as_ref().filter(|w| w.diff_files > 0) {
-                tail.push(Span::styled(format!(" +{}", w.added), t.fg(t.added)));
-                tail.push(Span::styled(format!(" −{}", w.removed), t.fg(t.removed)));
-            }
-            if let Some(pr) = p.git.as_ref().and_then(|g| g.pr.as_ref()) {
+            if let Some(pr) = &git.pr {
                 let (label, style) = match pr.state.as_str() {
                     "MERGED" => (format!(" #{} merged", pr.number), t.fg(t.done)),
                     "CLOSED" => (format!(" #{} closed", pr.number), t.muted()),
@@ -663,7 +650,10 @@ impl Sidebar<'_> {
                 tail.push(Span::styled(label, style));
             }
             let tail_width: usize = tail.iter().map(|s| s.content.width()).sum();
-            let branch = truncate(&format!("⎇ {branch}"), room.saturating_sub(tail_width));
+            let branch = truncate(
+                &format!("⎇ {}", git.branch),
+                room.saturating_sub(tail_width),
+            );
             let mut spans = vec![marker(), Span::raw("  "), Span::styled(branch, t.fg(t.git))];
             spans.extend(tail);
             detail(Line::from(spans), None);
@@ -713,7 +703,7 @@ fn render_order_switch(row: Rect, order: Order, buf: &mut Buffer) -> Hit {
     }
 }
 
-/// Two rows of buttons: `+ new shell   ⎇ worktree` over `✦ top stories`
+/// Two rows of buttons: `+ new shell` over `✦ top stories`
 /// (and `↺ archived 3` when panes are archived), shortened when the
 /// sidebar is narrow.
 fn render_buttons(area: Rect, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
@@ -734,18 +724,11 @@ fn render_buttons(area: Rect, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
         second.push((archived_label.as_str(), t.muted(), Click::Archived));
     }
     let rows: [&[(&str, Style, Click)]; 2] = [
-        &[
-            (
-                pick("+ new shell", "+ new"),
-                t.accent().add_modifier(Modifier::BOLD),
-                Click::New { worktree: false },
-            ),
-            (
-                pick("⎇ worktree", "⎇ wt"),
-                t.fg(t.git),
-                Click::New { worktree: true },
-            ),
-        ],
+        &[(
+            pick("+ new shell", "+ new"),
+            t.accent().add_modifier(Modifier::BOLD),
+            Click::New,
+        )],
         &second,
     ];
     let mut hits = Vec::new();
@@ -775,7 +758,7 @@ fn render_buttons(area: Rect, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::WorktreeInfo;
+    use crate::protocol::GitInfo;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn pane(id: &str, name: &str, ws: &str, state: AgentState) -> PaneInfo {
@@ -790,7 +773,6 @@ mod tests {
             pid: Some(1),
             exit_code: None,
             title: None,
-            worktree: None,
             git: None,
             cols: 80,
             rows: 24,
@@ -854,16 +836,9 @@ mod tests {
     fn sample() -> Vec<PaneInfo> {
         let mut a = pane("p1", "claude", "corral", AgentState::Blocked);
         a.title = Some("✳ Fix token refresh".into());
-        a.worktree = Some(WorktreeInfo {
-            path: "/w/corral-1/claude-3f9a".into(),
-            branch: "corral/claude-3f9a".into(),
-            repo: "/r".into(),
-            changed_files: 3,
-            diff_files: 3,
-            added: 42,
-            removed: 7,
-            pane: Some("p1".into()),
-            ..Default::default()
+        a.git = Some(GitInfo {
+            branch: "fix/token-refresh".into(),
+            pr: None,
         });
         let b = pane("p2", "codex", "website", AgentState::Working);
         let c = pane("p3", "a-very-long-agent-name", "corral", AgentState::Done);
@@ -936,22 +911,20 @@ mod tests {
                 Click::Exit,
                 Click::Collapse,
                 Click::Order,
-                Click::New { worktree: false },
-                Click::New { worktree: true },
+                Click::New,
                 Click::Stories,
             ]
         );
         // Menu, exit and collapse on the title row, the order switch on the
-        // rule under it, the new buttons on the last row.
+        // rule under it, the new button on the last row but one.
         let ys: Vec<u16> = hits[9..13].iter().map(|h| h.area.y).collect();
         assert_eq!(ys, vec![0, 0, 0, 1]);
         assert!(hits[9].area.x + hits[9].area.width < hits[10].area.x);
         assert!(hits[10].area.x + hits[10].area.width < hits[11].area.x);
-        let (a, b) = (hits[13].area, hits[14].area);
-        assert_eq!((a.y, b.y), (20, 20));
-        assert!(a.x + a.width < b.x);
-        // Top stories under them.
-        let c = hits[15].area;
+        let a = hits[13].area;
+        assert_eq!(a.y, 20);
+        // Top stories under it.
+        let c = hits[14].area;
         assert_eq!((c.y, c.x), (21, a.x));
         // The archive button sits at the right end of its row.
         let archive = hits[2].area;
@@ -1002,7 +975,7 @@ mod tests {
         insta::assert_snapshot!(text);
         // Only the buttons are clickable (no order switch with no agents).
         assert!(hits.iter().all(|h| !matches!(h.click, Click::Focus(_))));
-        assert_eq!(hits.len(), 6);
+        assert_eq!(hits.len(), 5);
     }
 
     #[test]
@@ -1029,8 +1002,7 @@ mod tests {
                 f("p2"),
                 f("p5"),
                 f("p4"),
-                Click::New { worktree: false },
-                Click::New { worktree: true },
+                Click::New,
                 Click::Stories,
             ]
         );

@@ -8,8 +8,8 @@ license = "MIT"
 repository = "https://github.com/bottercode/corral"
 homepage = "https://github.com/bottercode/corral"
 readme = "README.md"
-description = "A terminal runtime for coding agents, with optional per-agent git worktrees"
-keywords = ["terminal", "agents", "tui", "multiplexer", "worktree"]
+description = "A terminal runtime for coding agents"
+keywords = ["terminal", "agents", "tui", "multiplexer"]
 categories = ["command-line-utilities", "development-tools"]
 
 [lib]

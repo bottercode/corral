@@ -4,7 +4,6 @@
 //! prefix = "C-b"                    # C-a … C-z, or C-space
 //! default_command = ""              # run in each new shell, e.g. "claude"
 //! notifications = true              # bell + OSC 9 when an unfocused agent is blocked/done
-//! worktree_root = "~/.corral/worktrees"
 //! sidebar_width = 30
 //! sidebar_collapsed = false        # just agent numbers (^b c, or « in the sidebar)
 //! theme = "ranch"                  # ranch, ink or terminal
@@ -12,7 +11,7 @@
 //! update_check = true              # once a day, a toast when a newer corral is out
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -25,7 +24,6 @@ pub struct Config {
     pub prefix: String,
     pub default_command: String,
     pub notifications: bool,
-    pub worktree_root: Option<String>,
     pub sidebar_width: u16,
     pub sidebar_collapsed: bool,
     pub theme: String,
@@ -39,7 +37,6 @@ impl Default for Config {
             prefix: "C-b".into(),
             default_command: String::new(),
             notifications: true,
-            worktree_root: None,
             sidebar_width: 30,
             sidebar_collapsed: false,
             theme: "ranch".into(),
@@ -81,13 +78,6 @@ impl Config {
     /// The byte the prefix key sends.
     pub fn prefix_byte(&self) -> Result<u8> {
         parse_prefix(&self.prefix)
-    }
-
-    pub fn worktree_root(&self) -> PathBuf {
-        match &self.worktree_root {
-            Some(p) => paths::expand_tilde(p),
-            None => paths::default_worktree_root(),
-        }
     }
 }
 
@@ -171,11 +161,10 @@ mod tests {
     #[test]
     fn full_file() {
         let c = Config::parse(
-            "prefix = 'C-a'\ndefault_command = 'codex'\nnotifications = false\nworktree_root = '/w'\nsidebar_width = 24\ntheme = 'ink'\n",
+            "prefix = 'C-a'\ndefault_command = 'codex'\nnotifications = false\nsidebar_width = 24\ntheme = 'ink'\n",
         )
         .unwrap();
         assert_eq!(c.prefix_byte().unwrap(), 1);
-        assert_eq!(c.worktree_root(), PathBuf::from("/w"));
         assert_eq!(c.sidebar_width, 24);
         assert_eq!(c.theme, "ink");
         assert!(Config::parse("theme = 'neon'").is_err());

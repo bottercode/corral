@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Largest frame either side will accept (scrollback snapshots can be large).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -67,28 +67,6 @@ impl std::str::FromStr for AgentState {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
-pub struct WorktreeInfo {
-    pub path: PathBuf,
-    pub branch: String,
-    pub repo: PathBuf,
-    /// Branch (or commit) the worktree was created from.
-    #[serde(default)]
-    pub base: Option<String>,
-    /// Uncommitted changed or untracked files (what removal would lose).
-    pub changed_files: u32,
-    /// Files, added and removed lines compared with where the branch
-    /// started, committed work and untracked files included.
-    #[serde(default)]
-    pub diff_files: u32,
-    #[serde(default)]
-    pub added: u32,
-    #[serde(default)]
-    pub removed: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane: Option<PaneId>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct GitInfo {
     /// Branch name, or a short commit hash when `HEAD` is detached.
     pub branch: String,
@@ -104,32 +82,6 @@ pub struct PullRequest {
     pub state: String,
 }
 
-/// One file in a worktree's diff.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
-pub struct FileDiff {
-    pub path: String,
-    /// `M`odified, `A`dded, `D`eleted, or `?` for untracked.
-    pub status: String,
-    pub added: u32,
-    pub removed: u32,
-    pub binary: bool,
-    /// Unified diff text (hunks only, no file header).
-    pub patch: String,
-}
-
-/// Everything an agent changed in its worktree since its branch started.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
-pub struct DiffReport {
-    pub pane: Option<PaneId>,
-    pub branch: String,
-    pub base: String,
-    /// Commits on the branch that aren't on the base yet.
-    pub commits: u32,
-    /// Files with uncommitted changes.
-    pub uncommitted: u32,
-    pub files: Vec<FileDiff>,
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PaneInfo {
     pub id: PaneId,
@@ -142,7 +94,6 @@ pub struct PaneInfo {
     pub pid: Option<u32>,
     pub exit_code: Option<i32>,
     pub title: Option<String>,
-    pub worktree: Option<WorktreeInfo>,
     /// The branch checked out where the pane runs, and its pull request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitInfo>,
@@ -151,15 +102,6 @@ pub struct PaneInfo {
     /// Seconds spent in the current state when this was sent.
     #[serde(default)]
     pub state_secs: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum WorktreeAction {
-    #[default]
-    Keep,
-    Remove,
-    RemoveAndDeleteBranch,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
@@ -175,8 +117,6 @@ pub struct NewPane {
     /// interactive shell instead of ending.
     #[serde(default)]
     pub then_shell: bool,
-    pub worktree: bool,
-    pub branch: Option<String>,
     /// Make the new pane the focus of the requesting client.
     pub focus: bool,
 }
@@ -187,8 +127,6 @@ pub enum Command {
     New(NewPane),
     Kill {
         pane: PaneId,
-        worktree: WorktreeAction,
-        force: bool,
     },
     Rename {
         pane: PaneId,
@@ -221,7 +159,7 @@ pub enum Command {
         discard: bool,
     },
     /// End the pane's process but keep what it takes to bring it back
-    /// (its folder, worktree and agent conversation).
+    /// (its folder and agent conversation).
     Archive {
         pane: PaneId,
     },
@@ -229,34 +167,11 @@ pub enum Command {
     Unarchive {
         id: u64,
     },
-    /// Drop an archived pane (its worktree stays on disk).
+    /// Drop an archived pane.
     ForgetArchived {
         id: u64,
     },
-    WorktreeList,
-    WorktreeRemove {
-        target: String,
-        force: bool,
-        delete_branch: bool,
-    },
     DebugDump {
-        pane: PaneId,
-    },
-    /// The pane's worktree diff against where its branch started.
-    Diff {
-        pane: PaneId,
-    },
-    /// Commit everything in the pane's worktree.
-    Commit {
-        pane: PaneId,
-        message: String,
-    },
-    /// Merge the pane's branch into the base branch in the main checkout.
-    Merge {
-        pane: PaneId,
-    },
-    /// Throw away uncommitted changes in the pane's worktree.
-    Discard {
         pane: PaneId,
     },
     KillServer,
@@ -266,18 +181,11 @@ pub enum Command {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     Ok,
-    List {
-        panes: Vec<PaneInfo>,
-    },
-    Created {
-        pane: PaneInfo,
-        warning: Option<String>,
-    },
+    List { panes: Vec<PaneInfo> },
+    Created { pane: PaneInfo },
     Text(String),
     State(AgentState),
-    Worktrees(Vec<WorktreeInfo>),
     Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
-    Diff(DiffReport),
 }
 
 /// A pane that can be brought back, as a client lists it.
@@ -288,7 +196,6 @@ pub struct Restorable {
     pub agent: Option<String>,
     /// "resumes its conversation", "shell", …
     pub how: String,
-    pub worktree: bool,
 }
 
 /// A pane put away with `Command::Archive`.
@@ -483,17 +390,6 @@ mod tests {
             pid: Some(42),
             exit_code: None,
             title: Some("✳ Fix bug".into()),
-            worktree: Some(WorktreeInfo {
-                path: "/w/x".into(),
-                branch: "corral/x".into(),
-                repo: "/r".into(),
-                base: Some("main".into()),
-                changed_files: 3,
-                diff_files: 4,
-                added: 40,
-                removed: 2,
-                pane: Some("p1".into()),
-            }),
             git: None,
             cols: 80,
             rows: 24,
@@ -553,15 +449,9 @@ mod tests {
                 command: vec!["sh".into(), "-c".into(), "echo hi".into()],
                 shell: false,
                 then_shell: true,
-                worktree: true,
-                branch: Some("feature/x".into()),
                 focus: true,
             }),
-            Command::Kill {
-                pane: "p1".into(),
-                worktree: WorktreeAction::RemoveAndDeleteBranch,
-                force: true,
-            },
+            Command::Kill { pane: "p1".into() },
             Command::Rename {
                 pane: "p1".into(),
                 name: "n".into(),
@@ -585,20 +475,7 @@ mod tests {
                 session: Some("s".into()),
             },
             Command::Restore { discard: true },
-            Command::WorktreeList,
-            Command::WorktreeRemove {
-                target: "p1".into(),
-                force: false,
-                delete_branch: true,
-            },
             Command::DebugDump { pane: "p1".into() },
-            Command::Diff { pane: "p1".into() },
-            Command::Commit {
-                pane: "p1".into(),
-                message: "wip".into(),
-            },
-            Command::Merge { pane: "p1".into() },
-            Command::Discard { pane: "p1".into() },
             Command::KillServer,
         ];
         for (id, cmd) in cmds.into_iter().enumerate() {
@@ -621,7 +498,6 @@ mod tests {
                 workspace: "api".into(),
                 agent: Some("claude".into()),
                 how: "resumes its conversation".into(),
-                worktree: true,
             }],
             archived: vec![],
         });
@@ -650,29 +526,10 @@ mod tests {
             Ok(Reply::List {
                 panes: vec![pane()],
             }),
-            Ok(Reply::Created {
-                pane: pane(),
-                warning: Some("not a repo".into()),
-            }),
+            Ok(Reply::Created { pane: pane() }),
             Ok(Reply::Text("x".into())),
             Ok(Reply::State(AgentState::Idle)),
-            Ok(Reply::Worktrees(vec![pane().worktree.unwrap()])),
             Ok(Reply::Bytes(vec![1, 2, 3])),
-            Ok(Reply::Diff(DiffReport {
-                pane: Some("p1".into()),
-                branch: "corral/x".into(),
-                base: "main".into(),
-                commits: 1,
-                uncommitted: 2,
-                files: vec![FileDiff {
-                    path: "a.rs".into(),
-                    status: "M".into(),
-                    added: 1,
-                    removed: 1,
-                    binary: false,
-                    patch: "@@ -1 +1 @@\n-a\n+b\n".into(),
-                }],
-            })),
             Err("no such pane".into()),
         ];
         for (id, result) in replies.into_iter().enumerate() {

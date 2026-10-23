@@ -160,16 +160,6 @@ fn tui_shows_panes_forwards_input_and_detaches() {
     }
     t.wait_for("typed into the new shell", |x| x.contains("from-2-shell"));
 
-    // Prefix w asks for a branch (this directory isn't a repo, so the
-    // worktree falls back to a plain shell with a warning); Esc cancels.
-    t.type_(b"\x02w");
-    t.wait_for("worktree dialog", |x| {
-        x.contains("New worktree") && x.contains("Branch")
-    });
-    println!("{}", t.screen());
-    t.type_(b"\x1b");
-    t.wait_for("dialog closed", |x| !x.contains("New worktree"));
-
     // Help overlay.
     t.type_(b"\x02?");
     t.wait_for("help", |x| x.contains("corral keys"));
@@ -210,77 +200,6 @@ fn tui_mouse_click_focuses_a_sidebar_row() {
         .unwrap_or_else(|| panic!("no second row:\n{screen}"));
     t.type_(format!("\x1b[<0;5;{}M\x1b[<0;5;{}m", row + 1, row + 1).as_bytes());
     t.wait_for("pane two", |x| x.contains("pane-two"));
-}
-
-#[test]
-fn diff_review_commit_and_merge() {
-    let s = TestServer::start();
-    let repo = s.dir.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.name", "t"]);
-    git(&["config", "user.email", "t@t.invalid"]);
-    git(&["config", "commit.gpgsign", "false"]);
-    std::fs::write(repo.join("README"), "hello\n").unwrap();
-    git(&["add", "."]);
-    git(&["commit", "-qm", "init"]);
-    // An "agent" that edits a file and waits.
-    s.ok(&[
-        "new",
-        "--worktree",
-        "--cwd",
-        repo.to_str().unwrap(),
-        "--name",
-        "fixer",
-        "--",
-        "sh",
-        "-c",
-        "echo 'fixed line' >> README; echo agent-done; cat",
-    ]);
-    eventually("worktree stats", || {
-        s.panes()[0].worktree.as_ref().is_some_and(|w| w.added == 1)
-    });
-
-    let mut t = Tui::start(&s, 120, 30);
-    t.wait_for("sidebar with diff stats", |x| {
-        x.contains("+1 −0") && x.contains("agent-done")
-    });
-    t.type_(b"\x02D");
-    t.wait_for("diff view", |x| {
-        x.contains("README") && x.contains("+fixed line")
-    });
-    println!("{}", t.screen());
-    // Commit with the suggested message, then merge into main.
-    t.type_(b"c");
-    t.wait_for("commit prompt", |x| x.contains("Work from fixer"));
-    t.type_(b"\r");
-    t.wait_for("committed", |x| x.contains("0 uncommitted"));
-    t.type_(b"m");
-    t.wait_for("merge prompt", |x| x.contains("Merge corral/"));
-    t.type_(b"y");
-    t.wait_for("merged", |x| x.contains("into main (1 commit)"));
-    assert_eq!(
-        std::fs::read_to_string(repo.join("README")).unwrap(),
-        "hello\nfixed line\n"
-    );
-    // q closes the diff; typing goes to the agent again.
-    t.type_(b"q");
-    t.wait_for("agent again", |x| {
-        x.contains("agent-done") && !x.contains("+fixed line")
-    });
 }
 
 #[test]

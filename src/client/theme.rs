@@ -33,10 +33,8 @@ pub struct Theme {
     pub blocked: Color,
     pub done: Color,
     pub working: Color,
-    /// Branches and worktrees.
+    /// Branches.
     pub git: Color,
-    pub added: Color,
-    pub removed: Color,
     pub error: Color,
 }
 
@@ -56,8 +54,6 @@ pub const RANCH: Theme = Theme {
     done: rgb(0x93B57F),
     working: rgb(0x6FAFB8),
     git: rgb(0xB79BC9),
-    added: rgb(0x93B57F),
-    removed: rgb(0xDB6B47),
     error: rgb(0xE5674F),
 };
 
@@ -73,8 +69,6 @@ pub const INK: Theme = Theme {
     done: rgb(0xC9A46A),
     working: rgb(0xA8A6A2),
     git: rgb(0x9C9A96),
-    added: rgb(0xB9B6B0),
-    removed: rgb(0xF0A63A),
     error: rgb(0xF0A63A),
 };
 
@@ -90,8 +84,6 @@ pub const TERMINAL: Theme = Theme {
     done: Color::Green,
     working: Color::Cyan,
     git: Color::Magenta,
-    added: Color::Green,
-    removed: Color::Red,
     error: Color::Red,
 };
 

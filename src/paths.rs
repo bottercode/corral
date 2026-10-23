@@ -1,4 +1,4 @@
-//! Filesystem locations: socket, state, logs, worktrees and config.
+//! Filesystem locations: socket, state, logs and config.
 //!
 //! Every location can be overridden with an environment variable so tests
 //! and multiple independent servers never collide:
@@ -92,10 +92,6 @@ pub fn corral_home() -> PathBuf {
 
 pub fn log_dir() -> PathBuf {
     corral_home().join("log")
-}
-
-pub fn default_worktree_root() -> PathBuf {
-    corral_home().join("worktrees")
 }
 
 /// `~/.config/corral/config.toml`, or `CORRAL_CONFIG`.

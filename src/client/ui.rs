@@ -12,8 +12,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::input::Key;
 use super::sidebar::{RAIL_WIDTH, Sidebar, badge, task_title, truncate};
-use super::{App, MENU, MenuItem, Mode, diff, theme};
-use crate::protocol::{AgentState, PaneInfo, WorktreeAction};
+use super::{App, MENU, MenuItem, Mode, theme};
+use crate::protocol::{AgentState, PaneInfo};
 
 /// Below this width the sidebar is hidden…
 const MIN_WIDTH_FOR_SIDEBAR: u16 = 60;
@@ -229,61 +229,6 @@ impl TextInput {
     }
 }
 
-/// New worktree: the repo directory and an optional branch name.
-#[derive(Debug, Clone)]
-pub struct WorktreeDialog {
-    pub cwd: TextInput,
-    pub branch: TextInput,
-    pub field: usize,
-}
-
-impl WorktreeDialog {
-    pub fn new(cwd: &Path) -> Self {
-        WorktreeDialog {
-            cwd: TextInput::new(&home_relative(cwd)),
-            branch: TextInput::default(),
-            // Usually the directory is right; start on the branch.
-            field: 1,
-        }
-    }
-
-    /// Returns Some(true) to submit, Some(false) to cancel.
-    pub fn handle(&mut self, key: Key) -> Option<bool> {
-        match key {
-            Key::Esc | Key::Ctrl('c') => return Some(false),
-            Key::Enter => return Some(true),
-            Key::Tab | Key::BackTab | Key::Down | Key::Up => self.field = 1 - self.field,
-            k => {
-                match self.field {
-                    0 => self.cwd.handle(k),
-                    _ => self.branch.handle(k),
-                };
-            }
-        }
-        None
-    }
-
-    pub fn paste(&mut self, text: &str) {
-        match self.field {
-            0 => self.cwd.insert_str(text),
-            _ => self.branch.insert_str(text),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CloseStep {
-    /// Plain pane: confirm ending the process.
-    Confirm,
-    /// Pane with a worktree: keep / remove / remove + delete branch.
-    Worktree,
-    /// Removal was refused; offer to force it.
-    Force {
-        action: WorktreeAction,
-        message: String,
-    },
-}
-
 pub fn home_relative(p: &Path) -> String {
     if let Some(home) = dirs::home_dir()
         && let Ok(rest) = p.strip_prefix(&home)
@@ -352,17 +297,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     draw_hint(f, app, areas.hint);
-    if let Mode::Diff(v) = &mut app.mode {
-        // The diff takes the whole screen above the hint line.
-        let body = Rect::new(
-            areas.sidebar.x,
-            areas.sidebar.y,
-            areas.sidebar.width + areas.pane.width,
-            areas.pane.height,
-        );
-        diff::draw(f, v, body);
-        return;
-    }
     if matches!(app.mode, Mode::Stories) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -377,7 +311,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     match &app.mode {
-        Mode::Normal | Mode::Scroll { .. } | Mode::Diff(_) | Mode::Stories => {}
+        Mode::Normal | Mode::Scroll { .. } | Mode::Stories => {}
         Mode::Quit => draw_quit(f, app.running_agents(), areas.pane),
         Mode::Restore => draw_restore(f, app, areas.pane),
         Mode::Archive { selected } => {
@@ -385,10 +319,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             draw_archive(f, app, selected, areas.pane);
         }
         Mode::Help => draw_help(f, app, areas.pane),
-        Mode::Worktree(d) => {
-            let d = d.clone();
-            draw_worktree(f, &d, areas.pane);
-        }
         Mode::Menu { selected } => {
             let selected = *selected;
             draw_menu(f, app, selected);
@@ -398,11 +328,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let (pane, input) = (pane.clone(), input.clone());
             draw_rename(f, &pane, &input, areas.pane);
         }
-        Mode::Close { pane, step } => {
+        Mode::Close { pane } => {
             let info = app.panes.iter().find(|p| &p.id == pane).cloned();
             if let Some(info) = info {
-                let step = step.clone();
-                draw_close(f, &info, &step, areas.pane);
+                draw_close(f, &info, areas.pane);
             }
         }
     }
@@ -445,9 +374,7 @@ fn draw_empty(f: &mut Frame, app: &App, area: Rect) {
             Line::from(vec![
                 Span::raw("Press "),
                 Span::styled(format!("{p} n"), t.key()),
-                Span::raw(" for a shell to start one in, "),
-                Span::styled(format!("{p} w"), t.key()),
-                Span::raw(" for one in its own git worktree (or click the buttons),"),
+                Span::raw(" for a shell to start one in (or click the button),"),
             ]),
             Line::from(vec![
                 Span::raw("or run "),
@@ -605,9 +532,6 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
     let line = if let Some((msg, error)) = app.status() {
         let style = if error { t.fg(t.error) } else { t.accent() };
         Line::styled(format!(" {msg}"), style)
-    } else if matches!(app.mode, Mode::Diff(_)) {
-        // The diff view lists its own keys.
-        Line::default()
     } else if matches!(app.mode, Mode::Stories) {
         let mut l = key_hint(&[
             ("↑↓", "pick"),
@@ -624,14 +548,12 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
     } else if app.awaiting_command {
         let mut l = key_hint(&[
             ("n", "new"),
-            ("w", "worktree"),
             ("m", "menu"),
             ("t", "stories"),
             ("j/k", "switch"),
             ("b", "blocked"),
             ("s", "split"),
             ("o", "only"),
-            ("D", "diff"),
             ("x", "close"),
             ("a", "archive"),
             ("r", "rename"),
@@ -680,14 +602,9 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             "agents",
             vec![
                 ("n", "new shell (then run claude, codex, …)"),
-                ("w", "new shell in its own git worktree"),
                 ("j / k, ↑ / ↓", "next / previous agent"),
                 ("1 … 9", "jump to agent by number"),
                 ("b", "jump to the next blocked agent"),
-                (
-                    "D",
-                    "review the agent's worktree diff (commit, merge, discard)",
-                ),
                 ("x", "close the agent"),
                 ("a", "archive the agent: end it, keep it to bring back"),
                 ("A", "archived agents: bring one back, or forget it"),
@@ -774,37 +691,6 @@ fn field_line(
     ];
     all.extend(spans);
     (Line::from(all), active.then_some(label_w as u16 + cur))
-}
-
-fn draw_worktree(f: &mut Frame, d: &WorktreeDialog, area: Rect) {
-    let r = centered(area, 64, 7);
-    let inner_w = r.width.saturating_sub(2);
-    let (cwd, c0) = field_line("Repo", &d.cwd, d.field == 0, "~", inner_w);
-    let (branch, c1) = field_line(
-        "Branch",
-        &d.branch,
-        d.field == 1,
-        "new corral/agent-xxxx, or an existing branch",
-        inner_w,
-    );
-    let text = vec![
-        cwd,
-        branch,
-        Line::default(),
-        Line::styled(
-            "Opens a shell in a fresh checkout on that branch.",
-            theme::get().muted(),
-        ),
-        key_hint(&[("Tab", "next"), ("Enter", "create"), ("Esc", "cancel")]),
-    ];
-    f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(text).block(dialog_block("New worktree")), r);
-    let cursor = [(0u16, c0), (1, c1)]
-        .into_iter()
-        .find_map(|(row, c)| c.map(|c| (row, c)));
-    if let Some((row, col)) = cursor {
-        f.set_cursor_position((r.x + 1 + col, r.y + 1 + row));
-    }
 }
 
 /// The menu drops down from its button at the top of the sidebar.
@@ -949,17 +835,14 @@ fn draw_restore(f: &mut Frame, app: &App, area: Rect) {
     let place_w = app
         .restorable
         .iter()
-        .map(|r| r.workspace.width() + if r.worktree { 2 } else { 0 })
+        .map(|r| r.workspace.width())
         .max()
         .unwrap_or(0)
         .min(20);
     for r in app.restorable.iter().take(SHOWN) {
         let name = truncate(&r.name, name_w);
-        let place = truncate(
-            &r.workspace,
-            place_w.saturating_sub(if r.worktree { 2 } else { 0 }),
-        );
-        let place_pad = place_w.saturating_sub(place.width() + if r.worktree { 2 } else { 0 });
+        let place = truncate(&r.workspace, place_w);
+        let place_pad = place_w.saturating_sub(place.width());
         let mut spans = vec![
             Span::styled(
                 format!(
@@ -974,9 +857,6 @@ fn draw_restore(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(place, t.muted()),
         ];
-        if r.worktree {
-            spans.push(Span::styled(" ⎇", t.fg(t.git)));
-        }
         spans.push(Span::raw(" ".repeat(place_pad + 2)));
         spans.push(Span::styled(r.how.clone(), t.muted()));
         text.push(Line::from(spans));
@@ -987,7 +867,7 @@ fn draw_restore(f: &mut Frame, app: &App, area: Rect) {
     text.push(Line::default());
     text.extend(options(&[
         ("Enter", "bring them back"),
-        ("n", "start fresh (worktrees stay on disk)"),
+        ("n", "start fresh"),
         ("Esc", "decide later (`corral restore`)"),
     ]));
     let width = (text.iter().map(Line::width).max().unwrap_or(0) as u16 + 4)
@@ -1014,7 +894,7 @@ fn draw_archive(f: &mut Frame, app: &mut App, selected: usize, area: Rect) {
     let place_w = app
         .archived
         .iter()
-        .map(|a| a.pane.workspace.width() + if a.pane.worktree { 2 } else { 0 })
+        .map(|a| a.pane.workspace.width())
         .max()
         .unwrap_or(0)
         .min(20);
@@ -1024,11 +904,8 @@ fn draw_archive(f: &mut Frame, app: &mut App, selected: usize, area: Rect) {
         .map(|a| {
             let r = &a.pane;
             let name = truncate(&r.name, name_w);
-            let place = truncate(
-                &r.workspace,
-                place_w.saturating_sub(if r.worktree { 2 } else { 0 }),
-            );
-            let place_pad = place_w.saturating_sub(place.width() + if r.worktree { 2 } else { 0 });
+            let place = truncate(&r.workspace, place_w);
+            let place_pad = place_w.saturating_sub(place.width());
             let ago = super::sidebar::short_duration(std::time::Duration::from_millis(
                 now.saturating_sub(a.id),
             ));
@@ -1046,9 +923,6 @@ fn draw_archive(f: &mut Frame, app: &mut App, selected: usize, area: Rect) {
                 ),
                 Span::styled(place, t.muted()),
             ];
-            if r.worktree {
-                spans.push(Span::styled(" ⎇", t.fg(t.git)));
-            }
             spans.push(Span::raw(" ".repeat(place_pad + 2)));
             spans.push(Span::styled(format!("{ago:>4} ago  "), t.faint()));
             spans.push(Span::styled(r.how.clone(), t.muted()));
@@ -1058,7 +932,7 @@ fn draw_archive(f: &mut Frame, app: &mut App, selected: usize, area: Rect) {
     let hint = key_hint(&[
         ("↑↓", "pick"),
         ("Enter", "bring back"),
-        ("x", "forget (worktree stays)"),
+        ("x", "forget"),
         ("Esc", "close"),
     ]);
     let width = (rows
@@ -1122,8 +996,7 @@ fn draw_quit(f: &mut Frame, running: usize, area: Rect) {
     if running > 0 {
         text.push(Line::default());
         text.push(Line::styled(
-            "Stopping ends the agents' processes; worktrees and their changes stay on disk, \
-             and next time corral offers to bring the agents back.",
+            "Stopping ends the agents' processes; next time corral offers to bring them back.",
             theme::get().muted(),
         ));
     }
@@ -1158,54 +1031,17 @@ fn draw_rename(f: &mut Frame, pane: &str, input: &TextInput, area: Rect) {
     }
 }
 
-fn draw_close(f: &mut Frame, p: &PaneInfo, step: &CloseStep, area: Rect) {
+fn draw_close(f: &mut Frame, p: &PaneInfo, area: Rect) {
     let title = format!("Close {} · {}", p.id, p.name);
-    let running = p.state != AgentState::Exited;
-    let mut text: Vec<Line> = Vec::new();
-    match (step, &p.worktree) {
-        (CloseStep::Confirm, _) | (CloseStep::Worktree, None) => {
-            text.push(Line::raw(if running {
-                "End the process and close this pane?"
-            } else {
-                "Close this pane?"
-            }));
-            text.push(Line::default());
-            text.extend(options(&[("y", "close it"), ("Esc", "cancel")]));
-        }
-        (CloseStep::Worktree, Some(w)) => {
-            if running {
-                text.push(Line::raw("End the process and close this pane."));
-            }
-            text.push(Line::from(vec![
-                Span::raw("Worktree "),
-                Span::styled(w.branch.clone(), theme::get().fg(theme::get().git)),
-                Span::raw(match w.changed_files {
-                    0 => " · clean".to_string(),
-                    n => format!(" · {n} changed {}", crate::worktree::plural(n, "file")),
-                }),
-            ]));
-            text.push(Line::styled(home_relative(&w.path), theme::get().muted()));
-            text.push(Line::default());
-            text.extend(options(&[
-                ("k", "close, keep the worktree"),
-                ("r", "close and remove the worktree (keeps the branch)"),
-                ("d", "close, remove the worktree and delete the branch"),
-                ("Esc", "cancel"),
-            ]));
-        }
-        (CloseStep::Force { message, .. }, _) => {
-            text.push(Line::styled(
-                message.clone(),
-                theme::get().fg(theme::get().error),
-            ));
-            text.push(Line::default());
-            text.extend(options(&[
-                ("f", "force it (that work is lost)"),
-                ("k", "close, keep the worktree"),
-                ("Esc", "cancel"),
-            ]));
-        }
-    }
+    let mut text = vec![
+        Line::raw(if p.state != AgentState::Exited {
+            "End the process and close this pane?"
+        } else {
+            "Close this pane?"
+        }),
+        Line::default(),
+    ];
+    text.extend(options(&[("y", "close it"), ("Esc", "cancel")]));
     let width = 72u16.min(area.width.saturating_sub(2));
     let inner = width.saturating_sub(2).max(1) as usize;
     let rows: usize = text.iter().map(|l| l.width().div_ceil(inner).max(1)).sum();
@@ -1289,21 +1125,5 @@ mod tests {
         assert_eq!(spans[0].content, "…/to/project");
         let (spans, _) = t.spans(false, "", 40);
         assert_eq!(spans[0].content, "/very/long/path/to/project");
-    }
-
-    #[test]
-    fn worktree_dialog_navigation() {
-        let mut d = WorktreeDialog::new(Path::new("/tmp"));
-        assert_eq!(d.field, 1);
-        d.handle(Key::Char('b'));
-        assert_eq!(d.branch.text, "b");
-        d.handle(Key::Tab);
-        assert_eq!(d.field, 0);
-        d.handle(Key::Char('/'));
-        assert_eq!(d.cwd.text, "/tmp/");
-        d.handle(Key::BackTab);
-        assert_eq!(d.field, 1);
-        assert_eq!(d.handle(Key::Enter), Some(true));
-        assert_eq!(d.handle(Key::Esc), Some(false));
     }
 }

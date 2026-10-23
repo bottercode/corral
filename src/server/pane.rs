@@ -11,7 +11,7 @@ use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, nativ
 
 use crate::detect::Detector;
 use crate::paths;
-use crate::protocol::{GitInfo, PaneId, PaneInfo, WorktreeInfo};
+use crate::protocol::{GitInfo, PaneId, PaneInfo};
 
 pub const SCROLLBACK: usize = 10_000;
 
@@ -73,11 +73,9 @@ pub struct SpawnSpec {
     /// What to show as the pane's command.
     pub display: Vec<String>,
     pub cwd: PathBuf,
-    pub origin: PathBuf,
     pub socket: PathBuf,
     pub cols: u16,
     pub rows: u16,
-    pub worktree: Option<WorktreeInfo>,
 }
 
 /// Variables that describe the session that started the server rather
@@ -114,8 +112,6 @@ pub struct Pane {
     pub workspace: String,
     pub command: Vec<String>,
     pub cwd: PathBuf,
-    /// Where the pane was started from (the repo, for worktree panes).
-    pub origin: PathBuf,
     pub parser: Parser,
     /// Number of output chunks processed so far.
     pub seq: u64,
@@ -134,7 +130,6 @@ pub struct Pane {
     /// The session id the agent's hook last reported, and when (Unix
     /// seconds).
     pub hook_session: Option<(String, u64)>,
-    pub worktree: Option<WorktreeInfo>,
     /// Branch and pull request where the pane runs, refreshed by polling.
     pub git: Option<GitInfo>,
     pub exit_code: Option<i32>,
@@ -238,7 +233,6 @@ pub fn spawn(spec: SpawnSpec) -> Result<Spawned> {
         workspace: spec.workspace,
         command: spec.display,
         cwd: spec.cwd,
-        origin: spec.origin,
         parser: new_parser(spec.rows, spec.cols),
         seq: 0,
         cols: spec.cols,
@@ -252,7 +246,6 @@ pub fn spawn(spec: SpawnSpec) -> Result<Spawned> {
         agent: None,
         running: None,
         hook_session: None,
-        worktree: spec.worktree,
         git: None,
         exit_code: None,
         exited: false,
@@ -277,7 +270,6 @@ impl Pane {
             pid: self.pid,
             exit_code: self.exit_code,
             title: self.parser.callbacks().title.clone(),
-            worktree: self.worktree.clone(),
             git: self.git.clone(),
             cols: self.cols,
             rows: self.rows,

@@ -8,7 +8,6 @@
 //! server which panes it shows, at what size, with `View`.
 
 pub mod conn;
-pub mod diff;
 pub mod input;
 pub mod select;
 pub mod sidebar;
@@ -34,14 +33,13 @@ use crate::integrate::{self, Agent, HookStatus};
 use crate::paths;
 use crate::protocol::{
     self, AgentState, ArchivedPane, ClientMsg, Command, NewPane, PaneId, PaneInfo, Reply,
-    Restorable, ServerMsg, Viewport, WorktreeAction,
+    Restorable, ServerMsg, Viewport,
 };
 use conn::Conn;
-use diff::DiffView;
 use input::{Chunk, Key, Mouse, MouseKind, Splitter, decode_keys};
 use sidebar::Order;
 use stories::Stories;
-use ui::{CloseStep, TextInput, WorktreeDialog};
+use ui::TextInput;
 
 const STATUS_FOR: Duration = Duration::from_secs(6);
 /// How long the new-release toast stays up.
@@ -82,8 +80,6 @@ pub enum Mode {
     Scroll {
         offset: usize,
     },
-    /// New worktree: where, and on which branch.
-    Worktree(WorktreeDialog),
     /// The menu, with the selected row.
     Menu {
         selected: usize,
@@ -96,9 +92,7 @@ pub enum Mode {
     },
     Close {
         pane: PaneId,
-        step: CloseStep,
     },
-    Diff(DiffView),
     /// Top stories, over the panes (`App::stories` has the page).
     Stories,
     /// Detach, or stop corral and every agent.
@@ -114,12 +108,10 @@ pub enum Mode {
 #[derive(Debug)]
 enum Pending {
     New,
-    Kill { pane: PaneId },
-    Diff { pane: PaneId },
+    Kill,
     Restore { discard: bool },
     Archive,
     Unarchive,
-    DiffAction { pane: PaneId },
     Other,
 }
 
@@ -366,7 +358,7 @@ impl App {
             })
             .collect();
         // Pages drawn over the panes leave them unseen.
-        let covered = matches!(self.mode, Mode::Diff(_) | Mode::Stories);
+        let covered = matches!(self.mode, Mode::Stories);
         let now = (self.focus.clone(), view, covered);
         if self.sent_view.as_ref() == Some(&now) {
             return;
@@ -510,10 +502,7 @@ impl App {
     /// Directory a new agent should start in by default.
     fn default_dir(&self) -> PathBuf {
         match self.focused() {
-            Some(p) => p
-                .worktree
-                .as_ref()
-                .map_or_else(|| p.cwd.clone(), |w| w.repo.clone()),
+            Some(p) => p.cwd.clone(),
             None => self.cwd.clone(),
         }
     }
@@ -533,8 +522,6 @@ impl App {
             },
             shell: true,
             then_shell: true,
-            worktree: false,
-            branch: None,
             focus: true,
         }
     }
@@ -542,29 +529,6 @@ impl App {
     /// `^b n` / "+ new shell": a shell next to the focused agent's work.
     fn new_shell(&mut self) {
         let req = self.new_pane_request(self.default_dir());
-        self.request(Command::New(req), Pending::New);
-    }
-
-    /// `^b w` / "⎇ worktree": ask where and on which branch.
-    fn open_worktree(&mut self) {
-        let dir = self.default_dir();
-        self.mode = Mode::Worktree(WorktreeDialog::new(&dir));
-    }
-
-    fn submit_worktree(&mut self, d: WorktreeDialog) {
-        let cwd = paths::expand_tilde(d.cwd.text.trim());
-        let cwd = if cwd.is_relative() {
-            self.cwd.join(cwd)
-        } else {
-            cwd
-        };
-        let branch = d.branch.text.trim().to_string();
-        let req = NewPane {
-            worktree: true,
-            branch: (!branch.is_empty()).then_some(branch),
-            ..self.new_pane_request(cwd)
-        };
-        self.set_status("creating worktree…", false);
         self.request(Command::New(req), Pending::New);
     }
 
@@ -803,10 +767,7 @@ impl App {
                 // Picking an agent or starting one leaves the page.
                 let leaves = self.hits.iter().any(|h| {
                     h.contains(m.x, m.y)
-                        && matches!(
-                            h.click,
-                            sidebar::Click::Focus(_) | sidebar::Click::New { .. }
-                        )
+                        && matches!(h.click, sidebar::Click::Focus(_) | sidebar::Click::New)
                 });
                 if leaves {
                     self.mode = Mode::Normal;
@@ -840,15 +801,7 @@ impl App {
 
     fn open_close(&mut self) {
         let Some(p) = self.focused() else { return };
-        let step = if p.worktree.is_some() {
-            CloseStep::Worktree
-        } else {
-            CloseStep::Confirm
-        };
-        self.mode = Mode::Close {
-            pane: p.id.clone(),
-            step,
-        };
+        self.mode = Mode::Close { pane: p.id.clone() };
     }
 
     /// `^b a`: put the focused agent away, to bring back later.
@@ -909,15 +862,8 @@ impl App {
         }
     }
 
-    fn kill(&mut self, pane: PaneId, worktree: WorktreeAction, force: bool) {
-        self.request(
-            Command::Kill {
-                pane: pane.clone(),
-                worktree,
-                force,
-            },
-            Pending::Kill { pane },
-        );
+    fn kill(&mut self, pane: PaneId) {
+        self.request(Command::Kill { pane }, Pending::Kill);
     }
 
     fn detach(&mut self) {
@@ -938,26 +884,6 @@ impl App {
         self.stopping = Some(self.running_agents());
         self.set_status("stopping corral…", false);
         self.request(Command::KillServer, Pending::Other);
-    }
-
-    fn open_diff(&mut self) {
-        let Some(p) = self.focused() else { return };
-        if p.worktree.is_none() {
-            self.set_status(
-                format!(
-                    "{} has no worktree; start agents with {} w to review their diffs",
-                    p.name, self.prefix_label
-                ),
-                false,
-            );
-            return;
-        }
-        let (id, name) = (p.id.clone(), p.name.clone());
-        self.mode = Mode::Diff(DiffView::new(id.clone(), name));
-        self.request(
-            Command::Diff { pane: id.clone() },
-            Pending::Diff { pane: id },
-        );
     }
 
     fn forward(&mut self, bytes: &[u8], is_paste: bool) {
@@ -982,7 +908,6 @@ impl App {
             Key::Char('t') if from_stories => {}
             Key::Char('t') => self.open_stories(),
             Key::Char('n') => self.new_shell(),
-            Key::Char('w') => self.open_worktree(),
             Key::Char('m') => self.open_menu(),
             Key::Char('j') | Key::Down => self.cycle_focus(1),
             Key::Char('k') | Key::Up => self.cycle_focus(-1),
@@ -1018,7 +943,6 @@ impl App {
             }
             Key::Char('d') => self.detach(),
             Key::Char('q') => self.mode = Mode::Quit,
-            Key::Char('D') => self.open_diff(),
             Key::Char('[') => self.enter_scroll(0),
             Key::Char('?') => self.mode = Mode::Help,
             _ => {}
@@ -1210,8 +1134,7 @@ impl App {
                     .map(|h| h.click.clone());
                 match click {
                     Some(sidebar::Click::Focus(id)) => self.set_focus(id),
-                    Some(sidebar::Click::New { worktree: false }) => self.new_shell(),
-                    Some(sidebar::Click::New { worktree: true }) => self.open_worktree(),
+                    Some(sidebar::Click::New) => self.new_shell(),
                     Some(sidebar::Click::Menu) => self.open_menu(),
                     Some(sidebar::Click::Exit) => self.mode = Mode::Quit,
                     Some(sidebar::Click::Order) => self.toggle_order(),
@@ -1250,11 +1173,6 @@ impl App {
                 Key::Esc | Key::Ctrl('c') => {}
                 _ => self.mode = Mode::Quit,
             },
-            Mode::Worktree(mut d) => match d.handle(key) {
-                Some(true) => self.submit_worktree(d),
-                Some(false) => {}
-                None => self.mode = Mode::Worktree(d),
-            },
             Mode::Menu { selected } => self.menu_key(selected, key),
             Mode::Archive { selected } => self.archive_key(selected, key),
             Mode::Restore => match key {
@@ -1291,55 +1209,11 @@ impl App {
                     self.mode = Mode::Rename { pane, input };
                 }
             },
-            Mode::Close { pane, step } => {
-                let keep = |s: &mut Self, pane: PaneId| s.kill(pane, WorktreeAction::Keep, false);
-                match (&step, key) {
-                    (_, Key::Esc | Key::Ctrl('c')) => {}
-                    (CloseStep::Confirm, Key::Char('y' | 'Y' | 'x') | Key::Enter) => {
-                        keep(self, pane)
-                    }
-                    (CloseStep::Confirm, Key::Char('n' | 'N')) => {}
-                    (CloseStep::Worktree, Key::Char('k')) => keep(self, pane),
-                    (CloseStep::Worktree, Key::Char('r')) => {
-                        self.kill(pane, WorktreeAction::Remove, false)
-                    }
-                    (CloseStep::Worktree, Key::Char('d')) => {
-                        self.kill(pane, WorktreeAction::RemoveAndDeleteBranch, false)
-                    }
-                    (CloseStep::Force { action, .. }, Key::Char('f')) => {
-                        let action = *action;
-                        self.kill(pane, action, true)
-                    }
-                    (CloseStep::Force { .. }, Key::Char('k')) => keep(self, pane),
-                    _ => self.mode = Mode::Close { pane, step },
-                }
-            }
-            Mode::Diff(mut v) => {
-                let pane = v.pane.clone();
-                match v.handle(key) {
-                    diff::Action::Close => return,
-                    diff::Action::None => {}
-                    diff::Action::Refresh => {
-                        self.request(Command::Diff { pane: pane.clone() }, Pending::Diff { pane })
-                    }
-                    diff::Action::Commit(message) => self.request(
-                        Command::Commit {
-                            pane: pane.clone(),
-                            message,
-                        },
-                        Pending::DiffAction { pane },
-                    ),
-                    diff::Action::Merge => self.request(
-                        Command::Merge { pane: pane.clone() },
-                        Pending::DiffAction { pane },
-                    ),
-                    diff::Action::Discard => self.request(
-                        Command::Discard { pane: pane.clone() },
-                        Pending::DiffAction { pane },
-                    ),
-                }
-                self.mode = Mode::Diff(v);
-            }
+            Mode::Close { pane } => match key {
+                Key::Char('y' | 'Y' | 'x') | Key::Enter => self.kill(pane),
+                Key::Esc | Key::Ctrl('c') | Key::Char('n' | 'N') => {}
+                _ => self.mode = Mode::Close { pane },
+            },
             m @ (Mode::Normal | Mode::Scroll { .. }) => self.mode = m,
         }
     }
@@ -1350,11 +1224,8 @@ impl App {
             .trim_start_matches("\x1b[200~")
             .trim_end_matches("\x1b[201~")
             .replace(['\r', '\n'], " ");
-        match &mut self.mode {
-            Mode::Worktree(d) => d.paste(&text),
-            Mode::Rename { input, .. } => input.insert_str(&text),
-            Mode::Diff(v) => v.paste(&text),
-            _ => {}
+        if let Mode::Rename { input, .. } = &mut self.mode {
+            input.insert_str(&text);
         }
     }
 
@@ -1538,67 +1409,14 @@ impl App {
                 format!("{t} · {} A brings it back", self.prefix_label),
                 false,
             ),
-            (Pending::Unarchive, Ok(Reply::Created { pane, warning })) => {
+            (Pending::Unarchive, Ok(Reply::Created { pane })) => {
                 if matches!(self.mode, Mode::Archive { .. }) {
                     self.mode = Mode::Normal;
                 }
-                match warning {
-                    Some(w) => self.set_status(w, true),
-                    None => self.set_status(format!("brought back {}", pane.name), false),
-                }
+                self.set_status(format!("brought back {}", pane.name), false);
             }
-            (Pending::New, Ok(Reply::Created { pane, warning })) => match warning {
-                Some(w) => self.set_status(w, true),
-                None => match &pane.worktree {
-                    Some(w) => self.set_status(
-                        format!("{} started in worktree {}", pane.id, w.branch),
-                        false,
-                    ),
-                    None => self.status = None,
-                },
-            },
-            (Pending::Kill { .. }, Ok(Reply::Text(t))) => self.set_status(t, false),
-            (Pending::Kill { pane }, Err(e))
-                if e.contains("uncommitted changes") || e.contains("on any other branch") =>
-            {
-                let action = if e.contains("on any other branch") {
-                    WorktreeAction::RemoveAndDeleteBranch
-                } else {
-                    // Keep the user's choice of deleting the branch too.
-                    WorktreeAction::Remove
-                };
-                self.mode = Mode::Close {
-                    pane,
-                    step: CloseStep::Force { action, message: e },
-                };
-            }
-            (Pending::Diff { pane }, result) => {
-                if let Mode::Diff(v) = &mut self.mode
-                    && v.pane == pane
-                {
-                    match result {
-                        Ok(Reply::Diff(report)) => v.set_report(report),
-                        Ok(_) => v.busy = false,
-                        Err(e) => {
-                            v.busy = false;
-                            self.set_status(e, true);
-                        }
-                    }
-                }
-            }
-            (Pending::DiffAction { pane }, result) => {
-                match result {
-                    Ok(Reply::Text(t)) => self.set_status(t, false),
-                    Ok(_) => {}
-                    Err(e) => self.set_status(e, true),
-                }
-                if let Mode::Diff(v) = &mut self.mode
-                    && v.pane == pane
-                {
-                    v.busy = true;
-                    self.request(Command::Diff { pane: pane.clone() }, Pending::Diff { pane });
-                }
-            }
+            (Pending::New, Ok(Reply::Created { .. })) => self.status = None,
+            (Pending::Kill, Ok(Reply::Text(t))) => self.set_status(t, false),
             (_, Err(e)) => self.set_status(e, true),
             (_, Ok(_)) => {}
         }
@@ -1709,7 +1527,7 @@ pub async fn run(workspace: Option<String>) -> Result<()> {
             println!("[detached from corral; agents keep running — `corral` to reattach]")
         }
         Exit::Stopped(n) => println!(
-            "[corral stopped; {n} {} ended. Worktrees are kept: `corral worktree ls`]",
+            "[corral stopped; {n} {} ended]",
             if n == 1 { "agent" } else { "agents" }
         ),
         Exit::ServerGone(reason) => println!("[corral: {reason}]"),
@@ -1849,7 +1667,6 @@ mod tests {
             pid: None,
             exit_code: None,
             title: None,
-            worktree: None,
             git: None,
             cols: 80,
             rows: 24,
@@ -1971,13 +1788,13 @@ mod tests {
     }
 
     #[test]
-    fn new_opens_a_shell_and_worktree_asks_for_a_branch() {
+    fn new_opens_a_shell() {
         // ^b n: a plain shell next to the focused agent, no dialog.
         let mut a = app();
         a.on_stdin(b"\x02n");
         assert!(matches!(a.mode, Mode::Normal));
         let req = sent_new(&a);
-        assert!(req.command.is_empty() && req.focus && !req.worktree);
+        assert!(req.command.is_empty() && req.focus);
         assert_eq!(req.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
 
         // With a default command it runs first, and the shell stays after.
@@ -1987,53 +1804,18 @@ mod tests {
         let req = sent_new(&a);
         assert_eq!(req.command, vec!["claude"]);
         assert!(req.shell && req.then_shell);
-
-        // ^b w: the worktree dialog starts on the branch field.
-        let mut a = app();
-        a.on_stdin(b"\x02w");
-        assert!(matches!(&a.mode, Mode::Worktree(d) if d.field == 1));
-        a.on_stdin(b"fix-login\r");
-        let req = sent_new(&a);
-        assert!(req.worktree && req.command.is_empty());
-        assert_eq!(req.branch.as_deref(), Some("fix-login"));
-        assert!(matches!(a.mode, Mode::Normal));
     }
 
     #[test]
-    fn dirty_worktree_offers_force() {
+    fn close_asks_first() {
         let mut a = app();
-        a.kill("p1".into(), WorktreeAction::Remove, false);
-        let ClientMsg::Command { id, .. } = a.outbox[0] else {
-            panic!()
-        };
-        a.on_server(ServerMsg::Reply {
-            id,
-            result: Err(
-                "…/x has uncommitted changes (2 files); commit them or force removal".into(),
-            ),
-        });
+        a.on_stdin(b"\x02x");
+        assert!(matches!(&a.mode, Mode::Close { pane } if pane == "p1"));
+        a.on_stdin(b"y");
+        assert!(matches!(a.mode, Mode::Normal));
         assert!(matches!(
-            &a.mode,
-            Mode::Close {
-                step: CloseStep::Force {
-                    action: WorktreeAction::Remove,
-                    ..
-                },
-                ..
-            }
-        ));
-        a.outbox.clear();
-        a.on_stdin(b"f");
-        assert!(matches!(
-            &a.outbox[0],
-            ClientMsg::Command {
-                cmd: Command::Kill {
-                    force: true,
-                    worktree: WorktreeAction::Remove,
-                    ..
-                },
-                ..
-            }
+            &a.outbox[..],
+            [ClientMsg::Command { cmd: Command::Kill { pane }, .. }] if pane == "p1"
         ));
     }
 
@@ -2045,7 +1827,6 @@ mod tests {
                 workspace: "w".into(),
                 agent: Some("claude".into()),
                 how: "resumes its conversation".into(),
-                worktree: false,
             },
         }
     }
@@ -2117,55 +1898,6 @@ mod tests {
     }
 
     #[test]
-    fn prefix_shift_d_opens_diff_review() {
-        let mut a = app();
-        a.on_stdin(b"\x02D");
-        assert!(matches!(a.mode, Mode::Normal));
-        assert!(a.status().unwrap().0.contains("no worktree"));
-        let mut panes = a.panes.clone();
-        panes[0].worktree = Some(Default::default());
-        a.on_server(ServerMsg::State {
-            panes,
-            focus: Some("p1".into()),
-            view_generation: a.view_generation,
-            restorable: vec![],
-            archived: vec![],
-        });
-        a.on_stdin(b"\x02D");
-        assert!(matches!(a.mode, Mode::Diff(_)));
-        let ClientMsg::Command {
-            id,
-            cmd: Command::Diff { pane },
-        } = &a.outbox[0]
-        else {
-            panic!("{:?}", a.outbox)
-        };
-        assert_eq!(pane, "p1");
-        let id = *id;
-        a.outbox.clear();
-        a.on_server(ServerMsg::Reply {
-            id,
-            result: Ok(Reply::Diff(protocol::DiffReport {
-                uncommitted: 1,
-                ..Default::default()
-            })),
-        });
-        let Mode::Diff(v) = &a.mode else { panic!() };
-        assert!(v.report.is_some() && !v.busy);
-        // Keys go to the diff view, not the agent.
-        a.on_stdin(b"c\r");
-        assert!(matches!(
-            &a.outbox[0],
-            ClientMsg::Command {
-                cmd: Command::Commit { .. },
-                ..
-            }
-        ));
-        a.on_stdin(b"q");
-        assert!(matches!(a.mode, Mode::Normal));
-    }
-
-    #[test]
     fn notifications_ring_the_bell() {
         let mut a = app();
         a.on_server(ServerMsg::Notify {
@@ -2231,21 +1963,17 @@ mod tests {
     }
 
     #[test]
-    fn new_buttons() {
+    fn new_button() {
         let mut a = app();
         a.sidebar_area = Rect::new(0, 0, 30, 20);
-        let button = |x, worktree| sidebar::Hit {
-            area: Rect::new(x, 18, 12, 1),
-            click: sidebar::Click::New { worktree },
-        };
-        a.hits = vec![button(1, false), button(14, true)];
+        a.hits = vec![sidebar::Hit {
+            area: Rect::new(1, 18, 12, 1),
+            click: sidebar::Click::New,
+        }];
         // Click "+ new shell".
         a.on_stdin(b"\x1b[<0;3;19M\x1b[<0;3;19m");
         assert!(sent_new(&a).command.is_empty());
         assert!(matches!(a.mode, Mode::Normal));
-        // Click "⎇ worktree".
-        a.on_stdin(b"\x1b[<0;16;19M");
-        assert!(matches!(&a.mode, Mode::Worktree(_)));
     }
 
     #[test]
@@ -2308,7 +2036,6 @@ mod tests {
                     workspace: "api".into(),
                     agent: Some("claude".into()),
                     how: "resumes its conversation".into(),
-                    worktree: true,
                 }],
                 archived: vec![],
             });

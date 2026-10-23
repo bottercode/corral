@@ -315,10 +315,10 @@ impl Session {
                 let focus = req.focus;
                 tokio::task::spawn_blocking(move || {
                     let r = hub.new_pane(req, Some(client));
-                    if let (Ok((info, _)), true) = (&r, focus) {
+                    if let (Ok(info), true) = (&r, focus) {
                         let _ = internal.send(info.id.clone());
                     }
-                    reply(r.map(|(pane, warning)| Reply::Created { pane, warning }));
+                    reply(r.map(|pane| Reply::Created { pane }));
                 });
             }
             Command::Unarchive { id } => {
@@ -326,10 +326,10 @@ impl Session {
                 let internal = self.internal.clone();
                 tokio::task::spawn_blocking(move || {
                     let r = hub.unarchive(id, Some(client));
-                    if let Ok((info, _)) = &r {
+                    if let Ok(info) = &r {
                         let _ = internal.send(info.id.clone());
                     }
-                    reply(r.map(|(pane, warning)| Reply::Created { pane, warning }));
+                    reply(r.map(|pane| Reply::Created { pane }));
                 });
             }
             Command::Restore { discard } => {
@@ -348,11 +348,7 @@ impl Session {
 fn run_blocking(hub: &Hub, cmd: Command) -> Result<Reply> {
     Ok(match cmd {
         Command::List => Reply::List { panes: hub.infos() },
-        Command::Kill {
-            pane,
-            worktree,
-            force,
-        } => Reply::Text(hub.kill_pane(&pane, worktree, force)?),
+        Command::Kill { pane } => Reply::Text(hub.kill_pane(&pane)?),
         Command::Rename { pane, name } => {
             hub.rename(&pane, &name)?;
             Reply::Ok
@@ -376,17 +372,7 @@ fn run_blocking(hub: &Hub, cmd: Command) -> Result<Reply> {
         }
         Command::Archive { pane } => Reply::Text(hub.archive_pane(&pane)?),
         Command::ForgetArchived { id } => Reply::Text(hub.forget_archived(id)?),
-        Command::WorktreeList => Reply::Worktrees(hub.worktrees()),
-        Command::WorktreeRemove {
-            target,
-            force,
-            delete_branch,
-        } => Reply::Text(hub.remove_worktree(&target, force, delete_branch)?),
         Command::DebugDump { pane } => Reply::Bytes(hub.dump(&pane)?),
-        Command::Diff { pane } => Reply::Diff(hub.diff(&pane)?),
-        Command::Commit { ref pane, .. }
-        | Command::Merge { ref pane }
-        | Command::Discard { ref pane } => Reply::Text(hub.worktree_action(pane, &cmd)?),
         Command::New(_)
         | Command::Restore { .. }
         | Command::Unarchive { .. }

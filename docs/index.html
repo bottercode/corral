@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>corral: a terminal runtime for coding agents</title>
-<meta name="description" content="Run Claude Code, Codex and opencode side by side in one terminal. corral keeps them running when you close the laptop, puts the agent that needs you on top, and gives each one its own git worktree.">
+<meta name="description" content="Run Claude Code, Codex and opencode side by side in one terminal. corral keeps them running when you close the laptop, and puts the agent that needs you on top.">
 <meta property="og:title" content="corral: a terminal runtime for coding agents">
-<meta property="og:description" content="Keep your coding agents running, see which one needs you, and land their work from one terminal.">
+<meta property="og:description" content="Keep your coding agents running and see which one needs you, from one terminal.">
 <meta property="og:image" content="https://bottercode.github.io/corral/brand/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -117,7 +117,7 @@
   .dt .g { color: var(--heather); }
   .sw { color: var(--creek); } .sbk { color: var(--rust); font-weight: 600; } .sd { color: var(--sage); } .si { color: var(--t-muted); }
   .sb .ft { margin-top: auto; border-top: 1px solid var(--t-faint); padding: 6px 12px 8px; display: grid; gap: 1px; }
-  .ft .a { color: var(--hay); font-weight: 600; } .ft .b { color: var(--heather); } .ft .c { color: var(--sage); }
+  .ft .a { color: var(--hay); font-weight: 600; } .ft .c { color: var(--sage); }
   .tile { display: flex; flex-direction: column; border-right: 1px solid var(--t-line); }
   .tile:last-child { border-right: 0; }
   .th { display: flex; justify-content: space-between; gap: 10px; padding: 0 12px; height: 24px; align-items: center; color: var(--t-muted); white-space: nowrap; overflow: hidden; }
@@ -316,9 +316,9 @@
       <div class="shead">
         <div>
           <span class="label"><b>01</b> &nbsp;what it does</span>
-          <h2>Less tab-hunting. <em>More landing.</em></h2>
+          <h2>Less tab-hunting. <em>More shipping.</em></h2>
         </div>
-        <p>Running several agents breaks down fast: one sits blocked in a tab you aren't looking at, closing the terminal kills the work, and two of them edit the same files. corral fixes all three.</p>
+        <p>Running several agents breaks down fast: one sits blocked in a tab you aren't looking at, and closing the terminal kills the work. corral fixes both.</p>
       </div>
 
       <article class="feat">
@@ -345,47 +345,6 @@
 
       <article class="feat">
         <div class="copy">
-          <span class="label">worktrees</span>
-          <h3>A branch of its own for every agent.</h3>
-          <p><code>^b w</code> starts an agent in a fresh git worktree, so parallel agents never edit the same checkout or break each other's builds. The sidebar shows each one's branch, its pull request, and how much it has changed.</p>
-          <a class="more" href="https://github.com/bottercode/corral#worktrees">Worktrees in depth →</a>
-        </div>
-        <div class="panel">
-          <div class="ph"><span>~/src/api</span><span>zsh</span></div>
-<pre><span class="m">$</span> corral new --worktree --branch fix/login -- claude
-<span class="m">p5 started in worktree</span> <span class="vv">fix/login</span>
-
-<span class="hl"><span class="h">▍</span><span class="m">5</span> <span class="bold">claude</span>                    <span class="cc">⠋ 2m</span></span>
-<span class="hl"><span class="h">▍</span>   Fix the login redirect</span>
-<span class="hl"><span class="h">▍</span>   <span class="m">api · claude</span></span>
-<span class="hl"><span class="h">▍</span>   <span class="vv">⎇ fix/login</span> <span class="ss">+42</span> <span class="rr">−7</span> <span class="h">#118</span></span></pre>
-        </div>
-      </article>
-
-      <article class="feat">
-        <div class="copy">
-          <span class="label">review</span>
-          <h3>Read the diff. Land it.</h3>
-          <p><code>^b D</code> opens what the agent changed since its branch started, committed work and new files included. Commit it, merge it into the branch it came from, or throw it away, without leaving the terminal.</p>
-          <a class="more" href="https://github.com/bottercode/corral#diff-review">Diff review →</a>
-        </div>
-        <div class="panel">
-          <div class="ph"><span><span class="h bold">diff</span> fixer  <span class="vv">⎇ fix/token-refresh → main</span></span></div>
-<pre><span class="hl"><span class="h">▍</span><span class="h">M</span> src/auth/refresh.rs        <span class="ss">+12</span> <span class="rr">−3</span></span>
- <span class="ss">A</span> tests/refresh_race.rs      <span class="ss">+31</span> <span class="rr">−0</span>
-
-<span class="m">@@ -41,6 +41,9 @@ impl Refresher {</span>
-<span class="ss">+     let _guard = self.lock.acquire().await;</span>
-<span class="rr">-     if self.expired() {</span>
-<span class="ss">+     if self.expired() &amp;&amp; !self.in_flight() {</span>
-
-<span class="m"> 2 files +43 −3 · 1 commit · 2 uncommitted </span>
-<span class="h">c</span> commit  <span class="h">m</span> merge  <span class="h">x</span> discard  <span class="h">r</span> refresh</pre>
-        </div>
-      </article>
-
-      <article class="feat">
-        <div class="copy">
           <span class="label">always running</span>
           <h3>Close the lid. They keep going.</h3>
           <p>A small background server owns every agent's terminal; the UI just attaches to it. Detach, lose SSH, come back from another machine. If corral itself stops for a reboot or an update, it offers to bring every agent back into its conversation.</p>
@@ -395,12 +354,12 @@
           <div class="ph"><span>welcome back</span></div>
 <pre><span class="bold">corral stopped with 3 panes open. Bring them back?</span>
 
-  <span class="bold">fixer</span>   api <span class="vv">⎇</span>    <span class="m">resumes its conversation</span>
+  <span class="bold">fixer</span>   api       <span class="m">resumes its conversation</span>
   <span class="bold">api</span>     api       <span class="m">continues its latest conversation</span>
   zsh     website   <span class="m">shell</span>
 
  <span class="h">Enter</span> bring them back
- <span class="h">n</span>     start fresh (worktrees stay on disk)
+ <span class="h">n</span>     start fresh
  <span class="h">Esc</span>   decide later</pre>
         </div>
       </article>
@@ -409,12 +368,12 @@
         <div class="copy">
           <span class="label">archive</span>
           <h3>Put work away, not out.</h3>
-          <p>Done with an agent for now? <code>^b a</code> archives it: the process ends, but its folder, worktree and conversation are kept, even across restarts. <code>^b A</code> lists them and brings one back where it left off.</p>
+          <p>Done with an agent for now? <code>^b a</code> archives it: the process ends, but its folder and conversation are kept, even across restarts. <code>^b A</code> lists them and brings one back where it left off.</p>
           <a class="more" href="https://github.com/bottercode/corral#archive">Archiving →</a>
         </div>
         <div class="panel">
           <div class="ph"><span>archived</span><span>2</span></div>
-<pre><span class="hl"><span class="h">▍</span> <span class="bold">fixer</span>  api <span class="vv">⎇</span>    <span class="m">2h ago</span>  <span class="m">resumes its conversation</span></span>
+<pre><span class="hl"><span class="h">▍</span> <span class="bold">fixer</span>  api      <span class="m">2h ago</span>  <span class="m">resumes its conversation</span></span>
   <span class="bold">docs</span>   website  <span class="m">1d ago</span>  <span class="m">continues its latest conversation</span>
 
  <span class="h">↑↓</span> pick  <span class="h">Enter</span> bring back  <span class="h">x</span> forget  <span class="h">Esc</span> close</pre>
@@ -430,11 +389,10 @@
         </div>
         <div class="panel">
           <div class="ph"><span>task.sh</span><span>sh</span></div>
-<pre>p=$(corral new --worktree -- claude)
+<pre>p=$(corral new -- claude)
 corral send "$p" <span class="h">"add input validation"</span> --enter
 corral wait "$p" --state blocked --timeout 600
-corral read "$p" --lines 30
-corral diff "$p" &amp;&amp; corral merge "$p"</pre>
+corral read "$p" --lines 30</pre>
         </div>
       </article>
     </div>
@@ -454,8 +412,7 @@ corral diff "$p" &amp;&amp; corral merge "$p"</pre>
           <ul>
             <li>An agent asks for permission in a tab you aren't on, and waits twenty minutes.</li>
             <li>Closing the window or dropping SSH ends every agent.</li>
-            <li>Two agents edit the same checkout and break each other's builds.</li>
-            <li>Reviewing their work means juggling branches by hand.</li>
+            <li>Finding out what each one is up to means clicking through every tab.</li>
           </ul>
         </div>
         <div class="yes">
@@ -463,8 +420,7 @@ corral diff "$p" &amp;&amp; corral merge "$p"</pre>
           <ul>
             <li>Blocked agents rise to the top of the sidebar and ring a bell.</li>
             <li>A background server keeps them running; reattach from anywhere.</li>
-            <li>Each agent can work in its own git worktree and branch.</li>
-            <li>Review, commit and merge each agent's diff in place.</li>
+            <li>One sidebar shows every agent's task, branch and pull request.</li>
           </ul>
         </div>
       </div>
@@ -498,12 +454,12 @@ corral diff "$p" &amp;&amp; corral merge "$p"</pre>
       </div>
       <div class="keys">
         <div><kbd>^b n</kbd> new shell</div>
-        <div><kbd>^b w</kbd> new shell in a worktree</div>
         <div><kbd>^b b</kbd> jump to the next blocked agent</div>
         <div><kbd>^b j k</kbd> next / previous agent</div>
         <div><kbd>^b s</kbd> show another alongside</div>
-        <div><kbd>^b D</kbd> review the diff</div>
+        <div><kbd>^b o</kbd> only the focused agent</div>
         <div><kbd>^b a</kbd> archive the agent</div>
+        <div><kbd>^b x</kbd> close the agent</div>
         <div><kbd>^b d</kbd> detach, agents keep running</div>
         <div><kbd>^b ?</kbd> every key</div>
       </div>
@@ -557,10 +513,10 @@ corral diff "$p" &amp;&amp; corral merge "$p"</pre>
   // The demo: a played-back corral session.
   var SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
   var agents = [
-    { n: 1, name: 'api', agent: 'claude', ws: 'api', title: 'Add rate limiting', branch: 'corral/api-81c2', diff: [42, 7], state: 'working', age: 32 },
-    { n: 2, name: 'fixer', agent: 'claude', ws: 'api', title: 'Fix token refresh', branch: 'fix/token-refresh', diff: [12, 3], state: 'blocked', age: 240 },
+    { n: 1, name: 'api', agent: 'claude', ws: 'api', title: 'Add rate limiting', branch: 'rate-limits', pr: 128, state: 'working', age: 32 },
+    { n: 2, name: 'fixer', agent: 'claude', ws: 'api', title: 'Fix token refresh', branch: 'fix/token-refresh', state: 'blocked', age: 240 },
     { n: 3, name: 'docs', agent: 'codex', ws: 'website', title: 'Update the install guide', branch: 'main', state: 'done', age: 60 },
-    { n: 4, name: 'tests', agent: 'opencode', ws: 'api', title: 'Cover the retry path', branch: 'corral/tests-0d4e', diff: [0, 0], state: 'idle', age: 0 }
+    { n: 4, name: 'tests', agent: 'opencode', ws: 'api', title: 'Cover the retry path', branch: 'retry-tests', state: 'idle', age: 0 }
   ];
   var focus = 2, frame = 0, status = '';
   function spin() { return '<span class="s">' + SPIN[frame % 10] + '</span> '; }
@@ -612,12 +568,12 @@ corral diff "$p" &amp;&amp; corral merge "$p"</pre>
         if (on) {
           h += '<div class="r dt t" data-n="' + a.n + '">' + esc(a.title) + '</div>';
           h += '<div class="r dt" data-n="' + a.n + '">' + esc(a.ws + ' · ' + a.agent) + '</div>';
-          var d = a.diff && a.diff[0] ? ' <span class="sd">+' + a.diff[0] + '</span> <span class="sbk" style="font-weight:400">−' + a.diff[1] + '</span>' : '';
+          var d = a.pr ? ' <span style="color:var(--hay)">#' + a.pr + '</span>' : '';
           h += '<div class="r dt" data-n="' + a.n + '"><span class="g">⎇ ' + esc(a.branch) + '</span>' + d + '</div>';
         }
       });
     });
-    h += '<div class="ft"><span><span class="a">+ new shell</span>   <span class="b">⎇ worktree</span></span><span class="c">✦ top stories</span></div>';
+    h += '<div class="ft"><span><span class="a">+ new shell</span></span><span class="c">✦ top stories</span></div>';
     document.getElementById('sb').innerHTML = h;
     [[focus, 't1'], [second(), 't2']].forEach(function (p) {
       var a = byN(p[0]);

@@ -25,17 +25,15 @@ use crate::detect::agents::{Identifier, Running, Seen};
 use crate::detect::rules::{Rules, View};
 use crate::paths;
 use crate::protocol::{
-    AgentState, ArchivedPane, Command, DiffReport, GitInfo, NewPane, PaneId, PaneInfo, PullRequest,
-    Restorable, ServerMsg, Viewport, WorktreeAction, WorktreeInfo,
+    AgentState, ArchivedPane, GitInfo, NewPane, PaneId, PaneInfo, PullRequest, Restorable,
+    ServerMsg, Viewport,
 };
-use crate::worktree::{self, RemoveOpts, WorktreeError};
 use pane::{Pane, SpawnSpec};
 use restore::{Archived, Record, Resume, Saved, SavedAgent};
 
 pub const DEFAULT_SIZE: (u16, u16) = (120, 36);
 const TICK: Duration = Duration::from_millis(250);
 const IDENTIFY_EVERY: Duration = Duration::from_secs(2);
-const WORKTREE_POLL_EVERY: Duration = Duration::from_secs(3);
 const GIT_POLL_EVERY: Duration = Duration::from_secs(3);
 /// Pull requests are asked of GitHub every this many git polls (a minute),
 /// and right away when a pane's branch changes.
@@ -512,31 +510,17 @@ impl Hub {
 
     // ---- pane lifecycle ------------------------------------------------
 
-    /// Create a pane. Blocking (may run git); call from `spawn_blocking`.
-    pub fn new_pane(
-        self: &Arc<Self>,
-        req: NewPane,
-        client: Option<ClientId>,
-    ) -> Result<(PaneInfo, Option<String>)> {
-        self.spawn_pane(req, client, None)
-    }
-
-    /// `new_pane`, optionally in a worktree that already exists (restore).
-    fn spawn_pane(
-        self: &Arc<Self>,
-        req: NewPane,
-        client: Option<ClientId>,
-        existing_worktree: Option<PathBuf>,
-    ) -> Result<(PaneInfo, Option<String>)> {
-        let origin = match &req.cwd {
+    /// Create a pane. Blocking; call from `spawn_blocking`.
+    pub fn new_pane(self: &Arc<Self>, req: NewPane, client: Option<ClientId>) -> Result<PaneInfo> {
+        let cwd = match &req.cwd {
             Some(c) => c.clone(),
             None => dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
         };
-        let origin = origin
+        let cwd = cwd
             .canonicalize()
-            .with_context(|| format!("directory {} doesn't exist", origin.display()))?;
-        if !origin.is_dir() {
-            bail!("{} is not a directory", origin.display());
+            .with_context(|| format!("directory {} doesn't exist", cwd.display()))?;
+        if !cwd.is_dir() {
+            bail!("{} is not a directory", cwd.display());
         }
 
         let (argv, display) = resolve_command(&req);
@@ -545,49 +529,11 @@ impl Hub {
             .map(|c| program_name(c))
             .unwrap_or_else(|| "shell".into());
 
-        let mut warning = None;
-        let mut cwd = origin.clone();
-        let mut wt = None;
-        if let Some(path) = existing_worktree {
-            match worktree::info(&path) {
-                Ok(info) => {
-                    cwd = info.path.clone();
-                    wt = Some(info);
-                }
-                Err(_) => {
-                    warning = Some(format!(
-                        "its worktree {} is gone; started in {}",
-                        path.display(),
-                        origin.display()
-                    ))
-                }
-            }
-        }
-        if req.worktree {
-            // A plain shell's branch is named for the work, not the shell.
-            let branch_hint = if argv.is_empty() { "agent" } else { &hint };
-            match worktree::create(
-                &origin,
-                &self.config.worktree_root(),
-                req.branch.as_deref(),
-                branch_hint,
-            ) {
-                Ok(info) => {
-                    cwd = info.path.clone();
-                    wt = Some(info);
-                }
-                Err(e @ WorktreeError::NotARepo(_)) => {
-                    warning = Some(format!("{e}; started without a worktree"));
-                }
-                Err(e) => return Err(anyhow!(e).context("creating worktree")),
-            }
-        }
-
         let workspace = req
             .workspace
             .clone()
             .filter(|w| !w.trim().is_empty())
-            .unwrap_or_else(|| workspace_name(wt.as_ref().map_or(&origin, |w| &w.repo)));
+            .unwrap_or_else(|| workspace_name(&cwd));
 
         let (id, size) = {
             let mut g = self.lock();
@@ -615,47 +561,26 @@ impl Hub {
             argv,
             display,
             cwd,
-            origin,
             socket: self.socket.clone(),
             cols: size.0,
             rows: size.1,
-            worktree: wt.clone().map(|mut w| {
-                w.pane = Some(id.clone());
-                w
-            }),
-        };
-        let spawned = match pane::spawn(spec) {
-            Ok(s) => s,
-            Err(e) => {
-                if let Some(w) = &wt {
-                    let _ = worktree::remove(
-                        &w.path,
-                        RemoveOpts {
-                            force: true,
-                            delete_branch: true,
-                        },
-                    );
-                }
-                return Err(e);
-            }
         };
         let pane::Spawned {
             pane,
             reader,
             child,
-        } = spawned;
+        } = pane::spawn(spec)?;
         let info = pane.info();
         tracing::info!(
             pane = %info.id,
             command = ?info.command,
             cwd = %info.cwd.display(),
-            worktree = ?info.worktree.as_ref().map(|w| &w.branch),
             "pane started"
         );
         self.lock().panes.push(pane);
         self.start_io(id, reader, child);
         self.emit(Event::State);
-        Ok((info, warning))
+        Ok(info)
     }
 
     fn start_io(
@@ -715,19 +640,9 @@ impl Hub {
         self.emit(Event::State);
     }
 
-    /// Close a pane: refuse first if its worktree would lose work, then end
-    /// the process and apply the worktree action. Blocking.
-    pub fn kill_pane(&self, id: &str, action: WorktreeAction, force: bool) -> Result<String> {
-        tracing::info!(pane = id, ?action, force, "closing pane");
-        let wt = self.lock().pane(id)?.worktree.clone();
-        let opts = RemoveOpts {
-            force,
-            delete_branch: action == WorktreeAction::RemoveAndDeleteBranch,
-        };
-        if let (Some(w), true) = (&wt, action != WorktreeAction::Keep) {
-            worktree::check_removable(&w.path, opts)?;
-        }
-
+    /// Close a pane: end its process and drop it. Blocking.
+    pub fn kill_pane(&self, id: &str) -> Result<String> {
+        tracing::info!(pane = id, "closing pane");
         let mut pane = {
             let mut g = self.lock();
             let idx = g
@@ -753,105 +668,9 @@ impl Hub {
         });
         self.emit(Event::State);
 
-        // Give the process a moment to exit before touching its directory.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while pane.pid.is_some_and(process_alive) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
         pane.kill();
         drop(pane);
-
-        let Some(w) = wt else {
-            return Ok(format!("closed {id}"));
-        };
-        match action {
-            WorktreeAction::Keep => Ok(format!(
-                "closed {id}; worktree kept at {} (branch {})",
-                w.path.display(),
-                w.branch
-            )),
-            _ => match worktree::remove(&w.path, opts) {
-                Ok(()) if opts.delete_branch => Ok(format!(
-                    "closed {id}; removed worktree and deleted branch {}",
-                    w.branch
-                )),
-                Ok(()) => Ok(format!(
-                    "closed {id}; removed worktree (branch {} kept)",
-                    w.branch
-                )),
-                Err(e) => Err(anyhow!(
-                    "closed {id} but kept its worktree at {}: {e}",
-                    w.path.display()
-                )),
-            },
-        }
-    }
-
-    /// Worktrees under the configured root, annotated with their panes.
-    pub fn worktrees(&self) -> Vec<WorktreeInfo> {
-        let by_path: HashMap<PathBuf, PaneId> = self
-            .lock()
-            .panes
-            .iter()
-            .filter_map(|p| p.worktree.as_ref().map(|w| (w.path.clone(), p.id.clone())))
-            .collect();
-        let mut list = worktree::list(&self.config.worktree_root());
-        for w in &mut list {
-            w.pane = by_path.get(&w.path).cloned();
-        }
-        list
-    }
-
-    /// `corral worktree rm <pane|path>`. Blocking.
-    pub fn remove_worktree(
-        &self,
-        target: &str,
-        force: bool,
-        delete_branch: bool,
-    ) -> Result<String> {
-        let (path, pane) = {
-            let g = self.lock();
-            match g.panes.iter().find(|p| p.id == target) {
-                Some(p) => match &p.worktree {
-                    Some(w) => (w.path.clone(), Some(p.id.clone())),
-                    None => bail!("pane {target} has no worktree"),
-                },
-                None => {
-                    let path = Path::new(target)
-                        .canonicalize()
-                        .with_context(|| format!("{target} is neither a pane nor a path"))?;
-                    let pane = g
-                        .panes
-                        .iter()
-                        .find(|p| p.worktree.as_ref().is_some_and(|w| w.path == path))
-                        .map(|p| p.id.clone());
-                    (path, pane)
-                }
-            }
-        };
-        if let Some(p) = pane {
-            let info = self.pane_info(&p);
-            if info.is_some_and(|i| i.state != AgentState::Exited) {
-                bail!(
-                    "pane {p} is still running in that worktree; close it with `corral kill {p} --rm-worktree`"
-                );
-            }
-        }
-        let opts = RemoveOpts {
-            force,
-            delete_branch,
-        };
-        worktree::remove(&path, opts)?;
-        {
-            let mut g = self.lock();
-            for p in g.panes.iter_mut() {
-                if p.worktree.as_ref().is_some_and(|w| w.path == path) {
-                    p.worktree = None;
-                }
-            }
-        }
-        self.emit(Event::State);
-        Ok(format!("removed {}", path.display()))
+        Ok(format!("closed {id}"))
     }
 
     // ---- session restore -----------------------------------------------
@@ -948,33 +767,24 @@ impl Hub {
             bail!("there's nothing to restore");
         };
         if discard {
-            let kept = record.panes.iter().filter(|p| p.worktree.is_some()).count() as u32;
             self.save_record();
             tracing::info!(panes = record.panes.len(), "let the old panes go");
-            return Ok(match kept {
-                0 => "started fresh".into(),
-                n => format!(
-                    "started fresh; {n} {} kept (`corral worktree ls`)",
-                    worktree::plural(n, "worktree")
-                ),
-            });
+            return Ok("started fresh".into());
         }
         let mut back = 0;
         let mut problems = Vec::new();
         for (i, p) in record.panes.iter().enumerate() {
             match self.bring_back(p, record.resume_for(i), client) {
-                Ok((_, warning)) => {
-                    back += 1;
-                    if let Some(w) = warning {
-                        problems.push(format!("{}: {w}", p.name));
-                    }
-                }
+                Ok(_) => back += 1,
                 Err(e) => problems.push(format!("{}: {e:#}", p.name)),
             }
         }
         tracing::info!(back, "restored panes");
         self.save_record();
-        let mut msg = format!("brought back {back} {}", worktree::plural(back, "pane"));
+        let mut msg = format!(
+            "brought back {back} {}",
+            if back == 1 { "pane" } else { "panes" }
+        );
         if !problems.is_empty() {
             msg.push_str(&format!("; {}", problems.join("; ")));
         }
@@ -988,7 +798,7 @@ impl Hub {
         p: &Saved,
         how: Option<Resume>,
         client: Option<ClientId>,
-    ) -> Result<(PaneInfo, Option<String>)> {
+    ) -> Result<PaneInfo> {
         let argv = match &p.agent {
             Some(a) => how
                 .and_then(|how| restore::resume_argv(a, &how))
@@ -999,12 +809,7 @@ impl Hub {
         let req = NewPane {
             name: p.named.then(|| p.name.clone()),
             workspace: Some(p.workspace.clone()),
-            // Worktree panes start from their repo, then move in.
-            cwd: Some(if p.worktree.is_some() {
-                p.origin.clone()
-            } else {
-                p.cwd.clone()
-            }),
+            cwd: Some(p.cwd.clone()),
             command: if argv.is_empty() {
                 Vec::new()
             } else {
@@ -1014,7 +819,7 @@ impl Hub {
             then_shell: true,
             ..Default::default()
         };
-        self.spawn_pane(req, client, p.worktree.clone())
+        self.new_pane(req, client)
     }
 
     // ---- archive -------------------------------------------------------
@@ -1034,8 +839,8 @@ impl Hub {
             .collect()
     }
 
-    /// End a pane but keep what it takes to bring it back: its folder, its
-    /// worktree (left on disk) and its agent's conversation. Blocking.
+    /// End a pane but keep what it takes to bring it back: its folder and
+    /// its agent's conversation. Blocking.
     pub fn archive_pane(&self, id: &str) -> Result<String> {
         let (live, shared) = {
             let mut g = self.lock();
@@ -1066,7 +871,7 @@ impl Hub {
             );
             archive_id
         };
-        if let Err(e) = self.kill_pane(id, WorktreeAction::Keep, false) {
+        if let Err(e) = self.kill_pane(id) {
             self.lock().archived.retain(|a| a.id != archive_id);
             return Err(e);
         }
@@ -1077,11 +882,7 @@ impl Hub {
     }
 
     /// Bring an archived pane back. Blocking.
-    pub fn unarchive(
-        self: &Arc<Self>,
-        id: u64,
-        client: Option<ClientId>,
-    ) -> Result<(PaneInfo, Option<String>)> {
+    pub fn unarchive(self: &Arc<Self>, id: u64, client: Option<ClientId>) -> Result<PaneInfo> {
         let (i, a, how) = {
             let mut g = self.lock();
             let i = g
@@ -1099,7 +900,7 @@ impl Hub {
         };
         match self.bring_back(&a.pane, how, client) {
             Ok(r) => {
-                tracing::info!(archive_id = id, pane = %r.0.id, "unarchived pane");
+                tracing::info!(archive_id = id, pane = %r.id, "unarchived pane");
                 self.save_record();
                 Ok(r)
             }
@@ -1114,7 +915,7 @@ impl Hub {
         }
     }
 
-    /// Drop an archived pane; its worktree stays on disk.
+    /// Drop an archived pane.
     pub fn forget_archived(&self, id: u64) -> Result<String> {
         let a = {
             let mut g = self.lock();
@@ -1127,14 +928,7 @@ impl Hub {
         };
         self.emit(Event::State);
         self.save_record();
-        Ok(match &a.pane.worktree {
-            Some(w) => format!(
-                "forgot {}; its worktree stays at {} (`corral worktree rm` removes it)",
-                a.pane.name,
-                w.display()
-            ),
-            None => format!("forgot {}", a.pane.name),
-        })
+        Ok(format!("forgot {}", a.pane.name))
     }
 
     // ---- periodic work -------------------------------------------------
@@ -1227,44 +1021,6 @@ impl Hub {
         }
     }
 
-    /// Refresh changed-file counts for panes with worktrees. Blocking.
-    pub fn poll_worktrees(&self) {
-        let targets: Vec<(PaneId, PathBuf)> = self
-            .lock()
-            .panes
-            .iter()
-            .filter_map(|p| p.worktree.as_ref().map(|w| (p.id.clone(), w.path.clone())))
-            .collect();
-        if targets.is_empty() {
-            return;
-        }
-        let stats: Vec<(PaneId, u32, (u32, u32, u32))> = targets
-            .into_iter()
-            .filter_map(|(id, path)| {
-                let w = worktree::info(&path).ok()?;
-                Some((id, w.changed_files, (w.diff_files, w.added, w.removed)))
-            })
-            .collect();
-        let mut changed = false;
-        {
-            let mut g = self.lock();
-            for (id, n, (files, added, removed)) in stats {
-                if let Ok(p) = g.pane(&id)
-                    && let Some(w) = p.worktree.as_mut()
-                {
-                    let new = (n, files, added, removed);
-                    if (w.changed_files, w.diff_files, w.added, w.removed) != new {
-                        (w.changed_files, w.diff_files, w.added, w.removed) = new;
-                        changed = true;
-                    }
-                }
-            }
-        }
-        if changed {
-            self.emit(Event::State);
-        }
-    }
-
     /// Refresh the branch each pane runs on and, with `prs` or when the
     /// branch changed, its pull request. Blocking: the lookup runs `gh`.
     pub fn poll_git(&self, prs: bool) {
@@ -1273,24 +1029,21 @@ impl Hub {
             .panes
             .iter()
             .filter(|p| !p.exited)
-            .map(|p| {
-                let dir = p.worktree.as_ref().map_or(&p.cwd, |w| &w.path);
-                (p.id.clone(), dir.clone(), p.git.clone())
-            })
+            .map(|p| (p.id.clone(), p.cwd.clone(), p.git.clone()))
             .collect();
         // Panes in the same checkout share one lookup.
         let mut found: HashMap<(PathBuf, String), Option<PullRequest>> = HashMap::new();
         let fresh: Vec<(PaneId, Option<GitInfo>)> = targets
             .into_iter()
             .map(|(id, dir, old)| {
-                let Some(branch) = worktree::current_branch(&dir) else {
+                let Some(branch) = crate::git::current_branch(&dir) else {
                     return (id, None);
                 };
                 let old = old.filter(|g| g.branch == branch);
                 let pr = if prs || old.is_none() {
                     found
                         .entry((dir.clone(), branch.clone()))
-                        .or_insert_with(|| worktree::pull_request(&dir, &branch))
+                        .or_insert_with(|| crate::git::pull_request(&dir, &branch))
                         .clone()
                 } else {
                     old.and_then(|g| g.pr)
@@ -1313,35 +1066,6 @@ impl Hub {
         if changed {
             self.emit(Event::State);
         }
-    }
-
-    fn worktree_path(&self, pane: &str) -> Result<PathBuf> {
-        let mut g = self.lock();
-        let p = g.pane(pane)?;
-        p.worktree.as_ref().map(|w| w.path.clone()).ok_or_else(|| {
-            anyhow!("pane {pane} doesn't have a worktree (start agents with --worktree)")
-        })
-    }
-
-    /// The pane's worktree diff. Blocking.
-    pub fn diff(&self, pane: &str) -> Result<DiffReport> {
-        let mut d = worktree::diff(&self.worktree_path(pane)?)?;
-        d.pane = Some(pane.to_string());
-        Ok(d)
-    }
-
-    /// Commit, merge or discard in a pane's worktree. Blocking.
-    pub fn worktree_action(&self, pane: &str, action: &Command) -> Result<String> {
-        let path = self.worktree_path(pane)?;
-        let msg = match action {
-            Command::Commit { message, .. } => worktree::commit(&path, message)?,
-            Command::Merge { .. } => worktree::merge(&path)?,
-            Command::Discard { .. } => worktree::discard(&path)?,
-            other => bail!("not a worktree action: {other:?}"),
-        };
-        tracing::info!(pane, %msg, "worktree action");
-        self.poll_worktrees();
-        Ok(msg)
     }
 
     pub fn request_shutdown(&self) {
@@ -1378,8 +1102,6 @@ impl Live {
                 named: p.named,
                 workspace: p.workspace.clone(),
                 cwd: p.cwd.clone(),
-                origin: p.origin.clone(),
-                worktree: p.worktree.as_ref().map(|w| w.path.clone()),
                 agent: None,
             },
             running: p.running.clone(),
@@ -1424,11 +1146,6 @@ fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
-}
-
-fn process_alive(pid: u32) -> bool {
-    // Signal 0 checks for existence without sending anything.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 /// argv to spawn and argv to display for a request.
@@ -1515,15 +1232,6 @@ pub async fn run(socket: PathBuf, config: Config) -> Result<()> {
                 h.save_record();
             })
             .await;
-        }
-    });
-    let h = hub.clone();
-    tokio::spawn(async move {
-        let mut t = tokio::time::interval(WORKTREE_POLL_EVERY);
-        loop {
-            t.tick().await;
-            let h = h.clone();
-            let _ = tokio::task::spawn_blocking(move || h.poll_worktrees()).await;
         }
     });
     let h = hub.clone();

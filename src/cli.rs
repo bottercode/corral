@@ -11,9 +11,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::client::conn::Conn;
 use crate::config::Config;
-use crate::protocol::{
-    AgentState, Command, DiffReport, NewPane, PaneInfo, Reply, WorktreeAction, WorktreeInfo,
-};
+use crate::protocol::{AgentState, Command, NewPane, PaneInfo, Reply};
 use crate::{integrate, paths, server};
 
 #[derive(Parser, Debug)]
@@ -77,18 +75,7 @@ pub enum Cmd {
         json: bool,
     },
     /// Close a pane, ending its process
-    Kill {
-        pane: String,
-        /// Also remove the pane's worktree (refuses if it has uncommitted changes)
-        #[arg(long)]
-        rm_worktree: bool,
-        /// Remove the worktree and delete its branch (refuses if unmerged)
-        #[arg(long)]
-        delete_branch: bool,
-        /// Remove even with uncommitted or unmerged work
-        #[arg(long)]
-        force: bool,
-    },
+    Kill { pane: String },
     /// Rename a pane
     Rename { pane: String, name: String },
     /// Report agent state from a hook (uses $CORRAL_PANE)
@@ -104,30 +91,6 @@ pub enum Cmd {
         #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
         extra: Vec<String>,
     },
-    /// Show what an agent changed in its worktree
-    Diff {
-        pane: String,
-        /// Only list files and line counts
-        #[arg(long)]
-        stat: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Commit everything in an agent's worktree
-    Commit {
-        pane: String,
-        #[arg(long, short)]
-        message: String,
-    },
-    /// Merge an agent's branch into the branch its worktree came from
-    Merge { pane: String },
-    /// Throw away uncommitted changes in an agent's worktree
-    Discard {
-        pane: String,
-        /// Required: this can't be undone
-        #[arg(long)]
-        yes: bool,
-    },
     /// Install hooks so an agent reports its own state
     Integrate {
         #[arg(value_enum)]
@@ -139,9 +102,6 @@ pub enum Cmd {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Manage agent worktrees
-    #[command(subcommand)]
-    Worktree(WorktreeCmd),
     /// Run the server in the foreground
     Server {
         /// Detach from the terminal and log to ~/.corral/log/server.log
@@ -154,7 +114,7 @@ pub enum Cmd {
     /// Bring back the panes from before corral last stopped: agents resume
     /// their conversations, other panes come back as a shell
     Restore {
-        /// Let them go instead (worktrees stay on disk)
+        /// Let them go instead
         #[arg(long)]
         discard: bool,
     },
@@ -173,35 +133,11 @@ pub struct NewArgs {
     /// Workspace to group the pane under (default: directory name)
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Run the agent in a new git worktree
-    #[arg(long, short)]
-    pub worktree: bool,
-    /// Branch for the worktree (default: corral/<agent>-<id>)
-    #[arg(long, requires = "worktree")]
-    pub branch: Option<String>,
     #[arg(long)]
     pub json: bool,
     /// Command to run (default: your shell)
     #[arg(last = true)]
     pub command: Vec<String>,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum WorktreeCmd {
-    /// List worktrees corral created
-    Ls {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Remove a worktree by pane id or path
-    Rm {
-        target: String,
-        #[arg(long)]
-        force: bool,
-        /// Also delete the branch
-        #[arg(long)]
-        delete_branch: bool,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -361,23 +297,15 @@ async fn run_client(cmd: Cmd) -> Result<ExitCode> {
                 command: a.command,
                 shell: false,
                 then_shell: false,
-                worktree: a.worktree,
-                branch: a.branch,
                 focus: false,
             };
             match c.request(Command::New(req)).await? {
-                Reply::Created { pane, warning } => {
-                    if let Some(w) = warning {
-                        eprintln!("corral: warning: {w}");
-                    }
+                Reply::Created { pane } => {
                     if a.json {
                         print_json(&pane)?;
                     } else {
                         // stdout is just the id, so `p=$(corral new …)` works.
                         println!("{}", pane.id);
-                        if let Some(w) = &pane.worktree {
-                            eprintln!("worktree {} on branch {}", home_relative(&w.path), w.branch);
-                        }
                     }
                 }
                 other => bail!("unexpected reply {other:?}"),
@@ -467,29 +395,10 @@ async fn run_client(cmd: Cmd) -> Result<ExitCode> {
                 }
             }
         }
-        Cmd::Kill {
-            pane,
-            rm_worktree,
-            delete_branch,
-            force,
-        } => {
+        Cmd::Kill { pane } => {
             let mut c = connect(false).await?;
             let pane = resolve_pane(&mut c, &pane).await?;
-            let worktree = if delete_branch {
-                WorktreeAction::RemoveAndDeleteBranch
-            } else if rm_worktree {
-                WorktreeAction::Remove
-            } else {
-                WorktreeAction::Keep
-            };
-            if let Reply::Text(t) = c
-                .request(Command::Kill {
-                    pane,
-                    worktree,
-                    force,
-                })
-                .await?
-            {
+            if let Reply::Text(t) = c.request(Command::Kill { pane }).await? {
                 println!("{t}");
             }
         }
@@ -512,55 +421,6 @@ async fn run_client(cmd: Cmd) -> Result<ExitCode> {
                 }
             } else {
                 result?;
-            }
-        }
-        Cmd::Worktree(WorktreeCmd::Ls { json }) => {
-            let list = match connect(false).await {
-                Ok(mut c) => match c.request(Command::WorktreeList).await? {
-                    Reply::Worktrees(w) => w,
-                    other => bail!("unexpected reply {other:?}"),
-                },
-                // No server: still list what's on disk.
-                Err(_) => crate::worktree::list(&Config::load()?.worktree_root()),
-            };
-            if json {
-                print_json(&list)?;
-            } else {
-                print!("{}", format_worktrees(&list));
-            }
-        }
-        Cmd::Worktree(WorktreeCmd::Rm {
-            target,
-            force,
-            delete_branch,
-        }) => {
-            let looks_like_pane =
-                target.starts_with('p') && target[1..].bytes().all(|b| b.is_ascii_digit());
-            match connect(false).await {
-                Ok(mut c) => {
-                    if let Reply::Text(t) = c
-                        .request(Command::WorktreeRemove {
-                            target,
-                            force,
-                            delete_branch,
-                        })
-                        .await?
-                    {
-                        println!("{t}");
-                    }
-                }
-                Err(e) if looks_like_pane => return Err(e),
-                Err(_) => {
-                    let path = PathBuf::from(&target);
-                    crate::worktree::remove(
-                        &path,
-                        crate::worktree::RemoveOpts {
-                            force,
-                            delete_branch,
-                        },
-                    )?;
-                    println!("removed {}", path.display());
-                }
             }
         }
         Cmd::Restore { discard } => {
@@ -603,45 +463,6 @@ async fn run_client(cmd: Cmd) -> Result<ExitCode> {
                         .with_context(|| format!("writing {}", path.display()))?,
                     None => std::io::stdout().write_all(&b)?,
                 }
-            }
-        }
-        Cmd::Diff { pane, stat, json } => {
-            let mut c = connect(false).await?;
-            let pane = resolve_pane(&mut c, &pane).await?;
-            let Reply::Diff(report) = c.request(Command::Diff { pane }).await? else {
-                bail!("unexpected reply");
-            };
-            if json {
-                print_json(&report)?;
-            } else {
-                print!(
-                    "{}",
-                    format_diff(&report, stat, std::io::stdout().is_terminal())
-                );
-            }
-        }
-        Cmd::Commit { pane, message } => {
-            let mut c = connect(false).await?;
-            let pane = resolve_pane(&mut c, &pane).await?;
-            if let Reply::Text(t) = c.request(Command::Commit { pane, message }).await? {
-                println!("{t}");
-            }
-        }
-        Cmd::Merge { pane } => {
-            let mut c = connect(false).await?;
-            let pane = resolve_pane(&mut c, &pane).await?;
-            if let Reply::Text(t) = c.request(Command::Merge { pane }).await? {
-                println!("{t}");
-            }
-        }
-        Cmd::Discard { pane, yes } => {
-            if !yes {
-                bail!("this throws away the agent's uncommitted work; pass --yes to confirm");
-            }
-            let mut c = connect(false).await?;
-            let pane = resolve_pane(&mut c, &pane).await?;
-            if let Reply::Text(t) = c.request(Command::Discard { pane }).await? {
-                println!("{t}");
             }
         }
         Cmd::Server { .. } | Cmd::Integrate { .. } => unreachable!(),
@@ -747,110 +568,22 @@ pub fn format_table(panes: &[PaneInfo]) -> String {
         return "no panes\n".into();
     }
     let mut rows = vec![
-        [
-            "ID",
-            "NAME",
-            "STATE",
-            "AGENT",
-            "WORKSPACE",
-            "WORKTREE",
-            "CWD",
-        ]
-        .map(String::from)
-        .to_vec(),
+        ["ID", "NAME", "STATE", "AGENT", "WORKSPACE", "CWD"]
+            .map(String::from)
+            .to_vec(),
     ];
     for p in panes {
         let state = match (p.state, p.exit_code) {
             (AgentState::Exited, Some(c)) => format!("exited({c})"),
             (s, _) => s.to_string(),
         };
-        let wt = p
-            .worktree
-            .as_ref()
-            .map(|w| format!("{} +{}", w.branch, w.changed_files))
-            .unwrap_or_else(|| "-".into());
         rows.push(vec![
             p.id.clone(),
             p.name.clone(),
             state,
             p.agent.clone().unwrap_or_else(|| "-".into()),
             p.workspace.clone(),
-            wt,
             home_relative(&p.cwd),
-        ]);
-    }
-    table(rows)
-}
-
-/// Human-readable diff report, coloured for terminals.
-pub fn format_diff(r: &DiffReport, stat: bool, color: bool) -> String {
-    let paint = |code: &str, s: &str| {
-        if color {
-            format!("\x1b[{code}m{s}\x1b[0m")
-        } else {
-            s.to_string()
-        }
-    };
-    let added: u32 = r.files.iter().map(|f| f.added).sum();
-    let removed: u32 = r.files.iter().map(|f| f.removed).sum();
-    let mut out = format!(
-        "{} → {} · {} files +{added} −{removed} · {} commits · {} uncommitted\n",
-        paint("35", &r.branch),
-        r.base,
-        r.files.len(),
-        r.commits,
-        r.uncommitted
-    );
-    for f in &r.files {
-        let counts = if f.binary {
-            "binary".to_string()
-        } else {
-            format!("+{} −{}", f.added, f.removed)
-        };
-        out.push_str(&format!(
-            "{} {}  {counts}\n",
-            paint("33", &f.status),
-            paint("1", &f.path)
-        ));
-        if stat || f.binary {
-            continue;
-        }
-        for line in f.patch.lines() {
-            let code = if line.starts_with("@@") {
-                "36"
-            } else if line.starts_with('+') {
-                "32"
-            } else if line.starts_with('-') {
-                "31"
-            } else {
-                ""
-            };
-            if code.is_empty() {
-                out.push_str(line);
-            } else {
-                out.push_str(&paint(code, line));
-            }
-            out.push('\n');
-        }
-    }
-    out
-}
-
-pub fn format_worktrees(list: &[WorktreeInfo]) -> String {
-    if list.is_empty() {
-        return "no worktrees\n".into();
-    }
-    let mut rows = vec![
-        ["BRANCH", "CHANGED", "PANE", "PATH"]
-            .map(String::from)
-            .to_vec(),
-    ];
-    for w in list {
-        rows.push(vec![
-            w.branch.clone(),
-            w.changed_files.to_string(),
-            w.pane.clone().unwrap_or_else(|| "-".into()),
-            home_relative(&w.path),
         ]);
     }
     table(rows)
@@ -868,22 +601,10 @@ mod tests {
 
     #[test]
     fn parses_new_with_command() {
-        let cli = Cli::try_parse_from([
-            "corral",
-            "new",
-            "--worktree",
-            "--branch",
-            "x",
-            "--",
-            "claude",
-            "--model",
-            "opus",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["corral", "new", "--", "claude", "--model", "opus"]).unwrap();
         match cli.command {
             Some(Cmd::New(a)) => {
-                assert!(a.worktree);
-                assert_eq!(a.branch.as_deref(), Some("x"));
                 assert_eq!(a.command, vec!["claude", "--model", "opus"]);
             }
             other => panic!("{other:?}"),
@@ -941,7 +662,6 @@ mod tests {
             pid: None,
             exit_code: Some(1),
             title: None,
-            worktree: None,
             git: None,
             cols: 80,
             rows: 24,
