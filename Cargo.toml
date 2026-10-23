@@ -57,3 +57,7 @@ tempfile = "3"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# vt100 with Codex-style history kept in scrollback (see vendor/README.md).
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }

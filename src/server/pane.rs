@@ -417,6 +417,27 @@ mod tests {
     }
 
     #[test]
+    fn history_written_above_an_inline_view_reaches_scrollback() {
+        // What Codex does: its live view sits at the bottom; each finished
+        // history line is written by scrolling the rows above it.
+        let mut p = vt100::Parser::new(10, 40, SCROLLBACK);
+        for i in 0..30 {
+            p.process(format!("\x1b[1;6r\x1b[6;1H\r\nhistory {i}\x1b[r").as_bytes());
+        }
+        p.screen_mut().set_scrollback(usize::MAX);
+        let back = p.screen().scrollback();
+        assert!(back >= 20, "scrollback {back}");
+        assert!(p.screen().contents().contains("history 0"));
+        // A region lower down is the program's own business: nothing kept.
+        let mut p = vt100::Parser::new(10, 40, SCROLLBACK);
+        for i in 0..30 {
+            p.process(format!("\x1b[3;8r\x1b[8;1H\r\nline {i}\x1b[r").as_bytes());
+        }
+        p.screen_mut().set_scrollback(usize::MAX);
+        assert_eq!(p.screen().scrollback(), 0);
+    }
+
+    #[test]
     fn shrinking_keeps_the_latest_lines() {
         let mut p = vt100::Parser::new(24, 80, SCROLLBACK);
         for i in 0..100 {
