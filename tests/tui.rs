@@ -149,7 +149,15 @@ fn tui_shows_panes_forwards_input_and_detaches() {
     // Prefix n opens a shell right away, with the keyboard on it.
     t.type_(b"\x02n");
     eventually("third pane", || s.panes().len() == 3);
-    t.type_(b"echo from-$((1+1))-shell\r");
+    // A login shell can drop what's typed while it starts; type again
+    // until it answers.
+    for _ in 0..10 {
+        t.type_(b"echo from-$((1+1))-shell\r");
+        std::thread::sleep(Duration::from_millis(500));
+        if t.screen().contains("from-2-shell") {
+            break;
+        }
+    }
     t.wait_for("typed into the new shell", |x| x.contains("from-2-shell"));
 
     // Prefix w asks for a branch (this directory isn't a repo, so the
