@@ -422,6 +422,36 @@ async fn starting_fresh_lets_the_old_panes_go() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_server_from_another_version_can_still_be_stopped() {
+    // `kill-server` falls back to this when the server speaks another
+    // protocol version: find it through the socket, and signal it.
+    let server = TestServer::start();
+    let mut conn = server.conn().await;
+    new_pane(&mut conn, sh("read x"), server.dir.path()).await;
+    wait_for_record(&server, "\"name\"");
+    drop(conn);
+    let pid = corral::client::conn::stop_by_signal(&server.socket).unwrap();
+    assert_eq!(Some(pid), server.pid());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while server.socket.exists() {
+        assert!(std::time::Instant::now() < deadline, "server didn't stop");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // It shut down as usual: its pane is kept to bring back.
+    wait_for_record(&server, "\"name\": \"sh\"");
+}
+
+#[test]
+fn only_corral_servers_get_signalled() {
+    // Something else listening on the socket (here, this test itself).
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("other.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let err = corral::client::conn::stop_by_signal(&socket).unwrap_err();
+    assert!(err.to_string().contains("isn't a corral server"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn client_attached_to_an_empty_server_shows_the_first_new_pane() {
     let server = TestServer::start();
     let mut a = Headless::attach(&server, 80, 24).await;

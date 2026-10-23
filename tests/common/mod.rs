@@ -48,6 +48,11 @@ impl TestServer {
         self.wait_for_socket();
     }
 
+    /// The server's process id.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+
     /// `corral kill-server`, waiting for the server to exit.
     pub fn stop(&mut self) {
         self.ok(&["kill-server"]);

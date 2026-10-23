@@ -11,6 +11,63 @@ use tokio::net::UnixStream;
 use crate::paths;
 use crate::protocol::{self, ClientMsg, Command, PROTOCOL_VERSION, Reply, ServerMsg, Transport};
 
+/// Stop the server listening on `socket` with a signal. For a server from
+/// another corral version, which won't take `KillServer` from this one: the
+/// system says which process is on the other end of the socket and, if it's
+/// a corral of this user's, it gets SIGTERM, which every version handles by
+/// saving its panes for restore and exiting. Returns its pid.
+pub fn stop_by_signal(socket: &Path) -> Result<u32> {
+    let stream = std::os::unix::net::UnixStream::connect(socket)
+        .with_context(|| format!("no corral server is running on {}", socket.display()))?;
+    let pid = peer_pid(&stream)?;
+    drop(stream);
+    if !is_our_corral(pid) {
+        bail!(
+            "the process on {} (pid {pid}) isn't a corral server of yours; not stopping it",
+            socket.display()
+        );
+    }
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .with_context(|| format!("stopping the server (pid {pid})"))?;
+    Ok(pid)
+}
+
+/// The pid of the process on the other end of a Unix socket.
+fn peer_pid(stream: &std::os::unix::net::UnixStream) -> Result<u32> {
+    use nix::sys::socket::{getsockopt, sockopt};
+    #[cfg(target_os = "macos")]
+    let pid = getsockopt(stream, sockopt::LocalPeerPid)?;
+    #[cfg(not(target_os = "macos"))]
+    let pid = getsockopt(stream, sockopt::PeerCredentials)?.pid();
+    u32::try_from(pid).context("no process on the other end of the socket")
+}
+
+/// A process named corral, run by this user.
+fn is_our_corral(pid: u32) -> bool {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let pid = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing()
+            .with_exe(UpdateKind::Always)
+            .with_user(UpdateKind::Always),
+    );
+    let Some(p) = sys.process(pid) else {
+        return false;
+    };
+    let ours = p
+        .user_id()
+        .is_some_and(|u| **u == nix::unistd::getuid().as_raw());
+    let named = |s: &std::ffi::OsStr| s.to_string_lossy().starts_with("corral");
+    let corral = named(p.name()) || p.exe().and_then(|e| e.file_name()).is_some_and(named);
+    ours && corral
+}
+
 pub struct Conn {
     pub transport: Transport,
     next_id: u64,

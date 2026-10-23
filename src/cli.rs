@@ -570,11 +570,24 @@ async fn run_client(cmd: Cmd) -> Result<ExitCode> {
             }
         }
         Cmd::KillServer => {
-            let mut c = connect(false).await?;
-            c.request(Command::KillServer).await?;
-            // Wait for the socket to disappear so a following start is clean.
             let socket = paths::socket_path();
-            for _ in 0..50 {
+            match connect(false).await {
+                Ok(mut c) => {
+                    c.request(Command::KillServer).await?;
+                }
+                // A server from before an update won't take orders from this
+                // version: stop it with a signal instead.
+                Err(e)
+                    if e.chain()
+                        .any(|c| c.is::<crate::protocol::VersionMismatch>()) =>
+                {
+                    let pid = crate::client::conn::stop_by_signal(&socket)?;
+                    println!("stopped the server from another corral version (pid {pid})");
+                }
+                Err(e) => return Err(e),
+            }
+            // Wait for the socket to disappear so a following start is clean.
+            for _ in 0..250 {
                 if !socket.exists() {
                     break;
                 }

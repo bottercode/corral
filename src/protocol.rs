@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -434,12 +434,26 @@ pub async fn recv<T: DeserializeOwned>(t: &mut Transport) -> Result<Option<T>> {
 }
 
 /// Error for a peer speaking a different protocol version.
+/// The two sides speak different protocol versions (corral was updated
+/// while a server from the old version runs).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "protocol version mismatch: this corral speaks v{ours}, the server v{theirs}. \
+     Restart the server with `corral kill-server` (this ends running agents; the next \
+     `corral` offers to bring them back)."
+)]
+pub struct VersionMismatch {
+    pub ours: u32,
+    pub theirs: u32,
+}
+
 pub fn check_version(theirs: u32) -> Result<()> {
     if theirs != PROTOCOL_VERSION {
-        bail!(
-            "protocol version mismatch: this corral speaks v{PROTOCOL_VERSION}, the other side v{theirs}. \
-             Restart the server with `corral kill-server` (this ends running agents)."
-        );
+        return Err(VersionMismatch {
+            ours: PROTOCOL_VERSION,
+            theirs,
+        }
+        .into());
     }
     Ok(())
 }
@@ -682,8 +696,12 @@ mod tests {
     #[test]
     fn version_mismatch_is_rejected() {
         assert!(check_version(PROTOCOL_VERSION).is_ok());
-        let err = check_version(PROTOCOL_VERSION + 1).unwrap_err().to_string();
-        assert!(err.contains("protocol version mismatch"), "{err}");
+        let err = check_version(PROTOCOL_VERSION + 1).unwrap_err();
+        // Typed, so `kill-server` can tell it apart from other failures.
+        assert!(err.is::<VersionMismatch>());
+        let msg = err.to_string();
+        assert!(msg.contains("protocol version mismatch"), "{msg}");
+        assert!(msg.contains("corral kill-server"), "{msg}");
     }
 
     #[test]
