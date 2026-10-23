@@ -536,7 +536,7 @@ impl Stories {
 }
 
 /// `12m`, `18h`, `2d`: news doesn't need minutes on top of hours.
-fn rough_age(secs: u64) -> String {
+pub fn rough_age(secs: u64) -> String {
     match secs {
         0..=3599 => short_duration(Duration::from_secs(secs)),
         3600..=86_399 => format!("{}h", secs / 3600),

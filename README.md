@@ -117,6 +117,7 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b r` | rename it |
 | `^b m` | menu: theme, sidebar order, notifications, agent hooks |
 | `^b t` | top stories from Hacker News and lobste.rs ([below](#top-stories)) |
+| `^b w` | notes, with a bit of Markdown ([below](#notes)) |
 | `^b d` | detach (agents keep running) |
 | `^b q` | exit: detach, or stop corral and every agent (also the **✕ exit** button) |
 | `^b [` | scrollback (`k`/`j`, PgUp/PgDn, `g`/`G`, `q`) |
@@ -125,8 +126,8 @@ Everything you type goes to the focused agent. corral's own commands are
 
 Click an agent on screen to type into it, or a sidebar row to bring that agent
 into the focused spot. The **+ new shell** button at the
-bottom of the sidebar opens one; **✦ top stories** under it opens the
-news. At the top:
+bottom of the sidebar opens one, **✎ notes** beside it opens your notes, and
+**✦ top stories** under them opens the news. At the top:
 
 - **≡ menu** (or `^b m`) changes the theme, the sidebar's order and
   notifications, and installs agent hooks. Changes are saved to your config.
@@ -212,6 +213,38 @@ sidebar still beside it:
 - Nothing is fetched until you open the page. corral then asks the sites'
   public APIs directly (no key, no account, nothing else in between) and
   keeps each feed for five minutes.
+
+### Notes
+
+`^b w` (or **✎ notes** in the sidebar) opens a notepad in place of the agents,
+with your notes down the left and the selected one beside them:
+
+```
+  NOTES   + new note                                                   2 notes
+  ────────────────────────────────────────────────────────────────────────────
+
+  ▍ Release checklist       │ # Release checklist
+  ▍ now · Ship notes in th… │
+    Groceries               │ Ship **notes** in the next *minor*:
+    now · milk              │
+                            │ • [✓] editor
+                            │ • [ ] save to `~/.corral/notes`
+                            │ ▎ quotes too
+```
+
+- `n` (or **+ new note**) starts a note; its first line is the title.
+  `Enter` or a click opens one for editing, `Esc` goes back to the list, and
+  `x` deletes the selected note (after a `y`).
+- Notes are Markdown, drawn with their formatting as you type: `#` headings,
+  `**bold**`, `*italic*`, `` `code` ``, `~~struck~~`, `-` and `1.` lists,
+  `- [ ]` tasks, `>` quotes, `---` rules and fenced code. The marks stay in
+  view, faintly, so what you see is what's in the file.
+- Enter carries a list on to the next item (Enter on an empty item ends it),
+  `Tab` / `Shift-Tab` nest and un-nest an item, and `^t` ticks a task, or
+  turns the line into one.
+- Each note is a file in `~/.corral/notes/`, saved a second after you stop
+  typing, so you can grep them or open them in your editor; changes made
+  there show up the next time the page opens.
 
 ## Agent state
 

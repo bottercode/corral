@@ -1,0 +1,18 @@
+---
+source: src/client/notes.rs
+expression: text
+---
+  NOTES   + new note                                                   2 notes
+  ────────────────────────────────────────────────────────────────────────────
+
+  ▍ Release checklist       │ # Release checklist
+  ▍ now · Ship notes in th… │
+    Groceries               │ Ship **notes** in the next *minor*:
+    now · milk              │
+                            │ • [✓] editor
+                            │ • [ ] save to `~/.corral/notes`
+                            │ ▎ quotes too
+                            │ ───────────────────────────────────────────────
+                            │ end
+                            │
+                            │

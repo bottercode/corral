@@ -303,6 +303,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             .map_or(0, |d| d.as_secs() as i64);
         f.render_widget(ratatui::widgets::Clear, areas.pane);
         app.stories.render(areas.pane, f.buffer_mut(), now);
+    } else if matches!(app.mode, Mode::Notes) {
+        f.render_widget(ratatui::widgets::Clear, areas.pane);
+        if let Some(at) = app.notes.render(areas.pane, f.buffer_mut()) {
+            f.set_cursor_position(at);
+        }
     } else {
         draw_tiles(f, app, areas.pane);
     }
@@ -311,7 +316,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     match &app.mode {
-        Mode::Normal | Mode::Scroll { .. } | Mode::Stories => {}
+        Mode::Normal | Mode::Scroll { .. } | Mode::Stories | Mode::Notes => {}
         Mode::Quit => draw_quit(f, app.running_agents(), areas.pane),
         Mode::Restore => draw_restore(f, app, areas.pane),
         Mode::Archive { selected } => {
@@ -545,11 +550,36 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
             .insert(0, Span::styled(" top stories ", t.on_accent_style()));
         l.spans.insert(1, Span::raw(" "));
         l
+    } else if matches!(app.mode, Mode::Notes) {
+        let mut l = if app.notes.editing {
+            key_hint(&[
+                ("#", "heading"),
+                ("**b**", "bold"),
+                ("*i*", "italic"),
+                ("`c`", "code"),
+                ("-", "list"),
+                ("^t", "task"),
+                ("Esc", "done"),
+            ])
+        } else {
+            key_hint(&[
+                ("↑↓", "pick"),
+                ("Enter", "edit"),
+                ("n", "new"),
+                ("x", "delete"),
+                ("Esc", "back to agents"),
+            ])
+        };
+        l.spans
+            .insert(0, Span::styled(" notes ", t.on_accent_style()));
+        l.spans.insert(1, Span::raw(" "));
+        l
     } else if app.awaiting_command {
         let mut l = key_hint(&[
             ("n", "new"),
             ("m", "menu"),
             ("t", "stories"),
+            ("w", "notes"),
             ("j/k", "switch"),
             ("b", "blocked"),
             ("s", "split"),
@@ -630,6 +660,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
                     "menu: theme, sidebar order, notifications, agent hooks",
                 ),
                 ("t", "top stories from Hacker News and lobste.rs"),
+                ("w", "notes, with a bit of Markdown"),
                 ("d", "detach (agents keep running)"),
                 ("q", "exit: detach, or stop corral and every agent"),
                 ("?", "this help"),
@@ -699,6 +730,7 @@ fn draw_menu(f: &mut Frame, app: &mut App, selected: usize) {
     let label = |item: MenuItem| match item {
         MenuItem::Keys => "keys".to_string(),
         MenuItem::Stories => "top stories".into(),
+        MenuItem::Notes => "notes".into(),
         MenuItem::Theme => "theme".into(),
         MenuItem::Order => "sidebar".into(),
         MenuItem::Notifications => "notifications".into(),
@@ -745,7 +777,11 @@ fn draw_menu(f: &mut Frame, app: &mut App, selected: usize) {
         let value_style = match MENU[i] {
             MenuItem::Hooks(_) if v == "installed" => t.fg(t.done),
             MenuItem::Hooks(_) if v == "install…" => t.accent(),
-            MenuItem::Keys | MenuItem::Stories | MenuItem::Detach | MenuItem::Exit => t.muted(),
+            MenuItem::Keys
+            | MenuItem::Stories
+            | MenuItem::Notes
+            | MenuItem::Detach
+            | MenuItem::Exit => t.muted(),
             _ => Style::new().fg(t.text),
         };
         let line = Line::from(vec![

@@ -94,6 +94,11 @@ pub fn log_dir() -> PathBuf {
     corral_home().join("log")
 }
 
+/// Notes, one Markdown file each.
+pub fn notes_dir() -> PathBuf {
+    corral_home().join("notes")
+}
+
 /// `~/.config/corral/config.toml`, or `CORRAL_CONFIG`.
 pub fn config_path() -> PathBuf {
     match std::env::var_os(CONFIG_ENV).filter(|p| !p.is_empty()) {

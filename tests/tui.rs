@@ -277,6 +277,33 @@ fn wait_exit(t: &mut Tui) {
 }
 
 #[test]
+fn notes_are_written_as_markdown_files() {
+    let s = TestServer::start();
+    let dir = s.dir.path().to_str().unwrap().to_string();
+    s.ok(&["new", "--cwd", &dir, "--", "sh", "-c", "echo pane-one; cat"]);
+    let mut t = Tui::start(&s, 110, 30);
+    t.wait_for("pane", |x| x.contains("pane-one"));
+
+    // The first time, the page opens straight into a new note.
+    t.type_(b"\x02w");
+    t.wait_for("notes page", |x| x.contains("NOTES"));
+    t.type_(b"Plan\r- [ ] **ship** it");
+    t.wait_for("the note", |x| x.contains("• [ ] **ship** it"));
+    println!("{}", t.screen());
+    t.type_(b"\x1b\x1b");
+    t.wait_for("back to the agents", |x| x.contains("pane-one"));
+
+    let notes = s.home.join("notes");
+    eventually("note saved", || {
+        std::fs::read_dir(&notes).is_ok_and(|d| {
+            d.flatten().any(|e| {
+                std::fs::read_to_string(e.path()).is_ok_and(|t| t == "# Plan\n- [ ] **ship** it\n")
+            })
+        })
+    });
+}
+
+#[test]
 fn exit_button_detaches_or_stops_corral() {
     let s = TestServer::start();
     let dir = s.dir.path().to_str().unwrap().to_string();

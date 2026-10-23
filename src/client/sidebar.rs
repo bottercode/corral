@@ -280,6 +280,8 @@ pub enum Click {
     Order,
     /// The "✦ top stories" button.
     Stories,
+    /// The "✎ notes" button.
+    Notes,
     /// The "«" / "»" button that collapses or expands the sidebar.
     Collapse,
     /// The "↓ archive" button on the focused agent.
@@ -538,6 +540,7 @@ impl Sidebar<'_> {
             };
             let new = t.accent().add_modifier(Modifier::BOLD);
             button(2, 1, "+", new, Click::New);
+            button(4, 1, "✎", t.muted(), Click::Notes);
             button(2, 2, "✦", t.fg(t.done), Click::Stories);
             if self.archived > 0 {
                 button(4, 2, "↺", t.muted(), Click::Archived);
@@ -703,7 +706,7 @@ fn render_order_switch(row: Rect, order: Order, buf: &mut Buffer) -> Hit {
     }
 }
 
-/// Two rows of buttons: `+ new shell` over `✦ top stories`
+/// Two rows of buttons: `+ new shell` and `✎ notes` over `✦ top stories`
 /// (and `↺ archived 3` when panes are archived), shortened when the
 /// sidebar is narrow.
 fn render_buttons(area: Rect, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
@@ -724,11 +727,14 @@ fn render_buttons(area: Rect, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
         second.push((archived_label.as_str(), t.muted(), Click::Archived));
     }
     let rows: [&[(&str, Style, Click)]; 2] = [
-        &[(
-            pick("+ new shell", "+ new"),
-            t.accent().add_modifier(Modifier::BOLD),
-            Click::New,
-        )],
+        &[
+            (
+                pick("+ new shell", "+ new"),
+                t.accent().add_modifier(Modifier::BOLD),
+                Click::New,
+            ),
+            ("✎ notes", t.muted(), Click::Notes),
+        ],
         &second,
     ];
     let mut hits = Vec::new();
@@ -912,19 +918,24 @@ mod tests {
                 Click::Collapse,
                 Click::Order,
                 Click::New,
+                Click::Notes,
                 Click::Stories,
             ]
         );
         // Menu, exit and collapse on the title row, the order switch on the
-        // rule under it, the new button on the last row but one.
+        // rule under it, the new button on the last row but one with notes
+        // beside it.
         let ys: Vec<u16> = hits[9..13].iter().map(|h| h.area.y).collect();
         assert_eq!(ys, vec![0, 0, 0, 1]);
         assert!(hits[9].area.x + hits[9].area.width < hits[10].area.x);
         assert!(hits[10].area.x + hits[10].area.width < hits[11].area.x);
         let a = hits[13].area;
         assert_eq!(a.y, 20);
+        let n = hits[14].area;
+        assert_eq!(n.y, 20);
+        assert!(a.x + a.width < n.x);
         // Top stories under it.
-        let c = hits[14].area;
+        let c = hits[15].area;
         assert_eq!((c.y, c.x), (21, a.x));
         // The archive button sits at the right end of its row.
         let archive = hits[2].area;
@@ -975,7 +986,7 @@ mod tests {
         insta::assert_snapshot!(text);
         // Only the buttons are clickable (no order switch with no agents).
         assert!(hits.iter().all(|h| !matches!(h.click, Click::Focus(_))));
-        assert_eq!(hits.len(), 5);
+        assert_eq!(hits.len(), 6);
     }
 
     #[test]
@@ -1003,6 +1014,7 @@ mod tests {
                 f("p5"),
                 f("p4"),
                 Click::New,
+                Click::Notes,
                 Click::Stories,
             ]
         );

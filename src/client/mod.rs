@@ -9,6 +9,7 @@
 
 pub mod conn;
 pub mod input;
+pub mod notes;
 pub mod select;
 pub mod sidebar;
 pub mod stories;
@@ -37,6 +38,7 @@ use crate::protocol::{
 };
 use conn::Conn;
 use input::{Chunk, Key, Mouse, MouseKind, Splitter, decode_keys};
+use notes::Notes;
 use sidebar::Order;
 use stories::Stories;
 use ui::TextInput;
@@ -50,6 +52,7 @@ const TOAST_FOR: Duration = Duration::from_secs(15);
 pub enum MenuItem {
     Keys,
     Stories,
+    Notes,
     Theme,
     Order,
     Notifications,
@@ -58,9 +61,10 @@ pub enum MenuItem {
     Exit,
 }
 
-pub const MENU: [MenuItem; 9] = [
+pub const MENU: [MenuItem; 10] = [
     MenuItem::Keys,
     MenuItem::Stories,
+    MenuItem::Notes,
     MenuItem::Theme,
     MenuItem::Order,
     MenuItem::Notifications,
@@ -95,6 +99,8 @@ pub enum Mode {
     },
     /// Top stories, over the panes (`App::stories` has the page).
     Stories,
+    /// Notes, over the panes (`App::notes` has the page).
+    Notes,
     /// Detach, or stop corral and every agent.
     Quit,
     /// Bring back the panes from before corral stopped?
@@ -175,8 +181,11 @@ pub struct App {
     pub update_check: bool,
     /// A newer release, and when its toast went up.
     update: Option<(String, Instant)>,
-    /// The prefix was pressed on the stories page, which it closed.
-    from_stories: bool,
+    /// The notes page's notes and position.
+    pub notes: Notes,
+    /// The prefix was pressed on a page, which it closed; the key that
+    /// opens that page.
+    closed_page: Option<char>,
     /// Hook status per agent, read when the menu opens.
     pub hooks: Vec<(Agent, HookStatus)>,
     /// Where the menu's rows were drawn, for clicks.
@@ -236,7 +245,8 @@ impl App {
             fetches: Vec::new(),
             update_check: config.update_check,
             update: None,
-            from_stories: false,
+            notes: Notes::new(None),
+            closed_page: None,
             hooks: Vec::new(),
             menu_hits: Vec::new(),
             save_to: None,
@@ -327,7 +337,7 @@ impl App {
 
     fn set_focus(&mut self, pane: PaneId) {
         self.show(Some(pane));
-        if matches!(self.mode, Mode::Scroll { .. } | Mode::Stories) {
+        if matches!(self.mode, Mode::Scroll { .. } | Mode::Stories | Mode::Notes) {
             self.mode = Mode::Normal;
         }
     }
@@ -358,7 +368,7 @@ impl App {
             })
             .collect();
         // Pages drawn over the panes leave them unseen.
-        let covered = matches!(self.mode, Mode::Stories);
+        let covered = matches!(self.mode, Mode::Stories | Mode::Notes);
         let now = (self.focus.clone(), view, covered);
         if self.sent_view.as_ref() == Some(&now) {
             return;
@@ -553,6 +563,7 @@ impl App {
         match item {
             MenuItem::Keys => format!("{p} ?"),
             MenuItem::Stories => format!("{p} t"),
+            MenuItem::Notes => format!("{p} w"),
             MenuItem::Theme => format!("‹ {} ›", theme::get().name),
             MenuItem::Order => format!("‹ {} ›", self.order.label()),
             MenuItem::Notifications => {
@@ -594,6 +605,7 @@ impl App {
         match MENU[selected] {
             MenuItem::Keys => self.mode = Mode::Help,
             MenuItem::Stories => self.open_stories(),
+            MenuItem::Notes => self.open_notes(),
             MenuItem::Theme => {
                 let next = theme::cycle(step);
                 theme::set(next);
@@ -665,6 +677,10 @@ impl App {
     fn dialog_mouse(&mut self, m: Mouse) {
         if matches!(self.mode, Mode::Stories) {
             self.stories_mouse(m);
+            return;
+        }
+        if matches!(self.mode, Mode::Notes) {
+            self.notes_mouse(m);
             return;
         }
         if !matches!(m.kind, MouseKind::LeftDown) {
@@ -799,6 +815,39 @@ impl App {
         }
     }
 
+    /// `^b w`: the notes page.
+    fn open_notes(&mut self) {
+        self.mode = Mode::Notes;
+        self.notes.open();
+    }
+
+    fn notes_key(&mut self, key: Key) {
+        if let notes::Outcome::Stay = self.notes.key(key) {
+            self.mode = Mode::Notes;
+        }
+    }
+
+    fn notes_mouse(&mut self, m: Mouse) {
+        let in_sidebar = m.x < self.sidebar_area.x + self.sidebar_area.width;
+        match m.kind {
+            MouseKind::LeftDown if in_sidebar => {
+                // Picking an agent or starting one leaves the page.
+                let leaves = self.hits.iter().any(|h| {
+                    h.contains(m.x, m.y)
+                        && matches!(h.click, sidebar::Click::Focus(_) | sidebar::Click::New)
+                });
+                if leaves {
+                    self.mode = Mode::Normal;
+                }
+                self.on_mouse(m);
+            }
+            MouseKind::LeftDown => self.notes.click(m.x, m.y),
+            MouseKind::WheelDown if !in_sidebar => self.notes.wheel(m.x, m.y, 1),
+            MouseKind::WheelUp if !in_sidebar => self.notes.wheel(m.x, m.y, -1),
+            _ => {}
+        }
+    }
+
     fn open_close(&mut self) {
         let Some(p) = self.focused() else { return };
         self.mode = Mode::Close { pane: p.id.clone() };
@@ -902,11 +951,12 @@ impl App {
     }
 
     fn prefix_command(&mut self, key: Key) {
-        let from_stories = std::mem::take(&mut self.from_stories);
+        let closed_page = self.closed_page.take();
         match key {
             // `^b t` on the page closes it (the prefix already did).
-            Key::Char('t') if from_stories => {}
+            Key::Char(c) if closed_page == Some(c) => {}
             Key::Char('t') => self.open_stories(),
+            Key::Char('w') => self.open_notes(),
             Key::Char('n') => self.new_shell(),
             Key::Char('m') => self.open_menu(),
             Key::Char('j') | Key::Down => self.cycle_focus(1),
@@ -1139,6 +1189,7 @@ impl App {
                     Some(sidebar::Click::Exit) => self.mode = Mode::Quit,
                     Some(sidebar::Click::Order) => self.toggle_order(),
                     Some(sidebar::Click::Stories) => self.open_stories(),
+                    Some(sidebar::Click::Notes) => self.open_notes(),
                     Some(sidebar::Click::Collapse) => self.toggle_sidebar(),
                     Some(sidebar::Click::Archive(id)) => self.archive(id),
                     Some(sidebar::Click::Archived) => self.open_archive(),
@@ -1188,6 +1239,7 @@ impl App {
                 _ => self.mode = Mode::Restore,
             },
             Mode::Stories => self.stories_key(key),
+            Mode::Notes => self.notes_key(key),
             Mode::Hooks(agent) => match key {
                 Key::Char('y' | 'Y') | Key::Enter => match integrate::install_quietly(agent) {
                     Ok(msg) => self.set_status(msg, false),
@@ -1222,8 +1274,12 @@ impl App {
         let text = String::from_utf8_lossy(bytes);
         let text = text
             .trim_start_matches("\x1b[200~")
-            .trim_end_matches("\x1b[201~")
-            .replace(['\r', '\n'], " ");
+            .trim_end_matches("\x1b[201~");
+        if let Mode::Notes = self.mode {
+            self.notes.paste(text);
+            return;
+        }
+        let text = text.replace(['\r', '\n'], " ");
         if let Mode::Rename { input, .. } = &mut self.mode {
             input.insert_str(&text);
         }
@@ -1253,10 +1309,14 @@ impl App {
                 Chunk::Prefix if in_dialog => match self.mode {
                     Mode::Help => self.mode = Mode::Normal,
                     // The page steps aside for corral's keys.
-                    Mode::Stories => {
+                    Mode::Stories | Mode::Notes => {
+                        self.closed_page = Some(if let Mode::Notes = self.mode {
+                            'w'
+                        } else {
+                            't'
+                        });
                         self.mode = Mode::Normal;
                         self.awaiting_command = true;
-                        self.from_stories = true;
                     }
                     _ => {}
                 },
@@ -1438,6 +1498,7 @@ impl App {
         if matches!(self.mode, Mode::Stories) {
             self.fetch_stories(false);
         }
+        self.notes.autosave(matches!(self.mode, Mode::Notes));
         if let Some((_, at, _)) = &self.status
             && at.elapsed() >= STATUS_FOR
         {
@@ -1516,12 +1577,15 @@ pub async fn run(workspace: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let mut app = App::new(&config, cwd)?;
     app.save_to = Some(paths::config_path());
+    app.notes = Notes::new(Some(paths::notes_dir()));
     let conn = Conn::connect_or_start(&paths::socket_path()).await?;
 
     let exit = {
         let _guard = TerminalGuard::enter()?;
         event_loop(&mut app, conn, workspace).await
     };
+    // However the UI ended, notes being typed are kept.
+    app.notes.save_all();
     match exit? {
         Exit::Detached => {
             println!("[detached from corral; agents keep running — `corral` to reattach]")
@@ -1983,8 +2047,8 @@ mod tests {
         a.on_stdin(b"\x02m");
         assert!(matches!(a.mode, Mode::Menu { selected: 0 }));
         // Down to the theme, → to the next one.
-        a.on_stdin(b"jj\x1b[C");
-        assert!(matches!(a.mode, Mode::Menu { selected: 2 }));
+        a.on_stdin(b"jjj\x1b[C");
+        assert!(matches!(a.mode, Mode::Menu { selected: 3 }));
         assert_ne!(theme::get().name, before);
         assert!(a.menu_value(MenuItem::Theme).contains(theme::get().name));
         a.on_stdin(b"\x1b[D");
@@ -1999,7 +2063,7 @@ mod tests {
 
         // Notifications off: the status line still says it, no bell.
         a.on_stdin(b"\x02m");
-        a.on_stdin(b"jjjj ");
+        a.on_stdin(b"jjjjj ");
         assert!(!a.notifications);
         a.on_stdin(b"q");
         a.on_server(ServerMsg::Notify {
@@ -2235,6 +2299,39 @@ mod tests {
         a.on_stdin(b"\x1b[<0;3;6M");
         assert!(matches!(a.mode, Mode::Normal));
         assert_eq!(sent_focus(&a), "p3");
+    }
+
+    #[test]
+    fn notes_page() {
+        let mut a = app();
+        a.on_stdin(b"\x02w");
+        assert!(matches!(a.mode, Mode::Notes));
+        assert!(matches!(
+            a.outbox.last(),
+            Some(ClientMsg::View { covered: true, .. })
+        ));
+        // No notes yet: straight into a new one. Keys that are corral's
+        // elsewhere (q, j, x) are just typing here, and pastes keep lines.
+        a.on_stdin(b"jot\r- quick x");
+        a.on_stdin(b"\x1b[200~one\ntwo\x1b[201~");
+        assert_eq!(a.notes.notes[0].lines, vec!["# jot", "- quick xone", "two"]);
+        // Esc leaves the note, then the page.
+        a.on_stdin(b"\x1b");
+        assert!(matches!(a.mode, Mode::Notes));
+        assert!(!a.notes.editing);
+        a.on_stdin(b"\x1b");
+        assert!(matches!(a.mode, Mode::Normal));
+
+        // The prefix still drives corral; ^b w just closes the page.
+        a.on_stdin(b"\x02w\x02j");
+        assert!(matches!(a.mode, Mode::Normal));
+        assert_eq!(sent_focus(&a), "p2");
+        a.on_stdin(b"\x02w\x02w");
+        assert!(matches!(a.mode, Mode::Normal));
+        // The note is still there when it opens again.
+        a.on_stdin(b"\x02w");
+        assert_eq!(a.notes.notes.len(), 1);
+        assert_eq!(a.notes.notes[0].title(), "jot");
     }
 
     #[test]
