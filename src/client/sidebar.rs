@@ -1,7 +1,7 @@
 //! The sidebar. By default it's organised for triage: agents that need you
 //! (blocked, or finished and unseen) on top, then the ones working, then the
 //! quiet ones. It can list them by project instead. The focused agent opens
-//! up to show its title, project and branch. Collapsed, it shrinks to a
+//! up to show its title and branch. Collapsed, it shrinks to a
 //! rail of agent numbers and state marks. Rendering returns what each row
 //! does when clicked.
 
@@ -337,9 +337,20 @@ impl Row<'_> {
     }
 }
 
-/// The archive button's label for a sidebar `width` wide.
-fn archive_label(width: usize) -> &'static str {
-    if width >= 24 { "↓ archive" } else { "↓" }
+/// A section's header: its title, a rule, and its count at the right end
+/// (` WORKING ──────── 2`).
+fn section_header(section: &Section, width: usize) -> Line<'static> {
+    let t = theme::get();
+    let count = section.members.len().to_string();
+    // A space before the title, around the rule, and after the count.
+    let title = truncate(&section.title, width.saturating_sub(count.width() + 6));
+    let rule = width.saturating_sub(title.width() + count.width() + 4);
+    Line::from(vec![
+        Span::styled(format!(" {title} "), t.muted().add_modifier(Modifier::BOLD)),
+        Span::styled("─".repeat(rule), t.faint()),
+        Span::raw(" "),
+        Span::styled(count, t.fg(section.color).add_modifier(Modifier::BOLD)),
+    ])
 }
 
 impl Sidebar<'_> {
@@ -365,11 +376,7 @@ impl Sidebar<'_> {
                 " corral",
                 t.accent().add_modifier(Modifier::BOLD),
             ))),
-            // The rule; the order switch is drawn over its right end.
-            Row::plain(Line::styled(
-                format!(" {}", "─".repeat(width.saturating_sub(2))),
-                t.faint(),
-            )),
+            Row::plain(Line::default()),
         ];
 
         if self.panes.is_empty() {
@@ -381,12 +388,7 @@ impl Sidebar<'_> {
             if i > 0 {
                 rows.push(Row::plain(Line::default()));
             }
-            let count = format!("  {}", section.members.len());
-            let title = truncate(&section.title, width.saturating_sub(count.width() + 1));
-            rows.push(Row::plain(Line::from(vec![
-                Span::styled(format!(" {title}"), t.muted().add_modifier(Modifier::BOLD)),
-                Span::styled(count, t.fg(section.color)),
-            ])));
+            rows.push(Row::plain(section_header(&section, width)));
             for p in section.members {
                 self.agent_rows(p, width, &mut rows);
             }
@@ -429,13 +431,6 @@ impl Sidebar<'_> {
             Rect::new(inner.x, inner.y, inner.width, 1),
             buf,
         ));
-        if !self.panes.is_empty() {
-            hits.push(render_order_switch(
-                Rect::new(inner.x, inner.y + 1, inner.width, 1),
-                self.order,
-                buf,
-            ));
-        }
         if show_buttons {
             let y = inner.y + inner.height - 3;
             Line::styled(
@@ -443,8 +438,11 @@ impl Sidebar<'_> {
                 t.faint(),
             )
             .render(Rect::new(inner.x, y, inner.width, 1), buf);
+            // No agents, nothing to order.
+            let order = (!self.panes.is_empty()).then_some(self.order);
             hits.extend(render_buttons(
                 Rect::new(inner.x, y + 1, inner.width, 2),
+                order,
                 self.archived,
                 buf,
             ));
@@ -597,7 +595,7 @@ impl Sidebar<'_> {
             return;
         }
 
-        // The focused agent opens up: its title, where it runs, its branch.
+        // The focused agent opens up: its title and branch.
         let indent = "   ";
         let room = width.saturating_sub(indent.len() + 1);
         let mut detail = |line: Line<'a>, button: Option<(&'static str, Click)>| {
@@ -609,39 +607,34 @@ impl Sidebar<'_> {
             })
         };
         let marker = || Span::styled("▍", t.accent());
-        if let Some(title) = task_title(p) {
+        // The archive button sits at the right end of the last detail row,
+        // two columns clear of its text; it drops its word when tight.
+        let archive = |used: usize| {
+            let label = if used + "↓ archive".width() + 2 <= room {
+                "↓ archive"
+            } else {
+                "↓"
+            };
+            (label, room.saturating_sub(label.width() + 2))
+        };
+        let title = task_title(p);
+        if let Some(title) = title {
+            let (button, room) = match p.git {
+                Some(_) => (None, room),
+                None => {
+                    let (label, room) = archive(title.width());
+                    (Some((label, Click::Archive(p.id.clone()))), room)
+                }
+            };
             detail(
                 Line::from(vec![
                     marker(),
                     Span::raw("  "),
                     Span::styled(truncate(title, room), Style::new().fg(t.text)),
                 ]),
-                None,
+                button,
             );
         }
-        let what = p
-            .agent
-            .clone()
-            .or_else(|| p.command.first().cloned())
-            .unwrap_or_else(|| "shell".into());
-        // By project, the section title already names the project.
-        let place = match self.order {
-            Order::Need => format!("{} · {what}", p.workspace),
-            Order::Project => what,
-        };
-        // Where it runs shares its row with the archive button.
-        let archive = archive_label(width);
-        detail(
-            Line::from(vec![
-                marker(),
-                Span::raw("  "),
-                Span::styled(
-                    truncate(&place, room.saturating_sub(archive.width() + 1)),
-                    t.muted(),
-                ),
-            ]),
-            Some((archive, Click::Archive(p.id.clone()))),
-        );
         if let Some(git) = &p.git {
             let mut tail = Vec::new();
             if let Some(pr) = &git.pr {
@@ -653,22 +646,30 @@ impl Sidebar<'_> {
                 tail.push(Span::styled(label, style));
             }
             let tail_width: usize = tail.iter().map(|s| s.content.width()).sum();
-            let branch = truncate(
-                &format!("⎇ {}", git.branch),
-                room.saturating_sub(tail_width),
-            );
+            let branch = format!("⎇ {}", git.branch);
+            let (label, room) = archive(branch.width() + tail_width);
+            let branch = truncate(&branch, room.saturating_sub(tail_width));
             let mut spans = vec![marker(), Span::raw("  "), Span::styled(branch, t.fg(t.git))];
             spans.extend(tail);
-            detail(Line::from(spans), None);
+            detail(
+                Line::from(spans),
+                Some((label, Click::Archive(p.id.clone()))),
+            );
+        } else if title.is_none() {
+            // Nothing else to show: the button gets a row of its own.
+            detail(
+                Line::from(marker()),
+                Some((archive(0).0, Click::Archive(p.id.clone()))),
+            );
         }
     }
 }
 
 /// `≡ menu  ✕ exit  «`, right-aligned on the title row (`≡  ✕  «` when
-/// narrow).
+/// that would crowd the wordmark).
 fn render_title_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
-    let (menu, exit) = if row.width >= 26 {
+    let (menu, exit) = if row.width >= 28 {
         ("≡ menu", "✕ exit")
     } else {
         ("≡", "✕")
@@ -693,70 +694,78 @@ fn render_title_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     hits
 }
 
-/// ` ⇅ by need ` over the right end of the rule under the title.
-fn render_order_switch(row: Rect, order: Order, buf: &mut Buffer) -> Hit {
+/// Two rows of buttons. `+ new shell` with the `⇅ by need` switch at the
+/// other end (when there are agents to order), then `✎ notes`, `✦ top
+/// stories` and `↺ archived 3` (when panes are archived). Labels shorten
+/// until each row fits.
+fn render_buttons(area: Rect, order: Option<Order>, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
-    let label = format!(" ⇅ {} ", order.label());
-    let w = (label.width() as u16).min(row.width.saturating_sub(2));
-    let area = Rect::new(row.x + row.width.saturating_sub(w + 1), row.y, w, 1);
-    Line::styled(label, t.muted()).render(area, buf);
-    Hit {
-        area,
-        click: Click::Order,
-    }
-}
-
-/// Two rows of buttons: `+ new shell` and `✎ notes` over `✦ top stories`
-/// (and `↺ archived 3` when panes are archived), shortened when the
-/// sidebar is narrow.
-fn render_buttons(area: Rect, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
-    let t = theme::get();
-    let wide = area.width >= 28;
-    let pick = |long: &'static str, short: &'static str| if wide { long } else { short };
-    let archived_label = if wide {
-        format!("↺ archived {archived}")
-    } else {
-        format!("↺ {archived}")
-    };
-    let mut second = vec![(
-        pick("✦ top stories", "✦ news"),
-        t.fg(t.done),
-        Click::Stories,
-    )];
-    if archived > 0 {
-        second.push((archived_label.as_str(), t.muted(), Click::Archived));
-    }
-    let rows: [&[(&str, Style, Click)]; 2] = [
-        &[
-            (
-                pick("+ new shell", "+ new"),
-                t.accent().add_modifier(Modifier::BOLD),
-                Click::New,
-            ),
-            ("✎ notes", t.muted(), Click::Notes),
-        ],
-        &second,
-    ];
+    // One column in from each side.
+    let room = area.width.saturating_sub(2) as usize;
     let mut hits = Vec::new();
-    for (dy, row) in rows.into_iter().enumerate() {
-        let y = area.y + dy as u16;
-        if y >= area.y + area.height {
+    let mut put = |x: u16, y: u16, label: &str, style: Style, click: Click| {
+        let r = Rect::new(x, y, label.width() as u16, 1);
+        Line::styled(label.to_string(), style).render(r, buf);
+        hits.push(Hit { area: r, click });
+    };
+
+    let new = ["+ new shell", "+ new", "+"]
+        .into_iter()
+        .find(|l| l.width() <= room)
+        .unwrap_or("+");
+    let switch = order.map(|o| {
+        let long = format!("⇅ {}", o.label());
+        [long, "⇅".to_string()]
+            .into_iter()
+            .find(|l| new.width() + 2 + l.width() <= room)
+            .unwrap_or_default()
+    });
+    put(
+        area.x + 1,
+        area.y,
+        new,
+        t.accent().add_modifier(Modifier::BOLD),
+        Click::New,
+    );
+    if let Some(label) = switch.filter(|l| !l.is_empty()) {
+        let x = area.x + 1 + (room - label.width()) as u16;
+        put(x, area.y, &label, t.muted(), Click::Order);
+    }
+    if area.height < 2 {
+        return hits;
+    }
+
+    let archived_long = format!("↺ archived {archived}");
+    let archived_short = format!("↺ {archived}");
+    let levels: [[&str; 3]; 5] = [
+        ["✎ notes", "✦ top stories", &archived_long],
+        ["✎ notes", "✦ news", &archived_long],
+        ["✎ notes", "✦ top stories", &archived_short],
+        ["✎ notes", "✦ news", &archived_short],
+        ["✎", "✦", &archived_short],
+    ];
+    let count = if archived > 0 { 3 } else { 2 };
+    let fits = |labels: &[&str]| {
+        labels.iter().map(|l| l.width()).sum::<usize>() + 2 * (labels.len() - 1) <= room
+    };
+    let labels = levels
+        .iter()
+        .map(|l| &l[..count])
+        .find(|l| fits(l))
+        .unwrap_or(&levels[4][..count]);
+    let styles = [
+        (t.muted(), Click::Notes),
+        (t.fg(t.done), Click::Stories),
+        (t.muted(), Click::Archived),
+    ];
+    let mut x = area.x + 1;
+    for (label, (style, click)) in labels.iter().zip(styles) {
+        let w = label.width() as u16;
+        if x + w > area.x + area.width {
             break;
         }
-        let mut x = area.x + 1;
-        for (label, style, click) in row {
-            let w = label.width() as u16;
-            if x + w > area.x + area.width {
-                break;
-            }
-            let r = Rect::new(x, y, w, 1);
-            Line::styled(*label, *style).render(r, buf);
-            hits.push(Hit {
-                area: r,
-                click: click.clone(),
-            });
-            x += w + 3;
-        }
+        put(x, area.y + 1, label, style, click);
+        x += w + 2;
     }
     hits
 }
@@ -902,12 +911,11 @@ mod tests {
         assert_eq!(
             clicks,
             vec![
-                // The focused agent's row plus its three detail rows, the
-                // second with the archive button.
+                // The focused agent's row plus its two detail rows, the
+                // branch row with the archive button.
                 f("p1"),
                 f("p1"),
                 Click::Archive("p1".into()),
-                f("p1"),
                 f("p1"),
                 f("p3"),
                 f("p2"),
@@ -916,28 +924,30 @@ mod tests {
                 Click::Menu,
                 Click::Exit,
                 Click::Collapse,
-                Click::Order,
                 Click::New,
+                Click::Order,
                 Click::Notes,
                 Click::Stories,
             ]
         );
-        // Menu, exit and collapse on the title row, the order switch on the
-        // rule under it, the new button on the last row but one with notes
-        // beside it.
-        let ys: Vec<u16> = hits[9..13].iter().map(|h| h.area.y).collect();
-        assert_eq!(ys, vec![0, 0, 0, 1]);
+        // Menu, exit and collapse on the title row.
+        let ys: Vec<u16> = hits[8..11].iter().map(|h| h.area.y).collect();
+        assert_eq!(ys, vec![0, 0, 0]);
+        assert!(hits[8].area.x + hits[8].area.width < hits[9].area.x);
         assert!(hits[9].area.x + hits[9].area.width < hits[10].area.x);
-        assert!(hits[10].area.x + hits[10].area.width < hits[11].area.x);
-        let a = hits[13].area;
-        assert_eq!(a.y, 20);
-        let n = hits[14].area;
-        assert_eq!(n.y, 20);
-        assert!(a.x + a.width < n.x);
-        // Top stories under it.
-        let c = hits[15].area;
-        assert_eq!((c.y, c.x), (21, a.x));
-        // The archive button sits at the right end of its row.
+        // The new button on the last row but one, the order switch at its
+        // right end.
+        let a = hits[11].area;
+        let o = hits[12].area;
+        assert_eq!((a.y, o.y), (20, 20));
+        assert_eq!(o.x + o.width, 30);
+        // Notes and top stories under it.
+        let n = hits[13].area;
+        let c = hits[14].area;
+        assert_eq!((n.y, n.x), (21, a.x));
+        assert_eq!(c.y, 21);
+        assert!(n.x + n.width < c.x);
+        // The archive button sits at the right end of the branch row.
         let archive = hits[2].area;
         assert_eq!((archive.y, archive.x + archive.width), (5, 30));
     }

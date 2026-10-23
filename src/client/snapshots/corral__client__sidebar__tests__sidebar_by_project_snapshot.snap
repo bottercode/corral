@@ -3,15 +3,14 @@ source: src/client/sidebar.rs
 expression: text
 ---
  corral      ≡ menu  ✕ exit  « │
- ─────────────── ⇅ by project  │
- corral  2                     │
+                               │
+ corral ──────────────────── 2 │
 ▍1 claude         ◆ blocked 4m │
 ▍  Fix token refresh           │
-▍  claude            ↓ archive │
-▍  ⎇ fix/token-refresh         │
+▍  ⎇ fix/token-refresh       ↓ │
  3 a-very-long-agen… ✓ done 4m │
                                │
- website  3                    │
+ website ─────────────────── 3 │
  2 codex                  ⠋ 4m │
  4 zsh                exited 1 │
  5 docs                   idle │
@@ -21,6 +20,7 @@ expression: text
                                │
                                │
                                │
+                               │
  ───────────────────────────── │
- + new shell   ✎ notes         │
- ✦ top stories                 │
+ + new shell      ⇅ by project │
+ ✎ notes  ✦ top stories        │

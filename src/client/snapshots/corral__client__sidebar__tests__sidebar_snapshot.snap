@@ -3,24 +3,24 @@ source: src/client/sidebar.rs
 expression: text
 ---
  corral      ≡ menu  ✕ exit  « │
- ────────────────── ⇅ by need  │
- NEEDS YOU  2                  │
+                               │
+ NEEDS YOU ───────────────── 2 │
 ▍1 claude         ◆ blocked 4m │
 ▍  Fix token refresh           │
-▍  corral · claude   ↓ archive │
-▍  ⎇ fix/token-refresh         │
+▍  ⎇ fix/token-refresh       ↓ │
  3 a-very-long-agen… ✓ done 4m │
                                │
- WORKING  1                    │
+ WORKING ─────────────────── 1 │
 ▏2 codex                  ⠋ 4m │
                                │
- QUIET  2                      │
+ QUIET ───────────────────── 2 │
  5 docs                   idle │
  4 zsh                exited 1 │
                                │
                                │
                                │
                                │
+                               │
  ───────────────────────────── │
- + new shell   ✎ notes         │
- ✦ top stories                 │
+ + new shell         ⇅ by need │
+ ✎ notes  ✦ top stories        │

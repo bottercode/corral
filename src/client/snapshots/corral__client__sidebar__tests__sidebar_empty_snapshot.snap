@@ -3,7 +3,7 @@ source: src/client/sidebar.rs
 expression: text
 ---
  corral      ≡ menu  ✕ exit  « │
- ───────────────────────────── │
+                               │
  no agents yet                 │
  start one below               │
                                │
@@ -22,5 +22,5 @@ expression: text
                                │
                                │
  ───────────────────────────── │
- + new shell   ✎ notes         │
- ✦ top stories                 │
+ + new shell                   │
+ ✎ notes  ✦ top stories        │
