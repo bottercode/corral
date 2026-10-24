@@ -240,6 +240,16 @@ with your notes down the left and the selected one beside them:
   typing, so you can grep them or open them in your editor; changes made
   there show up the next time the page opens.
 
+### Pasted images
+
+Agents read a pasted image straight from the clipboard, so normally all you
+see is `[Image #1]`. In corral, `Ctrl-V` in an agent (or dropping an image
+file on the terminal) also puts the image on a card at the top right of the
+pane, until Enter sends the prompt; its **✕** puts it away. Ghostty and
+kitty draw it sharp, iTerm2 and WezTerm too; other terminals (and tmux) get
+it in coloured half blocks. On Linux the clipboard is read with `wl-paste`
+or `xclip`. `image_previews = false` turns it off.
+
 ## Agent state
 
 | State | Meaning |
@@ -345,6 +355,7 @@ sidebar_collapsed = false              # just the agent numbers (« / ^b c)
 theme = "ranch"                        # ranch, ink or terminal
 sidebar_order = "need"                 # need (grouped) or flat (in order)
 update_check = true                    # once a day, a toast when a newer corral is out
+image_previews = true                  # show images pasted into an agent
 ```
 
 Themes:

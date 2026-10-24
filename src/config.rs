@@ -9,6 +9,7 @@
 //! theme = "ranch"                  # ranch, ink or terminal
 //! sidebar_order = "need"           # need (agents grouped by what needs you) or flat
 //! update_check = true              # once a day, a toast when a newer corral is out
+//! image_previews = true            # show images pasted into an agent (Ctrl-V, or a dropped file)
 //! ```
 
 use std::path::Path;
@@ -29,6 +30,7 @@ pub struct Config {
     pub theme: String,
     pub sidebar_order: String,
     pub update_check: bool,
+    pub image_previews: bool,
 }
 
 impl Default for Config {
@@ -42,6 +44,7 @@ impl Default for Config {
             theme: "ranch".into(),
             sidebar_order: "need".into(),
             update_check: true,
+            image_previews: true,
         }
     }
 }

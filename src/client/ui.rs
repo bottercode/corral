@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::input::Key;
 use super::sidebar::{RAIL_WIDTH, Sidebar, badge, task_title, truncate};
-use super::{App, MENU, MenuItem, Mode, theme};
+use super::{App, MENU, MenuItem, Mode, images, theme};
 use crate::protocol::{AgentState, PaneInfo};
 
 /// Below this width the sidebar is hidden…
@@ -418,6 +418,7 @@ fn draw_tiles(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
     }
+    app.preview_hits.clear();
     let n = rects.len();
     let scroll = match app.mode {
         Mode::Scroll { offset } => offset,
@@ -459,6 +460,16 @@ fn draw_tiles(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         let (row, col) = screen.cursor_position();
+        let cursor = (body.x + col, body.y + row);
+        if let Some(list) = app.previews.get(&id) {
+            let hits = draw_previews(f, list, body);
+            app.preview_hits
+                .extend(hits.into_iter().map(|(r, i)| (r, id.clone(), i)));
+        }
+        let Some(parser) = app.screens.get(&id) else {
+            continue;
+        };
+        let screen = parser.screen();
         if focused
             && scroll == 0
             && matches!(app.mode, Mode::Normal)
@@ -466,7 +477,7 @@ fn draw_tiles(f: &mut Frame, app: &mut App, area: Rect) {
             && row < body.height
             && col < body.width
         {
-            f.set_cursor_position((body.x + col, body.y + row));
+            f.set_cursor_position(cursor);
         }
 
         if let Some(p) = info
@@ -490,6 +501,67 @@ fn draw_tiles(f: &mut Frame, app: &mut App, area: Rect) {
             );
         }
     }
+}
+
+/// Cards for the images pasted into a pane's prompt, along the top right of
+/// its screen, first on the left. Returns each card's close button.
+fn draw_previews(f: &mut Frame, list: &[images::Preview], body: Rect) -> Vec<(Rect, usize)> {
+    let t = theme::get();
+    if body.width < 20 || body.height < 4 {
+        return Vec::new();
+    }
+    let size = |p: &images::Preview| {
+        let cells = p.cells();
+        (cells.width.max(16) + 2, cells.height + 2)
+    };
+    // As many of the latest as fit side by side, a column apart.
+    let room = body.width.saturating_sub(2);
+    let mut used = 0;
+    let mut first = list.len();
+    while first > 0 {
+        let (w, h) = size(&list[first - 1]);
+        if used + w > room || h > body.height {
+            break;
+        }
+        used += w + 1;
+        first -= 1;
+    }
+    let mut hits = Vec::new();
+    let mut x = body.x + body.width - 1 - used.saturating_sub(1).min(body.width - 1);
+    for (i, p) in list.iter().enumerate().skip(first) {
+        let (w, h) = size(p);
+        let card = Rect::new(x, body.y, w, h);
+        x += w + 1;
+        let title = if i == first && first > 0 {
+            format!(" image {} · {} more ", i + 1, first)
+        } else {
+            format!(" image {} ", i + 1)
+        };
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(t.accent())
+            .title(Line::styled(title, t.accent()))
+            .title_bottom(Line::styled(
+                format!(" {}×{} ", p.width, p.height),
+                t.muted(),
+            ));
+        let inner = block.inner(card);
+        f.render_widget(Clear, card);
+        f.render_widget(block, card);
+        let close = Rect::new(card.x + card.width - 4, card.y + card.height - 1, 3, 1);
+        f.render_widget(Line::styled(" ✕ ", t.muted()), close);
+        hits.push((close, i));
+        let cells = p.cells();
+        let at = Rect::new(
+            inner.x + (inner.width - cells.width) / 2,
+            inner.y,
+            cells.width,
+            cells.height,
+        );
+        f.render_widget(ratatui_image::Image::new(&p.protocol), at);
+    }
+    hits
 }
 
 /// One row above each tile: number, name and title on the left, state on
