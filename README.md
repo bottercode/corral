@@ -110,14 +110,18 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b ^b` | send a literal `Ctrl-b` to the agent |
 
 Click an agent on screen to type into it, or a sidebar row to bring that agent
-into the focused spot. The **+ new shell** button at the
-bottom of the sidebar opens one, **✎ notes** beside it opens your notes, and
-**✦ top stories** under them opens the news. At the top:
+into the focused spot. At the bottom of the sidebar, **+ new** opens a shell
+and **≡ menu** (or `^b m`) beside it changes the theme, the sidebar's order
+and notifications, and installs agent hooks; changes are saved to your
+config. Under the line below them:
 
-- **≡ menu** (or `^b m`) changes the theme, the sidebar's order and
-  notifications, and installs agent hooks. Changes are saved to your config.
-- **⇅ by need / by project**, on the line under the title, switches between
-  listing agents by what they need from you and grouping them by project.
+- **✎ notes** opens your notes, and **✦ stories** the news.
+- **⇅ by need / by project** switches between listing agents by what they
+  need from you and grouping them by project.
+- **↺ archive** lists the agents you've archived.
+
+At the top:
+
 - **«** collapses the sidebar to a narrow rail of agent numbers and state
   marks (`◆` blocked, `✓` done, a spinner while working), giving the room to
   your agents; **»** brings it back. `^b c` does the same.
@@ -138,7 +142,7 @@ SSH): run `corral` again and everything is where you left it.
 Done with an agent for now, but not with its work? Press `^b a` (or click
 **↓ archive** next to the focused agent in the sidebar) to archive it.
 corral ends its process but keeps its folder and its conversation. Archived agents survive restarts. `^b A` (or the
-**↺ archived** button) lists them: Enter brings one back, resuming its
+**↺ archive** button) lists them: Enter brings one back, resuming its
 conversation, and `x` forgets it.
 
 ### After a reboot or a stop
@@ -172,7 +176,7 @@ update), the next `corral` offers to bring your panes back:
 
 ### Top stories
 
-While your agents work, `^b t` (or **✦ top stories** in the sidebar) shows the
+While your agents work, `^b t` (or **✦ stories** in the sidebar) shows the
 front pages of Hacker News and lobste.rs in place of the agents, with the
 sidebar still beside it:
 

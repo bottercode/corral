@@ -109,8 +109,11 @@
   .dt.t { color: var(--t-text); }
   .dt .g { color: var(--heather); }
   .sw { color: var(--creek); } .sbk { color: var(--rust); font-weight: 600; } .sd { color: var(--sage); } .si { color: var(--t-muted); }
-  .sb .ft { margin-top: auto; border-top: 1px solid var(--t-faint); padding: 6px 12px 8px; display: grid; gap: 1px; }
-  .ft .a { color: var(--hay); font-weight: 600; } .ft .c { color: var(--heather); }
+  .sb .ft { margin-top: auto; padding: 0 0 8px; }
+  .ft .r { justify-content: space-between; }
+  .ft .rule { margin: 0 12px 2px; border-top: 1px solid var(--t-faint); height: 0; }
+  .ft .grid { display: grid; grid-template-columns: 1fr 1fr; padding: 0 12px; color: var(--t-muted); }
+  .ft .a { color: var(--hay); font-weight: 600; } .ft .mn { color: var(--hay); } .ft .c { color: var(--sage); }
   .tile { display: flex; flex-direction: column; border-right: 1px solid var(--t-line); }
   .tile:last-child { border-right: 0; }
   .th { display: flex; justify-content: space-between; gap: 10px; padding: 0 12px; height: 24px; align-items: center; color: var(--t-muted); white-space: nowrap; overflow: hidden; }
@@ -536,7 +539,7 @@ corral read "$p" --lines 30</pre>
   function second() { return focus === 1 ? 4 : 1; }
   var groups = [['NEEDS YOU', ['blocked', 'done']], ['WORKING', ['working']], ['QUIET', ['idle']]];
   function render() {
-    var h = '<div class="r head"><b>corral</b><span style="color:var(--t-muted)">≡ menu  ✕ exit  «</span></div><div class="r rail"><span>⇅ by need</span></div>';
+    var h = '<div class="r head"><b>corral</b><span style="color:var(--t-muted)">✕ exit  «</span></div><div class="r">&nbsp;</div>';
     groups.forEach(function (g) {
       var m = agents.filter(function (a) { return g[1].indexOf(a.state) >= 0; })
         .sort(function (x, y) { return g[1].indexOf(x.state) - g[1].indexOf(y.state); });
@@ -554,7 +557,8 @@ corral read "$p" --lines 30</pre>
         }
       });
     });
-    h += '<div class="ft"><span><span class="a">+ new shell</span></span><span class="c">✦ top stories</span></div>';
+    h += '<div class="ft"><div class="r"><span class="a">+ new</span><span class="mn">≡ menu</span></div><div class="rule"></div>' +
+      '<div class="grid"><span>✎ notes</span><span>⇅ by need</span><span class="c">✦ stories</span><span>↺ archive</span></div></div>';
     document.getElementById('sb').innerHTML = h;
     [[focus, 't1'], [second(), 't2']].forEach(function (p) {
       var a = byN(p[0]);

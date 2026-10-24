@@ -1,8 +1,9 @@
 ---
 source: src/client/sidebar.rs
+assertion_line: 999
 expression: text
 ---
- corral      ≡ menu  ✕ exit  « │
+ corral              ✕ exit  « │
                                │
  no agents yet                 │
  start one below               │
@@ -20,7 +21,7 @@ expression: text
                                │
                                │
                                │
-                               │
+ + new                  ≡ menu │
  ───────────────────────────── │
- + new shell                   │
- ✎ notes  ✦ top stories        │
+ ✎ notes                       │
+ ✦ stories      ↺ archive      │

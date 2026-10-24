@@ -1,8 +1,9 @@
 ---
 source: src/client/sidebar.rs
+assertion_line: 1042
 expression: text
 ---
- corral    ≡  ✕  « │
+ corral       ✕  « │
                    │
  NEEDS YOU ───── 2 │
  1 claude     ◆ 4m │
@@ -20,7 +21,7 @@ expression: text
                    │
                    │
                    │
-                   │
+ + new      ≡ menu │
  ───────────────── │
- + new shell     ⇅ │
- ✎ notes  ✦ news   │
+ ✎        ⇅        │
+ ✦        ↺        │

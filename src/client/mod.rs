@@ -536,7 +536,7 @@ impl App {
         }
     }
 
-    /// `^b n` / "+ new shell": a shell next to the focused agent's work.
+    /// `^b n` / "+ new": a shell next to the focused agent's work.
     fn new_shell(&mut self) {
         let req = self.new_pane_request(self.default_dir());
         self.request(Command::New(req), Pending::New);
@@ -2034,7 +2034,7 @@ mod tests {
             area: Rect::new(1, 18, 12, 1),
             click: sidebar::Click::New,
         }];
-        // Click "+ new shell".
+        // Click "+ new".
         a.on_stdin(b"\x1b[<0;3;19M\x1b[<0;3;19m");
         assert!(sent_new(&a).command.is_empty());
         assert!(matches!(a.mode, Mode::Normal));

@@ -747,17 +747,19 @@ fn draw_menu(f: &mut Frame, app: &mut App, selected: usize) {
     let right_w = rows.iter().map(|(_, v)| v.width()).max().unwrap_or(0);
     let width = (left_w + right_w + 6).max(hint.width() + 3) as u16;
     let area = f.area();
-    // Under the sidebar's title row, right-aligned with the menu button.
+    // Right-aligned with the menu button: just above it at the foot of the
+    // sidebar, or under the title row when the sidebar is a rail.
     let x = (app.sidebar_area.x + app.sidebar_area.width)
         .saturating_sub(width + 1)
         .max(area.x);
-    let height = rows.len() as u16 + 4;
-    let r = Rect::new(
-        x,
-        area.y + 1,
-        width.min(area.width),
-        height.min(area.height.saturating_sub(1)),
-    );
+    let height = (rows.len() as u16 + 4).min(area.height.saturating_sub(1));
+    let y = if app.sidebar_collapsed {
+        area.y + 1
+    } else {
+        let button = (app.sidebar_area.y + app.sidebar_area.height).saturating_sub(4);
+        button.saturating_sub(height).max(area.y)
+    };
+    let r = Rect::new(x, y, width.min(area.width), height);
     f.render_widget(Clear, r);
     let block = Block::new()
         .borders(Borders::ALL)

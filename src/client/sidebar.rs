@@ -270,7 +270,7 @@ pub fn task_title(p: &PaneInfo) -> Option<&str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Click {
     Focus(PaneId),
-    /// The "+ new shell" button.
+    /// The "+ new" button.
     New,
     /// The "≡ menu" button.
     Menu,
@@ -278,7 +278,7 @@ pub enum Click {
     Exit,
     /// The "⇅ by need" / "⇅ by project" switch.
     Order,
-    /// The "✦ top stories" button.
+    /// The "✦ stories" button.
     Stories,
     /// The "✎ notes" button.
     Notes,
@@ -286,7 +286,7 @@ pub enum Click {
     Collapse,
     /// The "↓ archive" button on the focused agent.
     Archive(PaneId),
-    /// The "↺ archived" button: the archived panes.
+    /// The "↺ archive" button: the archived panes.
     Archived,
 }
 
@@ -394,10 +394,11 @@ impl Sidebar<'_> {
             }
         }
 
-        // Buttons on the last two rows, under a rule.
-        let show_buttons = inner.height >= 7;
+        // Buttons on the last four rows: new and menu, a rule, then two rows
+        // of the rest.
+        let show_buttons = inner.height >= 8;
         let list_rows = if show_buttons {
-            inner.height - 3
+            inner.height - 4
         } else {
             inner.height
         } as usize;
@@ -432,16 +433,20 @@ impl Sidebar<'_> {
             buf,
         ));
         if show_buttons {
-            let y = inner.y + inner.height - 3;
+            let y = inner.y + inner.height - 4;
+            hits.extend(render_new_and_menu(
+                Rect::new(inner.x, y, inner.width, 1),
+                buf,
+            ));
             Line::styled(
                 format!(" {}", "─".repeat(width.saturating_sub(2))),
                 t.faint(),
             )
-            .render(Rect::new(inner.x, y, inner.width, 1), buf);
+            .render(Rect::new(inner.x, y + 1, inner.width, 1), buf);
             // No agents, nothing to order.
             let order = (!self.panes.is_empty()).then_some(self.order);
             hits.extend(render_buttons(
-                Rect::new(inner.x, y + 1, inner.width, 2),
+                Rect::new(inner.x, y + 2, inner.width, 2),
                 order,
                 self.archived,
                 buf,
@@ -665,19 +670,14 @@ impl Sidebar<'_> {
     }
 }
 
-/// `≡ menu  ✕ exit  «`, right-aligned on the title row (`≡  ✕  «` when
-/// that would crowd the wordmark).
+/// `✕ exit  «`, right-aligned on the title row (`✕  «` when that would
+/// crowd the wordmark).
 fn render_title_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
-    let (menu, exit) = if row.width >= 28 {
-        ("≡ menu", "✕ exit")
-    } else {
-        ("≡", "✕")
-    };
+    let exit = if row.width >= 20 { "✕ exit" } else { "✕" };
     let buttons = [
         ("«", t.muted(), Click::Collapse),
         (exit, t.muted(), Click::Exit),
-        (menu, t.accent(), Click::Menu),
     ];
     // Right to left, one column in from the edge, two apart.
     let mut right = row.x + row.width.saturating_sub(1);
@@ -694,78 +694,83 @@ fn render_title_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     hits
 }
 
-/// Two rows of buttons. `+ new shell` with the `⇅ by need` switch at the
-/// other end (when there are agents to order), then `✎ notes`, `✦ top
-/// stories` and `↺ archived 3` (when panes are archived). Labels shorten
-/// until each row fits.
-fn render_buttons(area: Rect, order: Option<Order>, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
+/// `+ new` with `≡ menu` at the other end, the row above the rule.
+fn render_new_and_menu(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
     // One column in from each side.
+    let room = row.width.saturating_sub(2) as usize;
+    let new = if room >= 5 { "+ new" } else { "+" };
+    let menu = if new.width() + 2 + "≡ menu".width() <= room {
+        "≡ menu"
+    } else {
+        "≡"
+    };
+    let new_area = Rect::new(row.x + 1, row.y, new.width() as u16, 1);
+    Line::styled(new, t.accent().add_modifier(Modifier::BOLD)).render(new_area, buf);
+    let w = menu.width() as u16;
+    let menu_area = Rect::new(row.x + 1 + (room as u16).saturating_sub(w), row.y, w, 1);
+    Line::styled(menu, t.accent()).render(menu_area, buf);
+    vec![
+        Hit {
+            area: new_area,
+            click: Click::New,
+        },
+        Hit {
+            area: menu_area,
+            click: Click::Menu,
+        },
+    ]
+}
+
+/// Two rows of buttons in two columns, under the rule: `✎ notes` and the
+/// `⇅ by need` switch (when there are agents to order), then `✦ stories`
+/// and `↺ archive` (with how many, when any are). A column's labels shorten
+/// to their icons when they don't fit.
+fn render_buttons(area: Rect, order: Option<Order>, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
+    let t = theme::get();
+    // One column in from each side, two between the columns.
     let room = area.width.saturating_sub(2) as usize;
+    let col = room.saturating_sub(2) / 2;
+    let order_label = order.map(|o| format!("⇅ {}", o.label()));
+    let archive_label = if archived > 0 {
+        format!("↺ archive {archived}")
+    } else {
+        "↺ archive".to_string()
+    };
+    let left = [
+        Some(("✎ notes".to_string(), "✎", t.muted(), Click::Notes)),
+        Some(("✦ stories".to_string(), "✦", t.fg(t.done), Click::Stories)),
+    ];
+    let right = [
+        order_label.map(|l| (l, "⇅", t.muted(), Click::Order)),
+        Some((archive_label, "↺", t.muted(), Click::Archived)),
+    ];
+    let fits = |c: &[Option<(String, &str, Style, Click)>]| {
+        c.iter().flatten().all(|(l, ..)| l.width() <= col)
+    };
+    let (long_left, long_right) = (fits(&left), fits(&right));
     let mut hits = Vec::new();
-    let mut put = |x: u16, y: u16, label: &str, style: Style, click: Click| {
-        let r = Rect::new(x, y, label.width() as u16, 1);
-        Line::styled(label.to_string(), style).render(r, buf);
-        hits.push(Hit { area: r, click });
-    };
-
-    let new = ["+ new shell", "+ new", "+"]
-        .into_iter()
-        .find(|l| l.width() <= room)
-        .unwrap_or("+");
-    let switch = order.map(|o| {
-        let long = format!("⇅ {}", o.label());
-        [long, "⇅".to_string()]
-            .into_iter()
-            .find(|l| new.width() + 2 + l.width() <= room)
-            .unwrap_or_default()
-    });
-    put(
-        area.x + 1,
-        area.y,
-        new,
-        t.accent().add_modifier(Modifier::BOLD),
-        Click::New,
-    );
-    if let Some(label) = switch.filter(|l| !l.is_empty()) {
-        let x = area.x + 1 + (room - label.width()) as u16;
-        put(x, area.y, &label, t.muted(), Click::Order);
-    }
-    if area.height < 2 {
-        return hits;
-    }
-
-    let archived_long = format!("↺ archived {archived}");
-    let archived_short = format!("↺ {archived}");
-    let levels: [[&str; 3]; 5] = [
-        ["✎ notes", "✦ top stories", &archived_long],
-        ["✎ notes", "✦ news", &archived_long],
-        ["✎ notes", "✦ top stories", &archived_short],
-        ["✎ notes", "✦ news", &archived_short],
-        ["✎", "✦", &archived_short],
-    ];
-    let count = if archived > 0 { 3 } else { 2 };
-    let fits = |labels: &[&str]| {
-        labels.iter().map(|l| l.width()).sum::<usize>() + 2 * (labels.len() - 1) <= room
-    };
-    let labels = levels
-        .iter()
-        .map(|l| &l[..count])
-        .find(|l| fits(l))
-        .unwrap_or(&levels[4][..count]);
-    let styles = [
-        (t.muted(), Click::Notes),
-        (t.fg(t.done), Click::Stories),
-        (t.muted(), Click::Archived),
-    ];
-    let mut x = area.x + 1;
-    for (label, (style, click)) in labels.iter().zip(styles) {
-        let w = label.width() as u16;
-        if x + w > area.x + area.width {
+    for (dy, (l, r)) in left.into_iter().zip(right).enumerate() {
+        let y = area.y + dy as u16;
+        if dy as u16 >= area.height {
             break;
         }
-        put(x, area.y + 1, label, style, click);
-        x += w + 2;
+        for (button, long, x) in [
+            (l, long_left, area.x + 1),
+            (r, long_right, area.x + 1 + (col + 2) as u16),
+        ] {
+            let Some((label, short, style, click)) = button else {
+                continue;
+            };
+            let label = if long { label.as_str() } else { short };
+            let w = label.width() as u16;
+            if x + w > area.x + area.width {
+                continue;
+            }
+            let rect = Rect::new(x, y, w, 1);
+            Line::styled(label.to_string(), style).render(rect, buf);
+            hits.push(Hit { area: rect, click });
+        }
     }
     hits
 }
@@ -921,32 +926,32 @@ mod tests {
                 f("p2"),
                 f("p5"),
                 f("p4"),
-                Click::Menu,
                 Click::Exit,
                 Click::Collapse,
                 Click::New,
-                Click::Order,
+                Click::Menu,
                 Click::Notes,
+                Click::Order,
                 Click::Stories,
+                Click::Archived,
             ]
         );
-        // Menu, exit and collapse on the title row.
-        let ys: Vec<u16> = hits[8..11].iter().map(|h| h.area.y).collect();
-        assert_eq!(ys, vec![0, 0, 0]);
+        // Exit and collapse on the title row.
+        let ys: Vec<u16> = hits[8..10].iter().map(|h| h.area.y).collect();
+        assert_eq!(ys, vec![0, 0]);
         assert!(hits[8].area.x + hits[8].area.width < hits[9].area.x);
-        assert!(hits[9].area.x + hits[9].area.width < hits[10].area.x);
-        // The new button on the last row but one, the order switch at its
-        // right end.
-        let a = hits[11].area;
-        let o = hits[12].area;
-        assert_eq!((a.y, o.y), (20, 20));
-        assert_eq!(o.x + o.width, 30);
-        // Notes and top stories under it.
-        let n = hits[13].area;
-        let c = hits[14].area;
-        assert_eq!((n.y, n.x), (21, a.x));
-        assert_eq!(c.y, 21);
-        assert!(n.x + n.width < c.x);
+        // New, and menu at its right end, above the rule.
+        let (new, menu) = (hits[10].area, hits[11].area);
+        assert_eq!((new.y, menu.y), (18, 18));
+        assert_eq!(menu.x + menu.width, 30);
+        // Notes and the order switch under the rule, stories and archive
+        // under them, in two columns.
+        let [notes, order, stories, archive] = [12, 13, 14, 15].map(|i| hits[i].area);
+        assert_eq!((notes.y, order.y), (20, 20));
+        assert_eq!((stories.y, archive.y), (21, 21));
+        assert_eq!((notes.x, stories.x), (new.x, new.x));
+        assert_eq!(order.x, archive.x);
+        assert!(notes.x + notes.width < order.x);
         // The archive button sits at the right end of the branch row.
         let archive = hits[2].area;
         assert_eq!((archive.y, archive.x + archive.width), (5, 30));
@@ -954,8 +959,7 @@ mod tests {
 
     #[test]
     fn archived_button_shows_with_archived_panes() {
-        for (width, collapsed, label) in [(32, false, "↺ archived 2"), (RAIL_WIDTH, true, "↺")]
-        {
+        for (width, collapsed, label) in [(32, false, "↺ archive 2"), (RAIL_WIDTH, true, "↺")] {
             let mut term = Terminal::new(TestBackend::new(width, 22)).unwrap();
             let mut hits = Vec::new();
             term.draw(|f| {
@@ -979,9 +983,11 @@ mod tests {
                 .collect();
             assert_eq!(text, label);
         }
-        // None archived, no button.
-        let (_, hits) = render(&sample(), None, &[], 32);
-        assert!(!hits.iter().any(|h| h.click == Click::Archived));
+        // None archived: the button still shows, without a count.
+        let (text, hits) = render(&sample(), None, &[], 32);
+        assert!(hits.iter().any(|h| h.click == Click::Archived));
+        assert!(text.contains("↺ archive "), "{text}");
+        assert!(!text.contains("↺ archive 0"), "{text}");
     }
 
     #[test]
@@ -996,7 +1002,7 @@ mod tests {
         insta::assert_snapshot!(text);
         // Only the buttons are clickable (no order switch with no agents).
         assert!(hits.iter().all(|h| !matches!(h.click, Click::Focus(_))));
-        assert_eq!(hits.len(), 6);
+        assert_eq!(hits.len(), 7);
     }
 
     #[test]

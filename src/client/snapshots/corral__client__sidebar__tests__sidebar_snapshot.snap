@@ -1,8 +1,9 @@
 ---
 source: src/client/sidebar.rs
+assertion_line: 911
 expression: text
 ---
- corral      ≡ menu  ✕ exit  « │
+ corral              ✕ exit  « │
                                │
  NEEDS YOU ───────────────── 2 │
 ▍1 claude         ◆ blocked 4m │
@@ -20,7 +21,7 @@ expression: text
                                │
                                │
                                │
-                               │
+ + new                  ≡ menu │
  ───────────────────────────── │
- + new shell         ⇅ by need │
- ✎ notes  ✦ top stories        │
+ ✎ notes        ⇅ by need      │
+ ✦ stories      ↺ archive      │

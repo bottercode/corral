@@ -217,14 +217,14 @@ fn new_shell_button_opens_a_shell() {
     ]);
     let mut t = Tui::start(&s, 120, 30);
     t.wait_for("button", |x| {
-        x.contains("+ new shell") && x.contains("first-agent")
+        x.contains("+ new") && x.contains("first-agent")
     });
-    // Click the "+ new shell" button where it's drawn.
+    // Click the "+ new" button where it's drawn.
     let screen = t.screen();
     let (row, col) = screen
         .lines()
         .enumerate()
-        .find_map(|(r, l)| l.find("+ new shell").map(|c| (r, l[..c].chars().count())))
+        .find_map(|(r, l)| l.find("+ new").map(|c| (r, l[..c].chars().count())))
         .unwrap();
     t.type_(
         format!(
