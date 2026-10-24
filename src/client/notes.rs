@@ -7,6 +7,9 @@
 //! lists, `- [ ]` tasks, `>` quotes and `---` rules. Markers stay visible
 //! but faint, so what's on screen is exactly what's in the file. Edits are
 //! saved a moment after typing stops.
+//!
+//! `s` (or `^s` while editing, or the page's send button) pastes the note
+//! into the agent you were on, so it can act on it.
 
 use std::io::ErrorKind;
 use std::ops::Range;
@@ -60,6 +63,11 @@ impl Note {
         }
     }
 
+    #[cfg(test)]
+    pub fn new_for_test(text: &str) -> Self {
+        Note::new("test".into(), text, SystemTime::now())
+    }
+
     pub fn text(&self) -> String {
         let mut s = self.lines.join("\n");
         s.push('\n');
@@ -102,6 +110,8 @@ impl Note {
 pub enum Outcome {
     Stay,
     Close,
+    /// Paste this note into the agent you were on.
+    Send,
 }
 
 /// The notes, and where the reader is.
@@ -123,12 +133,16 @@ pub struct Notes {
     list_top: usize,
     /// `x` was pressed: the next key confirms deleting the selected note.
     pub confirm_delete: bool,
+    /// The agent a note would be sent to, for the send button; set before
+    /// each draw.
+    pub send_to: Option<String>,
     last_edit: Option<Instant>,
     pub error: Option<String>,
     // As of the last draw, for moving by rows and for the mouse.
     wrap: usize,
     page_rows: usize,
     new_button: Rect,
+    send_button: Rect,
     list_area: Rect,
     text_area: Rect,
     /// The note's rows on screen: line, and its chars on that row.
@@ -147,15 +161,24 @@ impl Notes {
             top: 0,
             list_top: 0,
             confirm_delete: false,
+            send_to: None,
             last_edit: None,
             error: None,
             wrap: 80,
             page_rows: 10,
             new_button: Rect::default(),
+            send_button: Rect::default(),
             list_area: Rect::default(),
             text_area: Rect::default(),
             drawn: Vec::new(),
         }
+    }
+
+    /// The selected note's text to send to an agent: its Markdown, without
+    /// the blank lines around it. `None` when there's nothing to send.
+    pub fn to_send(&self) -> Option<String> {
+        let note = self.current().filter(|n| !n.is_blank())?;
+        Some(note.text().trim_matches('\n').to_string())
     }
 
     pub fn current(&self) -> Option<&Note> {
@@ -296,12 +319,16 @@ impl Notes {
             return Outcome::Stay;
         }
         if self.editing {
+            if key == Key::Ctrl('s') {
+                return Outcome::Send;
+            }
             self.edit_key(key);
             return Outcome::Stay;
         }
         let some = !self.notes.is_empty();
         match key {
             Key::Esc | Key::Ctrl('c') | Key::Char('q') => return Outcome::Close,
+            Key::Char('s') | Key::Ctrl('s') if some => return Outcome::Send,
             Key::Down | Key::Char('j') => self.select_by(1),
             Key::Up | Key::Char('k') => self.select_by(-1),
             Key::Home | Key::Char('g') => self.select(0),
@@ -595,15 +622,18 @@ impl Notes {
 
     // The mouse.
 
-    pub fn click(&mut self, x: u16, y: u16) {
+    pub fn click(&mut self, x: u16, y: u16) -> Outcome {
         let p = (x, y).into();
         self.confirm_delete = false;
+        if self.send_button.contains(p) {
+            return Outcome::Send;
+        }
         if self.new_button.contains(p) {
             self.new_note();
         } else if self.list_area.contains(p) {
             let i = self.list_top + usize::from((y - self.list_area.y) / ENTRY_ROWS);
             let Some(id) = self.notes.get(i).map(|n| n.id.clone()) else {
-                return;
+                return Outcome::Stay;
             };
             if self.editing {
                 self.leave_editor();
@@ -628,6 +658,7 @@ impl Notes {
             self.want_x = None;
             self.editing = true;
         }
+        Outcome::Stay
     }
 
     pub fn wheel(&mut self, x: u16, y: u16, step: isize) {
@@ -650,6 +681,7 @@ impl Notes {
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) -> Option<(u16, u16)> {
         let t = theme::get();
         self.new_button = Rect::default();
+        self.send_button = Rect::default();
         self.list_area = Rect::default();
         self.text_area = Rect::default();
         self.drawn.clear();
@@ -663,11 +695,22 @@ impl Notes {
         // Title, the new button, and what's going on.
         Line::styled("NOTES", t.muted().add_modifier(Modifier::BOLD)).render(row(area.y), buf);
         let label = "+ new note";
-        let w = label.width() as u16;
+        let mut w = label.width() as u16;
         if 8 + w < width {
             self.new_button = Rect::new(x + 8, area.y, w, 1);
             Line::styled(label, t.accent().add_modifier(Modifier::BOLD))
                 .render(self.new_button, buf);
+        }
+        // Beside it, sending the selected note to the agent you were on.
+        if let Some(to) = self.send_to.as_deref().filter(|_| self.to_send().is_some()) {
+            let send = format!("↳ send to {}", truncate(to, 16));
+            let sw = send.width() as u16;
+            if 8 + w + 3 + sw + 12 < width {
+                self.send_button = Rect::new(x + 8 + w + 3, area.y, sw, 1);
+                Line::styled(send, t.fg(t.working).add_modifier(Modifier::BOLD))
+                    .render(self.send_button, buf);
+                w += 3 + sw;
+            }
         }
         let (status, style) = if self.confirm_delete {
             let title = self.current().map(Note::title).unwrap_or_default();
@@ -1445,5 +1488,44 @@ mod tests {
         n.autosave(false);
         assert!(n.notes.is_empty());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_note_can_be_sent_to_an_agent() {
+        let mut n = notes_with(&["# Fix login\n\n- [ ] check the token refresh\n"]);
+        // From the list: `s`.
+        assert!(matches!(n.key(Key::Char('s')), Outcome::Send));
+        assert_eq!(
+            n.to_send().as_deref(),
+            Some("# Fix login\n\n- [ ] check the token refresh")
+        );
+        // While editing, `s` is typing and `^s` sends.
+        n.editing = true;
+        assert!(matches!(n.key(Key::Char('s')), Outcome::Stay));
+        assert!(matches!(n.key(Key::Ctrl('s')), Outcome::Send));
+        // The page's button names the agent, and a click on it sends.
+        n.editing = false;
+        n.send_to = Some("api".into());
+        let mut term = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        term.draw(|f| {
+            n.render(f.area(), f.buffer_mut());
+        })
+        .unwrap();
+        let top: String = (0..100)
+            .map(|x| term.backend().buffer()[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(top.contains("↳ send to api"), "{top}");
+        let b = n.send_button;
+        assert!(matches!(n.click(b.x, b.y), Outcome::Send));
+        // A blank note has nothing to send, and no button.
+        let mut n = Notes::new(None);
+        n.open();
+        n.send_to = Some("api".into());
+        assert_eq!(n.to_send(), None);
+        term.draw(|f| {
+            n.render(f.area(), f.buffer_mut());
+        })
+        .unwrap();
+        assert_eq!(n.send_button, Rect::default());
     }
 }

@@ -490,13 +490,11 @@ impl Sidebar<'_> {
         // The foot, when there's room: a rule, then notes, stories, archive.
         let bottom = inner.y + inner.height;
         let end = if inner.height >= 10 {
-            rule(bottom - 2, buf);
-            hits.extend(render_footer(
-                Rect::new(inner.x, bottom - 1, inner.width, 1),
-                self.archived,
-                buf,
-            ));
-            bottom - 2
+            let rows = footer_rows(inner.width, self.archived);
+            let first = bottom - rows.len() as u16;
+            rule(first - 1, buf);
+            hits.extend(render_footer(&rows, inner.x, first, buf));
+            first - 1
         } else {
             bottom
         };
@@ -989,44 +987,61 @@ fn render_new_and_menu(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     ]
 }
 
-/// The foot's row: `✎ notes`, `✦ stories` and `↺ archive` (with how many,
-/// when any are). Labels shorten until the row fits.
-fn render_footer(row: Rect, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
+/// One of the foot's buttons: its icon and label, colour and click.
+type FootButton = (String, Style, Click);
+
+/// The foot's buttons, `📝 notes`, `📰 stories` and `📦 archive` (with how
+/// many, when any are), in as many rows as they need: each keeps its icon
+/// and its word, and wraps to the next row when the sidebar is narrow.
+fn footer_rows(width: u16, archived: usize) -> Vec<Vec<FootButton>> {
     let t = theme::get();
     // One column in from each side.
-    let room = row.width.saturating_sub(2) as usize;
-    let count = |long: bool| match (archived, long) {
-        (0, true) => "↺ archive".to_string(),
-        (0, false) => "↺".to_string(),
-        (n, true) => format!("↺ archive {n}"),
-        (n, false) => format!("↺ {n}"),
+    let room = width.saturating_sub(2) as usize;
+    let stories = if "📰 stories".width() <= room {
+        "📰 stories"
+    } else {
+        "📰 news"
     };
-    // Notes and stories give up their words before archive does.
-    let levels = [
-        ["✎ notes".to_string(), "✦ stories".into(), count(true)],
-        ["✎ notes".to_string(), "✦ news".into(), count(true)],
-        ["✎".to_string(), "✦ news".into(), count(true)],
-        ["✎".to_string(), "✦".into(), count(true)],
-        ["✎".to_string(), "✦".into(), count(false)],
+    let archive = match archived {
+        0 => "📦 archive".to_string(),
+        n => format!("📦 archive {n}"),
+    };
+    let buttons = [
+        ("📝 notes".to_string(), t.fg(t.working), Click::Notes),
+        (stories.to_string(), t.fg(t.done), Click::Stories),
+        (archive, t.muted(), Click::Archived),
     ];
-    let fits = |l: &[String; 3]| l.iter().map(|s| s.width()).sum::<usize>() + 4 <= room;
-    let labels = levels.iter().find(|l| fits(l)).unwrap_or(&levels[4]);
-    let styles = [
-        (t.fg(t.working), Click::Notes),
-        (t.fg(t.done), Click::Stories),
-        (t.muted(), Click::Archived),
-    ];
-    let mut hits = Vec::new();
-    let mut x = row.x + 1;
-    for (label, (style, click)) in labels.iter().zip(styles) {
-        let w = label.width() as u16;
-        if x + w > row.x + row.width {
-            break;
+    let mut rows: Vec<Vec<FootButton>> = vec![Vec::new()];
+    let mut used = 0;
+    for b in buttons {
+        let w = b.0.width();
+        let row = rows.last_mut().expect("a row");
+        if !row.is_empty() && used + 2 + w > room {
+            rows.push(vec![b]);
+            used = w;
+        } else {
+            used += if row.is_empty() { w } else { 2 + w };
+            row.push(b);
         }
-        let r = Rect::new(x, row.y, w, 1);
-        Line::styled(label.clone(), style).render(r, buf);
-        hits.push(Hit { area: r, click });
-        x += w + 2;
+    }
+    rows
+}
+
+/// Draw the foot's rows from `y`; returns their clicks.
+fn render_footer(rows: &[Vec<FootButton>], x0: u16, y: u16, buf: &mut Buffer) -> Vec<Hit> {
+    let mut hits = Vec::new();
+    for (dy, row) in rows.iter().enumerate() {
+        let mut x = x0 + 1;
+        for (label, style, click) in row {
+            let w = label.width() as u16;
+            let r = Rect::new(x, y + dy as u16, w, 1);
+            Line::styled(label.clone(), *style).render(r, buf);
+            hits.push(Hit {
+                area: r,
+                click: click.clone(),
+            });
+            x += w + 2;
+        }
     }
     hits
 }
@@ -1229,20 +1244,23 @@ mod tests {
         // The spaces from row 3; corral, where the focus is, first.
         assert_eq!(hits[5].area.y, 3);
         // New with menu at its right end at the midway, between the title
-        // row and the foot's rule (rows 2 to 20), then the agents' header
+        // row and the foot's rule (rows 2 to 19), then the agents' header
         // with its switch at the right end.
         let (new, menu, order) = (at(Click::New), at(Click::Menu), at(Click::Order));
-        assert_eq!((new.y, menu.y, order.y), (11, 11, 13));
+        assert_eq!((new.y, menu.y, order.y), (10, 10, 12));
         assert_eq!(menu.x + menu.width, 30);
         assert_eq!(order.x + order.width, 30);
-        // Notes, stories and archive on the last row.
+        // Notes and stories on the foot's first row, archive wrapped onto
+        // the last; each keeps its icon and its word.
         let ys: Vec<u16> = [Click::Notes, Click::Stories, Click::Archived]
             .map(|c| at(c).y)
             .to_vec();
-        assert_eq!(ys, vec![21, 21, 21]);
+        assert_eq!(ys, vec![20, 20, 21]);
+        assert_eq!(at(Click::Notes).width, "📝 notes".width() as u16);
+        assert_eq!(at(Click::Stories).width, "📰 stories".width() as u16);
         // The archive button sits at the right end of the branch row.
         let archive = at(Click::Archive("p1".into()));
-        assert_eq!((archive.y, archive.x + archive.width), (17, 30));
+        assert_eq!((archive.y, archive.x + archive.width), (16, 30));
     }
 
     #[test]
@@ -1325,7 +1343,7 @@ mod tests {
         assert_eq!(wheel(&hits, Half::Spaces).0, 0);
         // The midway stays put either way.
         let new_y = |hits: &[Hit]| hits.iter().find(|h| h.click == Click::New).unwrap().area.y;
-        assert_eq!(new_y(&hits), 11);
+        assert_eq!(new_y(&hits), 10);
         // Everything fits in a half: nothing to scroll.
         let (_, hits) = render_scrolled(&sample(), "p1", [None, None]);
         assert_eq!(wheel(&hits, Half::Spaces).1, 0);
@@ -1333,7 +1351,8 @@ mod tests {
 
     #[test]
     fn archived_button_shows_with_archived_panes() {
-        for (width, collapsed, label) in [(32, false, "↺ archive 2"), (RAIL_WIDTH, true, "↺")] {
+        for (width, collapsed, label) in [(32, false, "📦 archive 2"), (RAIL_WIDTH, true, "↺")]
+        {
             let mut term = Terminal::new(TestBackend::new(width, 22)).unwrap();
             let mut hits = Vec::new();
             term.draw(|f| {
@@ -1353,16 +1372,19 @@ mod tests {
             .unwrap();
             let hit = hits.iter().find(|h| h.click == Click::Archived).unwrap();
             let buf = term.backend().buffer();
+            // A wide icon's second cell draws nothing of its own.
             let text: String = (hit.area.x..hit.area.x + hit.area.width)
+                .filter(|&x| x == hit.area.x || buf[(x - 1, hit.area.y)].symbol().width() < 2)
                 .map(|x| buf[(x, hit.area.y)].symbol())
                 .collect();
             assert_eq!(text, label);
+            assert_eq!(usize::from(hit.area.width), label.width());
         }
         // None archived: the button still shows, without a count.
         let (text, hits) = render(&sample(), None, &[], 32);
         assert!(hits.iter().any(|h| h.click == Click::Archived));
-        assert!(text.contains("↺ archive "), "{text}");
-        assert!(!text.contains("↺ archive 0"), "{text}");
+        assert!(text.contains("archive"), "{text}");
+        assert!(!text.contains("archive 0"), "{text}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 1253
+assertion_line: 1398
 expression: text
 ---
  ✕ exit                      « │
@@ -22,6 +22,6 @@ expression: text
                                │
                                │
                                │
-                               │
  ───────────────────────────── │
- ✎ notes  ✦ stories  ↺ archive │
+ 📝  notes  📰  stories          │
+ 📦  archive                    │

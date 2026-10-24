@@ -889,9 +889,44 @@ impl App {
     }
 
     fn notes_key(&mut self, key: Key) {
-        if let notes::Outcome::Stay = self.notes.key(key) {
-            self.mode = Mode::Notes;
+        match self.notes.key(key) {
+            notes::Outcome::Stay => self.mode = Mode::Notes,
+            notes::Outcome::Send => {
+                // The page stays unless the note goes.
+                self.mode = Mode::Notes;
+                self.send_note();
+            }
+            notes::Outcome::Close => {}
         }
+    }
+
+    /// Paste the selected note into the agent you were on, and go there.
+    /// Enter is left to you, so you can add to it first.
+    fn send_note(&mut self) {
+        let Some(text) = self.notes.to_send() else {
+            return;
+        };
+        let Some(p) = self.focused().cloned() else {
+            self.set_status("no agent to send it to; start one first", true);
+            return;
+        };
+        let takes_pastes = self.screen().is_some_and(|s| s.screen().bracketed_paste());
+        if !takes_pastes {
+            self.set_status(format!("{} isn't taking pastes right now", p.name), true);
+            return;
+        }
+        let title = self
+            .notes
+            .current()
+            .map(notes::Note::title)
+            .unwrap_or_default();
+        self.notes.save_all();
+        self.mode = Mode::Normal;
+        self.forward(&input::paste_bytes(&text), true);
+        self.set_status(
+            format!("pasted “{title}” into {}; Enter sends it", p.name),
+            false,
+        );
     }
 
     fn notes_mouse(&mut self, m: Mouse) {
@@ -908,7 +943,11 @@ impl App {
                 }
                 self.on_mouse(m);
             }
-            MouseKind::LeftDown => self.notes.click(m.x, m.y),
+            MouseKind::LeftDown => {
+                if let notes::Outcome::Send = self.notes.click(m.x, m.y) {
+                    self.send_note();
+                }
+            }
             MouseKind::WheelDown if !in_sidebar => self.notes.wheel(m.x, m.y, 1),
             MouseKind::WheelUp if !in_sidebar => self.notes.wheel(m.x, m.y, -1),
             _ => {}
@@ -2830,5 +2869,59 @@ mod tests {
         // Moving the focus hands the sidebar back to following it.
         a.on_stdin(b"\x02j");
         assert_eq!(a.sidebar_scroll, [None, None]);
+    }
+
+    #[test]
+    fn a_note_is_pasted_into_the_agent_you_were_on() {
+        let mut a = app();
+        a.notes.notes.push(notes::Note::new_for_test(
+            "# Fix login\nthe token expires early",
+        ));
+        a.on_stdin(b"\x02w");
+        assert!(matches!(a.mode, Mode::Notes));
+        // p1 isn't taking pastes yet: nothing goes, and you're told.
+        a.on_stdin(b"s");
+        assert!(
+            !a.outbox
+                .iter()
+                .any(|m| matches!(m, ClientMsg::Input { .. }))
+        );
+        assert!(matches!(a.mode, Mode::Notes));
+        // Once it does (as agents do), `s` pastes the note there, without
+        // Enter, and goes back to the agent.
+        a.on_server(ServerMsg::Output {
+            pane: "p1".into(),
+            seq: 1,
+            bytes: b"\x1b[?2004h".to_vec(),
+        });
+        a.on_stdin(b"s");
+        assert!(matches!(a.mode, Mode::Normal));
+        assert!(a.outbox.iter().any(|m| matches!(
+            m,
+            ClientMsg::Input { pane, bytes }
+                if pane == "p1"
+                    && bytes == b"\x1b[200~# Fix login\nthe token expires early\x1b[201~"
+        )));
+    }
+
+    #[test]
+    fn the_menu_opens_at_its_button() {
+        let mut a = app();
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(151, 40)).unwrap();
+        term.draw(|f| ui::draw(f, &mut a)).unwrap();
+        let button = a
+            .hits
+            .iter()
+            .find(|h| h.click == sidebar::Click::Menu)
+            .unwrap()
+            .area;
+        // Click it: the menu's first row is just under the button, and its
+        // text starts where the button's does.
+        a.on_stdin(format!("\x1b[<0;{};{}M", button.x + 1, button.y + 1).as_bytes());
+        assert!(matches!(a.mode, Mode::Menu { .. }));
+        term.draw(|f| ui::draw(f, &mut a)).unwrap();
+        let first = a.menu_hits[0].0;
+        assert_eq!(first.y, button.y + 2, "border, then the first row");
+        assert_eq!(first.x, button.x);
     }
 }

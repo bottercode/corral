@@ -11,7 +11,7 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 use unicode_width::UnicodeWidthStr;
 
 use super::input::Key;
-use super::sidebar::{RAIL_WIDTH, Sidebar, badge, task_title, truncate};
+use super::sidebar::{Click, RAIL_WIDTH, Sidebar, badge, task_title, truncate};
 use super::{App, MENU, MenuItem, Mode, images, theme};
 use crate::protocol::{AgentState, PaneInfo};
 
@@ -306,6 +306,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         app.stories.render(areas.pane, f.buffer_mut(), now);
     } else if matches!(app.mode, Mode::Notes) {
         f.render_widget(ratatui::widgets::Clear, areas.pane);
+        app.notes.send_to = app.focused().map(|p| p.name.clone());
         if let Some(at) = app.notes.render(areas.pane, f.buffer_mut()) {
             f.set_cursor_position(at);
         }
@@ -632,6 +633,7 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
                 ("`c`", "code"),
                 ("-", "list"),
                 ("^t", "task"),
+                ("^s", "send to agent"),
                 ("Esc", "done"),
             ])
         } else {
@@ -639,6 +641,7 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
                 ("↑↓", "pick"),
                 ("Enter", "edit"),
                 ("n", "new"),
+                ("s", "send to agent"),
                 ("x", "delete"),
                 ("Esc", "back to agents"),
             ])
@@ -820,17 +823,33 @@ fn draw_menu(f: &mut Frame, app: &mut App, selected: usize) {
     let right_w = rows.iter().map(|(_, v)| v.width()).max().unwrap_or(0);
     let width = (left_w + right_w + 6).max(hint.width() + 3) as u16;
     let area = f.area();
-    // Right-aligned with the menu button: just above it at the foot of the
-    // sidebar, or under the title row when the sidebar is a rail.
-    let x = (app.sidebar_area.x + app.sidebar_area.width)
-        .saturating_sub(width + 1)
-        .max(area.x);
+    // At the menu button: right under it, starting where the button does and
+    // reaching out over the panes, or right above it when there's no room
+    // below. With no button on screen (the sidebar hidden), at the top right.
     let height = (rows.len() as u16 + 4).min(area.height.saturating_sub(1));
-    let y = if app.sidebar_collapsed {
-        area.y + 1
-    } else {
-        let button = (app.sidebar_area.y + app.sidebar_area.height).saturating_sub(4);
-        button.saturating_sub(height).max(area.y)
+    let button = app
+        .hits
+        .iter()
+        .find(|h| h.click == Click::Menu)
+        .map(|h| h.area);
+    let (x, y) = match button {
+        Some(b) => {
+            let x =
+                b.x.saturating_sub(1)
+                    .min((area.x + area.width).saturating_sub(width))
+                    .max(area.x);
+            let below = b.y + 1;
+            let y = if below + height <= area.y + area.height {
+                below
+            } else {
+                b.y.saturating_sub(height).max(area.y)
+            };
+            (x, y)
+        }
+        None => (
+            (area.x + area.width).saturating_sub(width + 1).max(area.x),
+            area.y + 1,
+        ),
     };
     let r = Rect::new(x, y, width.min(area.width), height);
     f.render_widget(Clear, r);
