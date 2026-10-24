@@ -1784,6 +1784,7 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
         cols: size.0,
         rows: size.1,
         workspace: workspace.clone(),
+        pane: None,
     };
     sink.send(protocol::encode(&attach)?).await?;
 

@@ -203,6 +203,7 @@ impl Headless {
             cols,
             rows,
             workspace: None,
+            pane: None,
         })
         .await
         .unwrap();
