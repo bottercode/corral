@@ -8,6 +8,7 @@
 //! server which panes it shows, at what size, with `View`.
 
 pub mod conn;
+pub mod images;
 pub mod input;
 pub mod notes;
 pub mod select;
@@ -183,6 +184,16 @@ pub struct App {
     update: Option<(String, Instant)>,
     /// The notes page's notes and position.
     pub notes: Notes,
+    /// Show images pasted into agents.
+    pub image_previews: bool,
+    /// How images are drawn in this terminal, once asked (none in tests).
+    pub picker: Option<ratatui_image::picker::Picker>,
+    /// Images to read; the run loop reads them off the UI thread.
+    pub image_loads: Vec<(PaneId, images::Source)>,
+    /// Images pasted into each pane's prompt and not sent yet.
+    pub previews: HashMap<PaneId, Vec<images::Preview>>,
+    /// Where each preview's close button was drawn, for clicks.
+    pub preview_hits: Vec<(Rect, PaneId, usize)>,
     /// The prefix was pressed on a page, which it closed; the key that
     /// opens that page.
     closed_page: Option<char>,
@@ -246,6 +257,11 @@ impl App {
             update_check: config.update_check,
             update: None,
             notes: Notes::new(None),
+            image_previews: config.image_previews,
+            picker: None,
+            image_loads: Vec::new(),
+            previews: HashMap::new(),
+            preview_hits: Vec::new(),
             closed_page: None,
             hooks: Vec::new(),
             menu_hits: Vec::new(),
@@ -279,6 +295,51 @@ impl App {
     }
 
     /// The run loop's update check found a newer release.
+    /// An image pasted into `pane` was read.
+    pub fn on_image(&mut self, pane: PaneId, preview: images::Preview) {
+        if self.panes.iter().any(|p| p.id == pane) {
+            self.previews.entry(pane).or_default().push(preview);
+            self.dirty = true;
+        }
+    }
+
+    /// Watch what's typed into the focused pane: Ctrl-V in an agent may
+    /// paste an image from the clipboard, and Enter sends the prompt along
+    /// with the images in it.
+    fn watch_typing(&mut self, bytes: &[u8]) {
+        let Some(pane) = self.focus.clone() else {
+            return;
+        };
+        if bytes.contains(&b'\r') {
+            self.previews.remove(&pane);
+        }
+        if self.image_previews && images::is_paste_key(bytes) && self.focus_is_agent() {
+            self.image_loads.push((pane, images::Source::Clipboard));
+        }
+    }
+
+    /// A paste that's only image files (a drop on the terminal) previews them.
+    fn watch_paste(&mut self, paste: &[u8]) {
+        let Some(pane) = self.focus.clone() else {
+            return;
+        };
+        if !self.image_previews || !self.focus_is_agent() {
+            return;
+        }
+        let text = String::from_utf8_lossy(paste);
+        let text = text
+            .trim_start_matches("\x1b[200~")
+            .trim_end_matches("\x1b[201~");
+        for path in images::image_paths(text) {
+            self.image_loads
+                .push((pane.clone(), images::Source::File(path)));
+        }
+    }
+
+    fn focus_is_agent(&self) -> bool {
+        self.focused().is_some_and(|p| p.agent.is_some())
+    }
+
     pub fn on_update(&mut self, version: String) {
         self.update = Some((version, Instant::now()));
         self.dirty = true;
@@ -1146,6 +1207,21 @@ impl App {
 
     fn on_mouse(&mut self, m: Mouse) {
         let in_sidebar = m.x < self.sidebar_area.x + self.sidebar_area.width;
+        // A preview's ✕ puts it away (the image stays in the prompt).
+        if m.kind == MouseKind::LeftDown
+            && let Some((_, pane, i)) = self
+                .preview_hits
+                .iter()
+                .find(|(r, ..)| r.contains((m.x, m.y).into()))
+                .cloned()
+        {
+            if let Some(list) = self.previews.get_mut(&pane)
+                && i < list.len()
+            {
+                list.remove(i);
+            }
+            return;
+        }
         if !in_sidebar && self.select_mouse(m) {
             return;
         }
@@ -1303,6 +1379,7 @@ impl App {
                     } else {
                         self.awaiting_command = false;
                         self.mode = Mode::Normal;
+                        self.watch_paste(&p);
                         self.forward(&p, true);
                     }
                 }
@@ -1357,6 +1434,7 @@ impl App {
                             self.scroll_key(k);
                         }
                     } else {
+                        self.watch_typing(&b);
                         self.forward(&b, false);
                     }
                 }
@@ -1395,6 +1473,7 @@ impl App {
                 self.state_at = Instant::now();
                 let exists = |id: &PaneId| self.panes.iter().any(|p| &p.id == id);
                 self.tiles.retain(|id| exists(id));
+                self.previews.retain(|id, _| exists(id));
                 if view_generation == self.view_generation {
                     // The server has seen our latest layout, so its focus is
                     // current (it may have moved it: a new or closed pane).
@@ -1601,8 +1680,16 @@ pub async fn run(workspace: Option<String>) -> Result<()> {
 
 async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Result<Exit> {
     let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-    term.clear()?;
+    // Not `term.clear()`, which asks the terminal where its cursor is and
+    // fails when it doesn't say; a new `Terminal` has nothing to forget.
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+    )?;
 
+    if app.image_previews {
+        app.picker = Some(images::picker());
+    }
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     std::thread::Builder::new()
         .name("stdin".into())
@@ -1640,6 +1727,8 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
     let (stories_tx, mut stories_rx) = mpsc::unbounded_channel();
     // So does the daily look for a newer release; a failed one stays quiet.
     let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+    // And pasted images, read and encoded off the UI thread too.
+    let (image_tx, mut image_rx) = mpsc::unbounded_channel();
     if app.update_check {
         tokio::task::spawn_blocking(move || match update::check() {
             Ok(Some(version)) => {
@@ -1654,6 +1743,7 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
         tokio::select! {
             Some((source, result)) = stories_rx.recv() => app.on_stories(source, result),
             Some(version) = update_rx.recv() => app.on_update(version),
+            Some((pane, preview)) = image_rx.recv() => app.on_image(pane, preview),
             bytes = stdin_rx.recv() => match bytes {
                 Some(b) => app.on_stdin(&b),
                 None => return Ok(Exit::Detached),
@@ -1701,6 +1791,20 @@ async fn event_loop(app: &mut App, conn: Conn, workspace: Option<String>) -> Res
                 let result = stories::fetch(source).map_err(|e| format!("{e:#}"));
                 let _ = tx.send((source, result));
             });
+        }
+        if let Some(picker) = &app.picker {
+            for (pane, source) in app.image_loads.drain(..) {
+                let (tx, picker) = (image_tx.clone(), picker.clone());
+                tokio::task::spawn_blocking(move || match images::load(&source, &picker) {
+                    Ok(Some(preview)) => {
+                        let _ = tx.send((pane, preview));
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!("image preview: {e:#}"),
+                });
+            }
+        } else {
+            app.image_loads.clear();
         }
         if !app.term_writes.is_empty() {
             let mut out = std::io::stdout();
@@ -2524,5 +2628,126 @@ mod tests {
         a.update.as_mut().unwrap().1 -= TOAST_FOR;
         a.tick();
         assert_eq!(a.update(), None);
+    }
+
+    /// p1 as a Claude Code pane.
+    fn agent_app() -> App {
+        let mut a = app();
+        let mut p1 = pane("p1", AgentState::Idle);
+        p1.agent = Some("claude".into());
+        a.on_server(ServerMsg::State {
+            panes: vec![p1, pane("p2", AgentState::Blocked)],
+            focus: Some("p1".into()),
+            view_generation: a.view_generation,
+            restorable: vec![],
+            archived: vec![],
+        });
+        a.outbox.clear();
+        a
+    }
+
+    fn preview(w: u32, h: u32) -> images::Preview {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("x.png");
+        image::DynamicImage::new_rgb8(w, h).save(&png).unwrap();
+        images::load(
+            &images::Source::File(png),
+            &ratatui_image::picker::Picker::halfblocks(),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn ctrl_v_in_an_agent_looks_for_a_pasted_image() {
+        let mut a = agent_app();
+        a.on_stdin(b"\x16");
+        assert_eq!(
+            a.image_loads,
+            vec![("p1".to_string(), images::Source::Clipboard)]
+        );
+        // Ctrl-V still reaches the agent, which attaches the image itself.
+        assert!(matches!(
+            &a.outbox[..],
+            [ClientMsg::Input { bytes, .. }] if bytes == b"\x16"
+        ));
+        // A plain shell's Ctrl-V is its own business.
+        let mut a = app();
+        a.on_stdin(b"\x16");
+        assert!(a.image_loads.is_empty());
+        // And previews can be turned off.
+        let mut a = agent_app();
+        a.image_previews = false;
+        a.on_stdin(b"\x16");
+        assert!(a.image_loads.is_empty());
+    }
+
+    #[test]
+    fn a_dropped_image_file_is_previewed() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("my shot.png");
+        image::DynamicImage::new_rgb8(4, 4).save(&png).unwrap();
+        let mut a = agent_app();
+        let escaped = png.to_str().unwrap().replace(' ', "\\ ");
+        a.on_stdin(format!("\x1b[200~{escaped}\x1b[201~").as_bytes());
+        assert_eq!(
+            a.image_loads,
+            vec![("p1".to_string(), images::Source::File(png))]
+        );
+        // Text is only text.
+        a.image_loads.clear();
+        a.on_stdin(b"\x1b[200~hello there\x1b[201~");
+        assert!(a.image_loads.is_empty());
+    }
+
+    #[test]
+    fn previews_show_until_the_prompt_is_sent() {
+        let mut a = agent_app();
+        a.on_image("p1".into(), preview(1280, 720));
+        a.on_image("p1".into(), preview(300, 600));
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(151, 40)).unwrap();
+        term.draw(|f| ui::draw(f, &mut a)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("image 1"), "{screen}");
+        assert!(screen.contains("1280×720"));
+        assert!(screen.contains("image 2"));
+        // Both cards sit at the top right of the pane, inside it.
+        assert_eq!(a.preview_hits.len(), 2);
+        let (first, second) = (a.preview_hits[0].0, a.preview_hits[1].0);
+        assert!(first.x < second.x);
+        assert!(second.x + second.width < 151);
+        assert!(first.x >= a.pane_area.x);
+        // Typing doesn't clear them; Enter sends them with the prompt.
+        a.on_stdin(b"describe these");
+        assert_eq!(a.previews["p1"].len(), 2);
+        a.on_stdin(b"\r");
+        assert!(!a.previews.contains_key("p1"));
+    }
+
+    #[test]
+    fn a_preview_closes_from_its_button() {
+        let mut a = agent_app();
+        a.on_image("p1".into(), preview(64, 64));
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(151, 40)).unwrap();
+        term.draw(|f| ui::draw(f, &mut a)).unwrap();
+        let (r, ..) = a.preview_hits[0].clone();
+        a.outbox.clear();
+        a.on_stdin(format!("\x1b[<0;{};{}M", r.x + 2, r.y + 1).as_bytes());
+        assert!(a.previews["p1"].is_empty());
+        // The click was corral's, not the agent's.
+        assert!(
+            !a.outbox
+                .iter()
+                .any(|m| matches!(m, ClientMsg::Input { .. }))
+        );
+        // Images for panes that are gone are dropped.
+        a.on_image("p9".into(), preview(8, 8));
+        assert!(!a.previews.contains_key("p9"));
     }
 }
