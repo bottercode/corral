@@ -1,27 +1,27 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 1070
+assertion_line: 1252
 expression: text
 ---
               ✕  « │
                    │
- NEEDS YOU ───── 2 │
- 1 claude     ◆ 4m │
-   ⎇ fix/token-re… │
- 3 a-very-lo… ✓ 4m │
-   /tmp            │
-                   │
- WORKING ─────── 1 │
+ SPACES ──────── 2 │
+  corral       ◆ 1 │
+  ⎇ fix/token-ref… │
+▍ website        ⠋ │
+▍ /tmp             │
+ + new      ≡ menu │
+ ───────────────── │
+ AGENTS ──────── ⇅ │
+ WORKING  1        │
 ▍2 codex      ⠋ 4m │
 ▍  /tmp  ↓ archive │
                    │
- QUIET ───────── 2 │
+ QUIET  2          │
  5 docs       idle │
    /tmp            │
  4 zsh    exited 1 │
    /tmp            │
                    │
- + new      ≡ menu │
  ───────────────── │
- ✎        ⇅        │
- ✦        ↺        │
+ ✎  ✦  ↺           │

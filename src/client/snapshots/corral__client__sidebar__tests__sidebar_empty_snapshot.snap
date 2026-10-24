@@ -1,6 +1,6 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 1027
+assertion_line: 1209
 expression: text
 ---
                      ✕ exit  « │
@@ -8,20 +8,20 @@ expression: text
  no agents yet                 │
  start one below               │
                                │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
  + new                  ≡ menu │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
  ───────────────────────────── │
- ✎ notes                       │
- ✦ stories      ↺ archive      │
+ ✎ notes  ✦ stories  ↺ archive │

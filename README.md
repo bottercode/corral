@@ -110,15 +110,20 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b ^b` | send a literal `Ctrl-b` to the agent |
 
 Click an agent on screen to type into it, or a sidebar row to bring that agent
-into the focused spot. At the bottom of the sidebar, **+ new** opens a shell
-and **≡ menu** (or `^b m`) beside it changes the theme, the sidebar's order
-and notifications, and installs agent hooks; changes are saved to your
-config. Under the line below them:
+into the focused spot. The sidebar has two parts:
 
-- **✎ notes** opens your notes, and **✦ stories** the news.
-- **⇅ by need / by project** switches between listing agents by what they
-  need from you and grouping them by project.
-- **↺ archive** lists the agents you've archived.
+- **Spaces**, one per project, each with its branch (or folder) and a mark
+  when an agent in it needs you (`◆ 2` blocked, `✓` done, a spinner while
+  one works). Click one to go to its agent that most needs you. Under them,
+  **+ new** opens a shell and **≡ menu** (or `^b m`) changes the theme, the
+  agents' order and notifications, and installs agent hooks; changes are
+  saved to your config.
+- **Agents**: those in the space you're in. **⇅ grouped** at the right end
+  of their header switches between grouping them by what they need from you
+  and listing them in the order they started.
+
+Along the foot, **✎ notes** opens your notes, **✦ stories** the news, and
+**↺ archive** the agents you've archived.
 
 At the top:
 
@@ -338,7 +343,7 @@ notifications = true
 sidebar_width = 30
 sidebar_collapsed = false              # just the agent numbers (« / ^b c)
 theme = "ranch"                        # ranch, ink or terminal
-sidebar_order = "need"                 # need or project
+sidebar_order = "need"                 # need (grouped) or flat (in order)
 update_check = true                    # once a day, a toast when a newer corral is out
 ```
 
