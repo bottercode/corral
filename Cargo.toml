@@ -31,21 +31,20 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 libc = "0.2"
 nix = { version = "0.30", features = ["process", "signal", "user", "term", "fs", "socket"] }
 portable-pty = "0.9"
-ratatui = "0.30"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
 ratatui-image = { version = "11.1.0", default-features = false }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = { version = "1", features = ["preserve_order"] }
-sysinfo = "0.38"
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 thiserror = "2"
-tokio = { version = "1.54", features = ["full"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 toml = "0.9"
 toml_edit = "0.23"
 tracing = "0.1"
-tracing-appender = "0.2"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi", "std"] }
 tui-term = "0.3.4"
 unicode-width = "0.2"
 ureq = "3"
@@ -55,10 +54,15 @@ vt100 = "0.16"
 insta = "1.49"
 tempfile = "3"
 
+# `cargo install` builds with this; strip keeps the binary small.
+[profile.release]
+strip = true
+
 # Used by cargo-dist for release builds.
 [profile.dist]
 inherits = "release"
-lto = "thin"
+lto = "fat"
+codegen-units = 1
 
 # vt100 with Codex-style history kept in scrollback (see vendor/README.md).
 [patch.crates-io]

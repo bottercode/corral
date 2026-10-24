@@ -188,27 +188,29 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
 fn run_server(daemon: bool) -> Result<ExitCode> {
     let config = Config::load()?;
     let socket = paths::socket_path();
-    let _guard = if daemon {
+    if daemon {
         let dir = paths::log_dir();
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        let appender = tracing_appender::rolling::never(&dir, "server.log");
-        let (writer, guard) = tracing_appender::non_blocking(appender);
+        let log = dir.join("server.log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .with_context(|| format!("opening {}", log.display()))?;
         tracing_subscriber::fmt()
             .with_env_filter(env_filter())
-            .with_writer(writer)
+            .with_writer(std::sync::Mutex::new(file))
             .with_ansi(false)
             .init();
         if let Some(home) = dirs::home_dir() {
             let _ = std::env::set_current_dir(home);
         }
-        Some(guard)
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(env_filter())
             .with_writer(std::io::stderr)
             .init();
-        None
-    };
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
