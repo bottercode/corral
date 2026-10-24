@@ -89,7 +89,7 @@
   .chrome { display: flex; align-items: center; height: 42px; padding: 0 20px; gap: 8px; border-bottom: 1px solid var(--t-line); }
   .chrome i { width: 10px; height: 10px; border-radius: 50%; background: #2a2c2e; }
   .chrome .t { flex: 1; text-align: center; color: var(--t-muted); font: 12px var(--sans); margin-right: 46px; }
-  .scr { display: grid; grid-template-columns: 268px 1fr 1fr; height: 520px; }
+  .scr { display: grid; grid-template-columns: 268px 1fr 1fr; height: 580px; }
   .scr > * { min-width: 0; }
   .sb { border-right: 1px solid var(--t-line); display: flex; flex-direction: column; padding-top: 6px; }
   .r { padding: 0 12px; white-space: pre; display: flex; gap: 8px; overflow: hidden; }
@@ -120,9 +120,10 @@
   .ag.place { padding-left: 32px; color: var(--t-muted); }
   .dt .g { color: var(--heather); }
   .sw { color: var(--creek); } .sbk { color: var(--rust); font-weight: 600; } .sd { color: var(--sage); } .si { color: var(--t-muted); }
-  .sb .ft { margin-top: auto; padding: 0 0 8px; }
+  .sb .ft { padding: 0 0 8px; }
   .ft .r { justify-content: space-between; }
-  .ft .lk { color: var(--t-muted); }
+  .ft .lk { color: var(--t-muted); } .ft .w { color: var(--creek); }
+  .sb .half { flex: 1 1 0; min-height: 0; overflow: hidden; }
   .ft .rule { margin: 0 12px 2px; border-top: 1px solid var(--t-faint); height: 0; }
   .ft .grid { display: grid; grid-template-columns: 1fr 1fr; padding: 0 12px; color: var(--t-muted); }
   .sb .a { color: var(--hay); font-weight: 600; } .sb .mn { color: var(--hay); } .sb .c { color: var(--sage); }
@@ -555,7 +556,7 @@ corral read "$p" --lines 30</pre>
     var here = byN(focus).ws, spaces = [];
     agents.forEach(function (a) { if (spaces.indexOf(a.ws) < 0) spaces.push(a.ws); });
     function hd(title, right) { return '<div class="r hd"><span>' + title + '</span><span class="ru"></span><span>' + right + '</span></div>'; }
-    h += hd('SPACES', spaces.length);
+    h += '<div class="half">' + hd('SPACES', spaces.length);
     spaces.forEach(function (ws) {
       var m = agents.filter(function (a) { return a.ws === ws; }), on = ws === here;
       var nb = m.filter(function (a) { return a.state === 'blocked'; }).length, nd = m.filter(function (a) { return a.state === 'done'; }).length;
@@ -564,8 +565,8 @@ corral read "$p" --lines 30</pre>
       h += '<div class="r sp' + (on ? ' on' : '') + '" data-space="' + ws + '"><span class="nm">' + esc(ws) + '</span>' + mark + '</div>';
       h += '<div class="r sp br2' + (on ? ' on' : '') + '" data-space="' + ws + '">⎇ ' + esc(br) + '</div>';
     });
-    h += '<div class="r nm-row"><span class="a">+ new</span><span class="mn">≡ menu</span></div><div class="rule"></div>';
-    h += hd('AGENTS', '⇅ grouped');
+    h += '</div><div class="r nm-row"><span class="a">+ new</span><span class="mn">≡ menu</span></div><div class="rule"></div>';
+    h += '<div class="half">' + hd('AGENTS', '⇅ grouped');
     groups.forEach(function (g) {
       var m = agents.filter(function (a) { return a.ws === here && g[1].indexOf(a.state) >= 0; })
         .sort(function (x, y) { return g[1].indexOf(x.state) - g[1].indexOf(y.state); });
@@ -584,7 +585,7 @@ corral read "$p" --lines 30</pre>
         }
       });
     });
-    h += '<div class="ft"><div class="rule"></div><div class="r"><span class="lk">✎ notes  <span class="c">✦ stories</span>  ↺ archive</span></div></div>';
+    h += '</div><div class="ft"><div class="rule"></div><div class="r"><span class="lk"><span class="w">✎ notes</span>  <span class="c">✦ stories</span>  ↺ archive</span></div></div>';
     document.getElementById('sb').innerHTML = h;
     [[focus, 't1'], [second(), 't2']].forEach(function (p) {
       var a = byN(p[0]);

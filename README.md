@@ -110,14 +110,15 @@ Everything you type goes to the focused agent. corral's own commands are
 | `^b ^b` | send a literal `Ctrl-b` to the agent |
 
 Click an agent on screen to type into it, or a sidebar row to bring that agent
-into the focused spot. The sidebar has two parts:
+into the focused spot. The sidebar has two halves, each scrolling with the
+wheel when it's full (and following the focus until you do):
 
 - **Spaces**, one per project, each with its branch (or folder) and a mark
   when an agent in it needs you (`◆ 2` blocked, `✓` done, a spinner while
-  one works). Click one to go to its agent that most needs you. Under them,
-  **+ new** opens a shell and **≡ menu** (or `^b m`) changes the theme, the
-  agents' order and notifications, and installs agent hooks; changes are
-  saved to your config.
+  one works). Click one to go to its agent that most needs you. At the
+  midway, **+ new** opens a shell and **≡ menu** (or `^b m`) changes the
+  theme, the agents' order and notifications, and installs agent hooks;
+  changes are saved to your config.
 - **Agents**: those in the space you're in. **⇅ grouped** at the right end
   of their header switches between grouping them by what they need from you
   and listing them in the order they started.

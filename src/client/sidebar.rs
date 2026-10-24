@@ -327,6 +327,13 @@ pub enum Click {
     Archive(PaneId),
     /// The "↺ archive" button: the archived panes.
     Archived,
+    /// Anywhere in a half that scrolls, for the wheel: how far it's
+    /// scrolled, and how far it can go.
+    Scroll {
+        half: Half,
+        offset: usize,
+        max: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +362,16 @@ pub struct Sidebar<'a> {
     pub age_offset: Duration,
     /// How many panes are archived.
     pub archived: usize,
+    /// How far the spaces and the agents are scrolled; `None` follows the
+    /// space you're in and the focused agent.
+    pub scroll: [Option<usize>; 2],
+}
+
+/// The two halves of the sidebar that scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Half {
+    Spaces = 0,
+    Agents = 1,
 }
 
 struct Row<'a> {
@@ -483,7 +500,7 @@ impl Sidebar<'_> {
         } else {
             bottom
         };
-        let mut y = inner.y + 2;
+        let top = inner.y + 2;
         let new_and_menu = |y: u16, buf: &mut Buffer| {
             if y < end {
                 render_new_and_menu(Rect::new(inner.x, y, inner.width, 1), buf)
@@ -498,7 +515,7 @@ impl Sidebar<'_> {
                 Row::plain(Line::styled(" start one below", t.faint())),
                 Row::plain(Line::default()),
             ];
-            let (h, y) = draw_rows(rows, inner, y, end, buf);
+            let (h, y) = draw_rows(rows, inner, top, end, buf);
             hits.extend(h);
             hits.extend(new_and_menu(y, buf));
             return hits;
@@ -510,55 +527,35 @@ impl Sidebar<'_> {
             .and_then(|f| self.panes.iter().find(|p| p.id == f))
             .map_or(spaces[0].name, |p| p.workspace.as_str());
 
-        // The spaces get what's left once the agents have their header and a
-        // few rows; past that, the rest are counted.
-        let room = end.saturating_sub(y).saturating_sub(3 + 4) as usize;
-        if room >= 3 {
+        // Spaces in the top half, agents in the bottom one; new and menu, and
+        // a rule, at the midway. Too short for both, just the agents.
+        let mid = if end.saturating_sub(top) >= 10 {
+            top + (end - top) / 2
+        } else {
+            top
+        };
+        let mut scrolls = Vec::new();
+        if mid > top {
             let count = spaces.len().to_string();
-            let (h, next) = draw_rows(
-                vec![Row::plain(header("SPACES", &count, t.muted(), width))],
-                inner,
-                y,
-                end,
-                buf,
-            );
-            hits.extend(h);
-            y = next;
-            let mut shown: Vec<&Space> = spaces.iter().collect();
-            let mut more = 0;
-            if 1 + 2 * shown.len() > room {
-                let fit = ((room - 2) / 2).max(1);
-                more = shown.len() - fit;
-                // The space you're in always shows.
-                let at = shown.iter().position(|s| s.name == here).unwrap_or(0);
-                if at >= fit {
-                    shown.swap(fit - 1, at);
-                }
-                shown.truncate(fit);
-            }
+            header("SPACES", &count, t.muted(), width)
+                .render(Rect::new(inner.x, top, inner.width, 1), buf);
             let mut rows = Vec::new();
-            for space in shown {
+            for space in &spaces {
                 self.space_rows(space, space.name == here, width, &mut rows);
             }
-            if more > 0 {
-                rows.push(Row::plain(Line::styled(
-                    format!("   … {more} more"),
-                    t.faint(),
-                )));
-            }
-            let (h, next) = draw_rows(rows, inner, y, end, buf);
+            let region = Rect::new(inner.x, top + 1, inner.width, mid - top - 1);
+            let (h, scroll) = self.draw_half(Half::Spaces, rows, region, area, buf);
             hits.extend(h);
-            y = next;
+            scrolls.push(scroll);
         }
-        hits.extend(new_and_menu(y, buf));
-        y += 1;
-        if y < end {
-            rule(y, buf);
+        hits.extend(new_and_menu(mid, buf));
+        if mid + 1 < end {
+            rule(mid + 1, buf);
         }
-        y += 1;
 
         // The agents of the space you're in, with the switch between grouped
         // and in order at the right end of their header.
+        let y = mid + 2;
         let members: Vec<&PaneInfo> = self.panes.iter().filter(|p| p.workspace == here).collect();
         if y < end {
             let label = format!("⇅ {}", self.order.label());
@@ -576,7 +573,6 @@ impl Sidebar<'_> {
                 click: Click::Order,
             });
         }
-        y += 1;
         let mut rows = Vec::new();
         for (i, section) in sections(&members, self.order).into_iter().enumerate() {
             if !section.title.is_empty() {
@@ -589,8 +585,62 @@ impl Sidebar<'_> {
                 self.agent_rows(p, width, &mut rows);
             }
         }
-        hits.extend(draw_rows(rows, inner, y, end, buf).0);
+        if y + 1 < end {
+            let region = Rect::new(inner.x, y + 1, inner.width, end - y - 1);
+            let (h, scroll) = self.draw_half(Half::Agents, rows, region, area, buf);
+            hits.extend(h);
+            scrolls.push(scroll);
+        }
+        // Last, so the rows' own clicks win.
+        hits.extend(scrolls);
         hits
+    }
+
+    /// Draw a half's rows into `region`, scrolled: as far as the wheel took
+    /// it, or else so the lit rows (the space you're in, the focused agent)
+    /// show. A thumb on the sidebar's edge shows where you are when they
+    /// don't all fit. Returns the rows' clicks and the half's wheel area.
+    fn draw_half(
+        &self,
+        half: Half,
+        rows: Vec<Row>,
+        region: Rect,
+        area: Rect,
+        buf: &mut Buffer,
+    ) -> (Vec<Hit>, Hit) {
+        let t = theme::get();
+        let height = region.height as usize;
+        let max = rows.len().saturating_sub(height);
+        let offset = match self.scroll[half as usize] {
+            Some(n) => n.min(max),
+            None => {
+                let lit: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].selected).collect();
+                match (lit.first(), lit.last()) {
+                    // The lit rows' end in view, and their start if they fit.
+                    (Some(&first), Some(&last)) if last >= height => {
+                        (last + 1 - height).min(first).min(max)
+                    }
+                    _ => 0,
+                }
+            }
+        };
+        if max > 0 && height > 0 {
+            let x = area.x + area.width.saturating_sub(1);
+            let len = (height * height / rows.len()).max(1);
+            let start = (offset * (height - len)).checked_div(max).unwrap_or(0);
+            for i in start..start + len {
+                buf[(x, region.y + i as u16)]
+                    .set_symbol("┃")
+                    .set_style(t.muted());
+            }
+        }
+        let rows: Vec<Row> = rows.into_iter().skip(offset).collect();
+        let (hits, _) = draw_rows(rows, region, region.y, region.y + region.height, buf);
+        let wheel = Hit {
+            area: region,
+            click: Click::Scroll { half, offset, max },
+        };
+        (hits, wheel)
     }
 
     /// A space's two rows: its name, with a mark when an agent in it needs
@@ -951,16 +1001,18 @@ fn render_footer(row: Rect, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
         (n, true) => format!("↺ archive {n}"),
         (n, false) => format!("↺ {n}"),
     };
+    // Notes and stories give up their words before archive does.
     let levels = [
         ["✎ notes".to_string(), "✦ stories".into(), count(true)],
         ["✎ notes".to_string(), "✦ news".into(), count(true)],
-        ["✎ notes".to_string(), "✦ news".into(), count(false)],
+        ["✎".to_string(), "✦ news".into(), count(true)],
+        ["✎".to_string(), "✦".into(), count(true)],
         ["✎".to_string(), "✦".into(), count(false)],
     ];
     let fits = |l: &[String; 3]| l.iter().map(|s| s.width()).sum::<usize>() + 4 <= room;
-    let labels = levels.iter().find(|l| fits(l)).unwrap_or(&levels[3]);
+    let labels = levels.iter().find(|l| fits(l)).unwrap_or(&levels[4]);
     let styles = [
-        (t.muted(), Click::Notes),
+        (t.fg(t.working), Click::Notes),
         (t.fg(t.done), Click::Stories),
         (t.muted(), Click::Archived),
     ];
@@ -1043,6 +1095,7 @@ mod tests {
                 frame: 0,
                 age_offset: Duration::ZERO,
                 archived: 0,
+                scroll: [None, None],
             }
             .render(f.area(), f.buffer_mut());
         })
@@ -1157,6 +1210,17 @@ mod tests {
                 f("p1"),
                 f("p3"),
                 f("p3"),
+                // Each half, for the wheel; everything fits.
+                Click::Scroll {
+                    half: Half::Spaces,
+                    offset: 0,
+                    max: 0,
+                },
+                Click::Scroll {
+                    half: Half::Agents,
+                    offset: 0,
+                    max: 0,
+                },
             ]
         );
         let at = |c: Click| hits.iter().find(|h| h.click == c).unwrap().area;
@@ -1164,10 +1228,11 @@ mod tests {
         assert_eq!((at(Click::Exit).y, at(Click::Collapse).y), (0, 0));
         // The spaces from row 3; corral, where the focus is, first.
         assert_eq!(hits[5].area.y, 3);
-        // New with menu at its right end under the spaces, then the agents'
-        // header with its switch at the right end.
+        // New with menu at its right end at the midway, between the title
+        // row and the foot's rule (rows 2 to 20), then the agents' header
+        // with its switch at the right end.
         let (new, menu, order) = (at(Click::New), at(Click::Menu), at(Click::Order));
-        assert_eq!((new.y, menu.y, order.y), (7, 7, 9));
+        assert_eq!((new.y, menu.y, order.y), (11, 11, 13));
         assert_eq!(menu.x + menu.width, 30);
         assert_eq!(order.x + order.width, 30);
         // Notes, stories and archive on the last row.
@@ -1177,7 +1242,7 @@ mod tests {
         assert_eq!(ys, vec![21, 21, 21]);
         // The archive button sits at the right end of the branch row.
         let archive = at(Click::Archive("p1".into()));
-        assert_eq!((archive.y, archive.x + archive.width), (13, 30));
+        assert_eq!((archive.y, archive.x + archive.width), (17, 30));
     }
 
     #[test]
@@ -1195,17 +1260,75 @@ mod tests {
         assert!(text.contains("corral                   ◆ 1"), "{text}");
     }
 
+    fn render_scrolled(
+        panes: &[PaneInfo],
+        focus: &str,
+        scroll: [Option<usize>; 2],
+    ) -> (String, Vec<Hit>) {
+        let mut term = Terminal::new(TestBackend::new(32, 22)).unwrap();
+        let mut hits = Vec::new();
+        term.draw(|f| {
+            hits = Sidebar {
+                panes,
+                focus: Some(focus),
+                shown: &[],
+                order: Order::Need,
+                collapsed: false,
+                frame: 0,
+                age_offset: Duration::ZERO,
+                archived: 0,
+                scroll,
+            }
+            .render(f.area(), f.buffer_mut());
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            s.push_str(line.trim_end());
+            s.push('\n');
+        }
+        (s, hits)
+    }
+
+    fn wheel(hits: &[Hit], half: Half) -> (usize, usize) {
+        hits.iter()
+            .find_map(|h| match h.click {
+                Click::Scroll {
+                    half: h2,
+                    offset,
+                    max,
+                } if h2 == half => Some((offset, max)),
+                _ => None,
+            })
+            .unwrap()
+    }
+
     #[test]
-    fn many_spaces_are_counted_and_yours_stays() {
+    fn the_spaces_scroll_and_follow_yours() {
         let panes: Vec<PaneInfo> = (1..=12)
             .map(|i| pane(&format!("p{i}"), "zsh", &format!("ws{i}"), AgentState::Idle))
             .collect();
-        let (text, _) = render(&panes, Some("p12"), &[], 32);
-        assert!(text.contains("more"), "{text}");
+        // Following the focus: the last space shows, the first doesn't, and
+        // a thumb marks the spot.
+        let (text, hits) = render_scrolled(&panes, "p12", [None, None]);
         assert!(text.contains("ws12"), "{text}");
+        assert!(!text.contains("ws1 "), "{text}");
+        assert!(text.contains('┃'), "{text}");
+        let (offset, max) = wheel(&hits, Half::Spaces);
+        assert!(max > 0 && offset == max, "{offset} {max}");
+        // Scrolled to the top by the wheel, the first space shows.
+        let (text, hits) = render_scrolled(&panes, "p12", [Some(0), None]);
         assert!(text.contains("ws1 "), "{text}");
-        // The agents still get their header.
-        assert!(text.contains("AGENTS"), "{text}");
+        assert!(!text.contains("ws12"), "{text}");
+        assert_eq!(wheel(&hits, Half::Spaces).0, 0);
+        // The midway stays put either way.
+        let new_y = |hits: &[Hit]| hits.iter().find(|h| h.click == Click::New).unwrap().area.y;
+        assert_eq!(new_y(&hits), 11);
+        // Everything fits in a half: nothing to scroll.
+        let (_, hits) = render_scrolled(&sample(), "p1", [None, None]);
+        assert_eq!(wheel(&hits, Half::Spaces).1, 0);
     }
 
     #[test]
@@ -1223,6 +1346,7 @@ mod tests {
                     frame: 0,
                     age_offset: Duration::ZERO,
                     archived: 2,
+                    scroll: [None, None],
                 }
                 .render(f.area(), f.buffer_mut());
             })

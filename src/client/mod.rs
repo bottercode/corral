@@ -166,6 +166,9 @@ pub struct App {
     pub sidebar_area: Rect,
     pub pane_area: Rect,
     pub hits: Vec<sidebar::Hit>,
+    /// How far the sidebar's spaces and agents are scrolled with the wheel;
+    /// `None` follows the focus.
+    pub sidebar_scroll: [Option<usize>; 2],
     pub frame: usize,
     pub scroll_max: usize,
     splitter: Splitter,
@@ -246,6 +249,7 @@ impl App {
             sidebar_area: Rect::default(),
             pane_area: Rect::default(),
             hits: Vec::new(),
+            sidebar_scroll: [None, None],
             frame: 0,
             scroll_max: 0,
             splitter: Splitter::new(prefix),
@@ -397,6 +401,8 @@ impl App {
     }
 
     fn set_focus(&mut self, pane: PaneId) {
+        // The sidebar follows the focus again.
+        self.sidebar_scroll = [None, None];
         self.show(Some(pane));
         if matches!(self.mode, Mode::Scroll { .. } | Mode::Stories | Mode::Notes) {
             self.mode = Mode::Normal;
@@ -1227,6 +1233,24 @@ impl App {
         }
         if matches!(m.kind, MouseKind::WheelUp | MouseKind::WheelDown) {
             self.selection = None;
+            // The wheel scrolls the half of the sidebar it's over.
+            if in_sidebar {
+                let half = self.hits.iter().find_map(|h| match h.click {
+                    sidebar::Click::Scroll { half, offset, max } if h.contains(m.x, m.y) => {
+                        Some((half, offset, max))
+                    }
+                    _ => None,
+                });
+                if let Some((half, offset, max)) = half {
+                    let offset = if m.kind == MouseKind::WheelUp {
+                        offset.saturating_sub(2)
+                    } else {
+                        (offset + 2).min(max)
+                    };
+                    self.sidebar_scroll[half as usize] = Some(offset);
+                }
+                return;
+            }
         }
         // Clicking or scrolling over another tile moves the keyboard there.
         if !in_sidebar
@@ -1260,6 +1284,7 @@ impl App {
                     .map(|h| h.click.clone());
                 match click {
                     Some(sidebar::Click::Focus(id)) => self.set_focus(id),
+                    Some(sidebar::Click::Scroll { .. }) => {}
                     Some(sidebar::Click::Space(name)) => {
                         if let Some(p) = sidebar::space_pick(&self.panes, &name) {
                             let id = p.id.clone();
@@ -2755,5 +2780,55 @@ mod tests {
         // Images for panes that are gone are dropped.
         a.on_image("p9".into(), preview(8, 8));
         assert!(!a.previews.contains_key("p9"));
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_sidebar_half_under_it() {
+        let mut a = app();
+        // Twenty agents in one space: more than the agents half holds.
+        let panes: Vec<PaneInfo> = (1..=20)
+            .map(|i| pane(&format!("p{i}"), AgentState::Idle))
+            .collect();
+        a.on_server(ServerMsg::State {
+            panes,
+            focus: Some("p1".into()),
+            view_generation: a.view_generation,
+            restorable: vec![],
+            archived: vec![],
+        });
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(151, 40)).unwrap();
+        term.draw(|f| ui::draw(f, &mut a)).unwrap();
+        let agents = a
+            .hits
+            .iter()
+            .find_map(|h| match h.click {
+                sidebar::Click::Scroll {
+                    half: sidebar::Half::Agents,
+                    max,
+                    ..
+                } => Some((h.area, max)),
+                _ => None,
+            })
+            .unwrap();
+        assert!(agents.1 > 0);
+        a.outbox.clear();
+        // Wheel down over the agents half (SGR button 65).
+        let (x, y) = (agents.0.x + 3, agents.0.y + 2);
+        a.on_stdin(format!("\x1b[<65;{};{}M", x + 1, y + 1).as_bytes());
+        assert_eq!(a.sidebar_scroll, [None, Some(2)]);
+        // It's the sidebar's, not the agent's.
+        assert!(
+            !a.outbox
+                .iter()
+                .any(|m| matches!(m, ClientMsg::Input { .. }))
+        );
+        // Back up past the top stops there.
+        a.on_stdin(
+            format!("\x1b[<64;{};{}M\x1b[<64;{};{}M", x + 1, y + 1, x + 1, y + 1).as_bytes(),
+        );
+        assert_eq!(a.sidebar_scroll, [None, Some(0)]);
+        // Moving the focus hands the sidebar back to following it.
+        a.on_stdin(b"\x02j");
+        assert_eq!(a.sidebar_scroll, [None, None]);
     }
 }
