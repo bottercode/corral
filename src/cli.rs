@@ -118,9 +118,49 @@ pub enum Cmd {
         #[arg(long)]
         discard: bool,
     },
+    /// Use corral from your phone: serves a web app to add to its home screen
+    #[cfg(feature = "web")]
+    Web(WebArgs),
     /// Debugging helpers
     #[command(subcommand, hide = true)]
     Debug(DebugCmd),
+}
+
+#[cfg(feature = "web")]
+#[derive(Args, Debug)]
+pub struct WebArgs {
+    #[command(subcommand)]
+    pub cmd: Option<WebCmd>,
+    /// Port to listen on
+    #[arg(long, default_value_t = crate::web::DEFAULT_PORT)]
+    pub port: u16,
+    /// Address to listen on; anything but loopback also needs --expose
+    #[arg(long, default_value = "127.0.0.1")]
+    pub bind: std::net::IpAddr,
+    /// Listen on a non-loopback --bind address, over plain HTTP
+    #[arg(long)]
+    pub expose: bool,
+    /// The address your phone opens (default: this machine's Tailscale name)
+    #[arg(long)]
+    pub url: Option<String>,
+    /// Keep running in the background (logs to ~/.corral/log/web.log)
+    #[arg(long)]
+    pub daemon: bool,
+    #[arg(long, hide = true)]
+    pub detached: bool,
+}
+
+#[cfg(feature = "web")]
+#[derive(Subcommand, Debug)]
+pub enum WebCmd {
+    /// Show a new pairing code, for another phone
+    Pair,
+    /// List the paired phones
+    Devices,
+    /// Unpair a phone
+    Revoke { name: String },
+    /// Stop `corral web --daemon`
+    Stop,
 }
 
 #[derive(Args, Debug)]
@@ -176,6 +216,8 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             )
             .map(|_| ExitCode::SUCCESS);
         }
+        #[cfg(feature = "web")]
+        Cmd::Web(args) => return run_web(args).map(|_| ExitCode::SUCCESS),
         _ => {}
     }
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -216,6 +258,66 @@ fn run_server(daemon: bool) -> Result<ExitCode> {
         .build()?;
     rt.block_on(server::run(socket, config))?;
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(feature = "web")]
+fn run_web(a: WebArgs) -> Result<()> {
+    use crate::web;
+    match a.cmd {
+        Some(WebCmd::Pair) => {
+            let url =
+                web::last_url().unwrap_or_else(|| web::public_url(None, (a.bind, a.port).into()));
+            if web::running_pid().is_none() {
+                println!("corral web isn't running; start it with `corral web` first.");
+            }
+            return web::print_pairing(&url);
+        }
+        Some(WebCmd::Devices) => return web::list_devices(),
+        Some(WebCmd::Revoke { name }) => return web::revoke(&name),
+        Some(WebCmd::Stop) => return web::stop(),
+        None => {}
+    }
+    web::check_bind(a.bind, a.expose)?;
+    let addr = std::net::SocketAddr::from((a.bind, a.port));
+    let url = web::public_url(a.url.clone(), addr);
+    if a.daemon {
+        if let Some(pid) = web::running_pid() {
+            bail!("corral web is already running (pid {pid}); `corral web stop` stops it");
+        }
+        let mut args = vec![
+            "--port".to_string(),
+            a.port.to_string(),
+            "--bind".into(),
+            a.bind.to_string(),
+            "--url".into(),
+            url.clone(),
+        ];
+        if a.expose {
+            args.push("--expose".into());
+        }
+        web::spawn_daemon(&args)?;
+        web::print_banner(addr, &url)?;
+        println!("\nRunning in the background; `corral web stop` stops it.");
+        return Ok(());
+    }
+    if a.detached {
+        let dir = paths::log_dir();
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter())
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_env("CORRAL_LOG")
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+    }
+    web::serve(addr, url, a.detached)
 }
 
 fn env_filter() -> tracing_subscriber::EnvFilter {
@@ -468,6 +570,8 @@ async fn run_client(cmd: Cmd) -> Result<ExitCode> {
             }
         }
         Cmd::Server { .. } | Cmd::Integrate { .. } => unreachable!(),
+        #[cfg(feature = "web")]
+        Cmd::Web(_) => unreachable!(),
     }
     Ok(ExitCode::SUCCESS)
 }

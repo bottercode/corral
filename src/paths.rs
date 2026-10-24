@@ -99,6 +99,11 @@ pub fn notes_dir() -> PathBuf {
     corral_home().join("notes")
 }
 
+/// The phone app's paired devices, push key and pairing code.
+pub fn web_dir() -> PathBuf {
+    corral_home().join("web")
+}
+
 /// `~/.config/corral/config.toml`, or `CORRAL_CONFIG`.
 pub fn config_path() -> PathBuf {
     match std::env::var_os(CONFIG_ENV).filter(|p| !p.is_empty()) {

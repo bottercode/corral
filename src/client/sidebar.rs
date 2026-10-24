@@ -66,14 +66,14 @@ impl Order {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Need {
+pub(crate) enum Need {
     NeedsYou,
     Working,
     Quiet,
 }
 
 impl Need {
-    fn of(s: AgentState) -> Need {
+    pub(crate) fn of(s: AgentState) -> Need {
         match s {
             AgentState::Blocked | AgentState::Done => Need::NeedsYou,
             AgentState::Working => Need::Working,
