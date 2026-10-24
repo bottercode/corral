@@ -147,6 +147,14 @@ impl Detector {
     }
 
     pub fn set_verdict(&mut self, verdict: Verdict) {
+        // The spinner coming back under a blocked hook means the prompt was
+        // answered without typing here (auto mode, a click, a late hook).
+        if verdict == Verdict::Working
+            && self.verdict != Verdict::Working
+            && self.hook.is_some_and(|h| h.state == AgentState::Blocked)
+        {
+            self.hook = None;
+        }
         self.verdict = verdict;
     }
 
@@ -189,6 +197,9 @@ impl Detector {
             return AgentState::Exited;
         }
         let raw = match self.hook_state(now) {
+            // A prompt on screen outranks the `working` hook that fired just
+            // before it (Claude's PreToolUse runs ahead of the permission ask).
+            Some(AgentState::Working) if self.verdict == Verdict::Blocked => AgentState::Blocked,
             Some(s) => s,
             None => match self.verdict {
                 Verdict::Blocked | Verdict::Working => {
@@ -346,8 +357,9 @@ mod tests {
         let mut d = Detector::new();
         d.report(Blocked, c.at(0));
         d.on_output(c.at(100));
-        d.set_verdict(Verdict::Working);
+        d.set_verdict(Verdict::Blocked);
         assert_eq!(d.evaluate(c.at(200)), Some((Idle, Blocked)));
+        d.set_verdict(Verdict::None);
         d.report(Done, c.at(300));
         assert_eq!(d.evaluate(c.at(400)), Some((Blocked, Done)));
         d.report(Working, c.at(500));
@@ -385,6 +397,39 @@ mod tests {
         // No more hook; output from the answer arrives after the echo window.
         d.on_output(c.at(1600));
         assert_eq!(d.evaluate(c.at(1700)), Some((Blocked, Working)));
+    }
+
+    #[test]
+    fn spinner_after_a_blocked_hook_means_answered() {
+        let c = Clock::new();
+        let mut d = Detector::new();
+        d.set_verdict(Verdict::Blocked);
+        d.report(Blocked, c.at(0));
+        assert_eq!(d.evaluate(c.at(1)), Some((Idle, Blocked)));
+        // Approved elsewhere: the prompt goes and the spinner is back.
+        d.set_verdict(Verdict::Working);
+        assert_eq!(d.evaluate(c.at(2000)), Some((Blocked, Working)));
+    }
+
+    #[test]
+    fn a_blocked_hook_survives_a_spinner_already_on_screen() {
+        let c = Clock::new();
+        let mut d = Detector::new();
+        d.set_verdict(Verdict::Working);
+        // The hook beat the repaint; the stale verdict doesn't clear it.
+        d.report(Blocked, c.at(0));
+        d.set_verdict(Verdict::Working);
+        assert_eq!(d.evaluate(c.at(1)), Some((Idle, Blocked)));
+    }
+
+    #[test]
+    fn a_prompt_on_screen_beats_a_working_hook() {
+        let c = Clock::new();
+        let mut d = Detector::new();
+        d.report(Working, c.at(0));
+        assert_eq!(d.evaluate(c.at(1)), Some((Idle, Working)));
+        d.set_verdict(Verdict::Blocked);
+        assert_eq!(d.evaluate(c.at(100)), Some((Working, Blocked)));
     }
 
     #[test]

@@ -5,25 +5,33 @@
 # appears too. `agent` is a name from the agent table, or "*" for any pane.
 # `scope` is "screen" (the bottom of the screen, the default) or
 # "cursor-line" (only the line the cursor is on, i.e. where a program is
-# waiting for an answer). Blocked rules win over working rules.
+# waiting for an answer). `rows` narrows "screen" to that many bottom rows.
+#
+# Blocked rules win over working rules, unless the working match sits lower
+# on the screen: a spinner footer under prompt-like text means the text is
+# old transcript and the agent is busy.
 
 # Claude Code: tool permission prompts ("Do you want to make this edit…?",
-# "Do you want to proceed?") with a numbered choice list.
+# "Do you want to proceed?") with a numbered choice list. A live prompt is
+# the last thing on screen; the same words further up are transcript.
 [[rule]]
 agent = "claude"
 state = "blocked"
 all = ["do you want", "1. yes"]
+rows = 12
 
 [[rule]]
 agent = "claude"
 state = "blocked"
 all = ["❯ 1. yes"]
+rows = 12
 
 # Claude Code: folder trust prompt on first launch in a directory.
 [[rule]]
 agent = "claude"
 state = "blocked"
 all = ["yes, i trust this folder"]
+rows = 12
 
 [[rule]]
 agent = "claude"

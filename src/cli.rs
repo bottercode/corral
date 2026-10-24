@@ -525,16 +525,19 @@ pub fn hook_json_is_blocking(json: &str) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return true;
     };
-    let kind = v
-        .get("notification_type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    // Claude Code tags each notification; only these two wait on the user
+    // (the others are e.g. `idle_prompt` and `auth_success`).
+    match v.get("notification_type").and_then(|t| t.as_str()) {
+        Some("permission_prompt" | "elicitation_dialog") => return true,
+        Some(t) if !t.is_empty() => return false,
+        _ => {}
+    }
     let msg = v
         .get("message")
         .and_then(|m| m.as_str())
         .unwrap_or("")
         .to_lowercase();
-    !(kind == "idle_prompt" || msg.contains("waiting for your input"))
+    !msg.contains("waiting for your input")
 }
 
 fn home_relative(p: &std::path::Path) -> String {
@@ -645,6 +648,15 @@ mod tests {
         ));
         assert!(!hook_json_is_blocking(
             r#"{"notification_type":"idle_prompt","message":"x"}"#
+        ));
+        assert!(!hook_json_is_blocking(
+            r#"{"notification_type":"auth_success","message":"Signed in"}"#
+        ));
+        assert!(hook_json_is_blocking(
+            r#"{"notification_type":"permission_prompt","message":"x"}"#
+        ));
+        assert!(hook_json_is_blocking(
+            r#"{"notification_type":"elicitation_dialog","message":"x"}"#
         ));
         assert!(hook_json_is_blocking("not json"));
     }

@@ -22,6 +22,9 @@ pub struct Rule {
     pub any: Vec<String>,
     #[serde(default)]
     pub scope: Scope,
+    /// Search only this many bottom rows instead of [`SCAN_ROWS`].
+    #[serde(default)]
+    pub rows: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -83,6 +86,9 @@ impl Rules {
             if r.all.is_empty() && r.any.is_empty() {
                 bail!("rule for {:?} has neither `all` nor `any`", r.agent);
             }
+            if r.rows == Some(0) {
+                bail!("rule for {:?} has `rows = 0`", r.agent);
+            }
             r.all.iter_mut().for_each(|s| *s = s.to_lowercase());
             r.any.iter_mut().for_each(|s| *s = s.to_lowercase());
             rules.push((verdict, r));
@@ -91,29 +97,54 @@ impl Rules {
     }
 
     /// Classify a screen for a pane running `agent` (if known).
+    ///
+    /// Where a rule matched counts: a working footer below a blocked match
+    /// means the "prompt" is old text in the transcript (or the agent
+    /// printing a prompt-like snippet) and the agent is working.
     pub fn classify(&self, agent: Option<&str>, view: View) -> Verdict {
-        let screen = bottom_rows(view.text, SCAN_ROWS).to_lowercase();
+        let screen = view.text.trim_end().to_lowercase();
         let line = view.cursor_line.to_lowercase();
         let applies = |r: &Rule| r.agent == "*" || Some(r.agent.as_str()) == agent;
-        let matches = |r: &Rule| {
-            let text = match r.scope {
-                Scope::Screen => &screen,
-                Scope::CursorLine => &line,
-            };
-            r.all.iter().all(|s| text.contains(s.as_str()))
-                && (r.any.is_empty() || r.any.iter().any(|s| text.contains(s.as_str())))
-        };
-        let mut verdict = Verdict::None;
-        for (v, r) in &self.rules {
-            if applies(r) && matches(r) {
-                match v {
-                    Verdict::Blocked => return Verdict::Blocked,
-                    Verdict::Working => verdict = Verdict::Working,
-                    Verdict::None => {}
+        // How far down the screen the rule matched: the end of its lowest
+        // needed string, as an offset into `screen`.
+        let position = |r: &Rule| -> Option<usize> {
+            let (text, base) = match r.scope {
+                Scope::Screen => {
+                    let text = bottom_rows(&screen, r.rows.unwrap_or(SCAN_ROWS));
+                    (text, screen.len() - text.len())
                 }
+                // The cursor is where the program waits: as low as it gets.
+                Scope::CursorLine => (line.as_str(), usize::MAX),
+            };
+            let last = |s: &String| text.rfind(s.as_str()).map(|i| i + s.len());
+            let mut pos = 0;
+            for s in &r.all {
+                pos = pos.max(last(s)?);
             }
+            if !r.any.is_empty() {
+                pos = pos.max(r.any.iter().filter_map(last).max()?);
+            }
+            Some(base.saturating_add(pos))
+        };
+        let (mut blocked, mut working) = (None, None);
+        for (v, r) in &self.rules {
+            if !applies(r) {
+                continue;
+            }
+            let Some(pos) = position(r) else { continue };
+            let best = match v {
+                Verdict::Blocked => &mut blocked,
+                Verdict::Working => &mut working,
+                Verdict::None => continue,
+            };
+            *best = Some(best.map_or(pos, |b: usize| b.max(pos)));
         }
-        verdict
+        match (blocked, working) {
+            (Some(b), Some(w)) if w > b => Verdict::Working,
+            (Some(_), _) => Verdict::Blocked,
+            (None, Some(_)) => Verdict::Working,
+            (None, None) => Verdict::None,
+        }
     }
 }
 
@@ -142,6 +173,7 @@ mod tests {
         assert!(
             Rules::parse("[[rule]]\nagent='x'\nstate='blocked'\nall=['a']\nscope='nope'").is_err()
         );
+        assert!(Rules::parse("[[rule]]\nagent='x'\nstate='blocked'\nall=['a']\nrows=0").is_err());
     }
 
     #[test]
@@ -168,6 +200,39 @@ mod tests {
         let r = Rules::builtin();
         let mut text = String::from("do you want to proceed?\n❯ 1. yes\n");
         text.push_str(&"line\n".repeat(SCAN_ROWS + 5));
+        assert_eq!(
+            r.classify(Some("claude"), View::from_text(&text)),
+            Verdict::None
+        );
+    }
+
+    #[test]
+    fn prompt_text_above_a_spinner_is_working() {
+        // Claude editing a script that prints a permission prompt: the
+        // snippet is in the transcript, the spinner footer is below it.
+        let r = Rules::builtin();
+        let text = "⏺ Update(bin/claude)\n  printf 'Do you want to proceed?'\n  printf '❯ 1. Yes'\n\n\
+                    ✻ Concocting… (9s)\n─────\n❯ \n─────\n  ⏵⏵ auto mode on · esc to interrupt";
+        assert_eq!(
+            r.classify(Some("claude"), View::from_text(text)),
+            Verdict::Working
+        );
+        // A live prompt replaces the input box; an old spinner line in the
+        // transcript above it doesn't hide it.
+        let text =
+            "old: esc to interrupt\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel";
+        assert_eq!(
+            r.classify(Some("claude"), View::from_text(text)),
+            Verdict::Blocked
+        );
+    }
+
+    #[test]
+    fn claude_prompts_must_be_near_the_bottom() {
+        let r = Rules::builtin();
+        let mut text = String::from("Do you want to proceed?\n❯ 1. Yes\n");
+        text.push_str(&"transcript\n".repeat(12));
+        text.push_str("❯ \n? for shortcuts");
         assert_eq!(
             r.classify(Some("claude"), View::from_text(&text)),
             Verdict::None
