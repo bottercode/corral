@@ -225,6 +225,10 @@ pub enum ClientMsg {
         cols: u16,
         rows: u16,
         workspace: Option<String>,
+        /// Look at this pane first instead of the usual pick (the phone app
+        /// opens one agent; it shouldn't resize another on the way).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<PaneId>,
     },
     Detach,
     /// The panes this client shows (side by side) and which one gets the
@@ -406,6 +410,13 @@ mod tests {
             cols: 100,
             rows: 30,
             workspace: Some("w".into()),
+            pane: None,
+        });
+        roundtrip(ClientMsg::Attach {
+            cols: 40,
+            rows: 20,
+            workspace: None,
+            pane: Some("p3".into()),
         });
         roundtrip(ClientMsg::Detach);
         roundtrip(ClientMsg::View {

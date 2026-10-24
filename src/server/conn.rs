@@ -178,11 +178,14 @@ impl Session {
                 cols,
                 rows,
                 workspace,
+                pane,
             } => {
                 self.hub.attach(self.client, cols, rows);
                 // Subscribe before any snapshot so no output falls in between.
                 self.events = Some(self.hub.subscribe());
-                let focus = self.hub.initial_focus(workspace.as_deref());
+                let focus = pane
+                    .filter(|p| self.hub.pane_exists(p))
+                    .or_else(|| self.hub.initial_focus(workspace.as_deref()));
                 self.set_focus(focus.as_deref());
             }
             ClientMsg::Detach => {

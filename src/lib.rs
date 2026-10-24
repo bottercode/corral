@@ -9,3 +9,5 @@ pub mod integrate;
 pub mod paths;
 pub mod protocol;
 pub mod server;
+#[cfg(feature = "web")]
+pub mod web;

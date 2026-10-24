@@ -46,7 +46,7 @@ fn peer_pid(stream: &std::os::unix::net::UnixStream) -> Result<u32> {
 }
 
 /// A process named corral, run by this user.
-fn is_our_corral(pid: u32) -> bool {
+pub fn is_our_corral(pid: u32) -> bool {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let pid = Pid::from_u32(pid);
     let mut sys = System::new();
