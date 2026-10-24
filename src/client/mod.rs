@@ -2903,4 +2903,25 @@ mod tests {
                     && bytes == b"\x1b[200~# Fix login\nthe token expires early\x1b[201~"
         )));
     }
+
+    #[test]
+    fn the_menu_opens_at_its_button() {
+        let mut a = app();
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(151, 40)).unwrap();
+        term.draw(|f| ui::draw(f, &mut a)).unwrap();
+        let button = a
+            .hits
+            .iter()
+            .find(|h| h.click == sidebar::Click::Menu)
+            .unwrap()
+            .area;
+        // Click it: the menu's first row is just under the button, and its
+        // text starts where the button's does.
+        a.on_stdin(format!("\x1b[<0;{};{}M", button.x + 1, button.y + 1).as_bytes());
+        assert!(matches!(a.mode, Mode::Menu { .. }));
+        term.draw(|f| ui::draw(f, &mut a)).unwrap();
+        let first = a.menu_hits[0].0;
+        assert_eq!(first.y, button.y + 2, "border, then the first row");
+        assert_eq!(first.x, button.x);
+    }
 }
