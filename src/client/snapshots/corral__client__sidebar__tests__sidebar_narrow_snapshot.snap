@@ -1,9 +1,9 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 1252
+assertion_line: 1296
 expression: text
 ---
-              ✕  « │
+ ✕               « │
                    │
  SPACES ──────── 2 │
   corral       ◆ 1 │

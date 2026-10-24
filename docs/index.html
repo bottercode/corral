@@ -551,7 +551,7 @@ corral read "$p" --lines 30</pre>
   function second() { return focus === 1 ? 4 : 1; }
   var groups = [['NEEDS YOU', ['blocked', 'done']], ['WORKING', ['working']], ['QUIET', ['idle']]];
   function render() {
-    var h = '<div class="r head"><span></span><span style="color:var(--t-muted)">✕ exit  «</span></div><div class="r">&nbsp;</div>';
+    var h = '<div class="r head"><span style="color:var(--t-muted)">✕ exit</span><span style="color:var(--t-muted)">«</span></div><div class="r">&nbsp;</div>';
     var here = byN(focus).ws, spaces = [];
     agents.forEach(function (a) { if (spaces.indexOf(a.ws) < 0) spaces.push(a.ws); });
     function hd(title, right) { return '<div class="r hd"><span>' + title + '</span><span class="ru"></span><span>' + right + '</span></div>'; }

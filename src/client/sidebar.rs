@@ -890,28 +890,25 @@ impl Sidebar<'_> {
     }
 }
 
-/// `✕ exit  «`, right-aligned on the title row (`✕  «` when that would
-/// crowd the wordmark).
+/// The title row: `✕ exit` at the left (`✕` when narrow), `«` at the right.
 fn render_title_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
     let exit = if row.width >= 20 { "✕ exit" } else { "✕" };
-    let buttons = [
-        ("«", t.muted(), Click::Collapse),
-        (exit, t.muted(), Click::Exit),
-    ];
-    // Right to left, one column in from the edge, two apart.
-    let mut right = row.x + row.width.saturating_sub(1);
-    let mut hits = Vec::new();
-    for (label, style, click) in buttons {
-        let w = label.width() as u16;
-        let area = Rect::new(right.saturating_sub(w), row.y, w, 1);
-        Line::styled(label, style).render(area, buf);
-        hits.push(Hit { area, click });
-        right = area.x.saturating_sub(2);
-    }
-    // Left to right, like the rest of the sidebar.
-    hits.reverse();
-    hits
+    // One column in from each edge.
+    let exit_area = Rect::new(row.x + 1, row.y, exit.width() as u16, 1);
+    let collapse_area = Rect::new(row.x + row.width.saturating_sub(2), row.y, 1, 1);
+    Line::styled(exit, t.muted()).render(exit_area, buf);
+    Line::styled("«", t.muted()).render(collapse_area, buf);
+    vec![
+        Hit {
+            area: exit_area,
+            click: Click::Exit,
+        },
+        Hit {
+            area: collapse_area,
+            click: Click::Collapse,
+        },
+    ]
 }
 
 /// `+ new` with `≡ menu` at the other end, the row above the rule.

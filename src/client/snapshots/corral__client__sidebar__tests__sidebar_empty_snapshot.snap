@@ -1,9 +1,9 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 1209
+assertion_line: 1253
 expression: text
 ---
-                     ✕ exit  « │
+ ✕ exit                      « │
                                │
  no agents yet                 │
  start one below               │
