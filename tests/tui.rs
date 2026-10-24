@@ -110,7 +110,7 @@ fn tui_shows_panes_forwards_input_and_detaches() {
 
     let mut t = Tui::start(&s, 110, 30);
     t.wait_for("sidebar and pane", |x| {
-        x.contains("corral") && x.contains("hello-from-pane")
+        x.contains("✕ exit") && x.contains("hello-from-pane")
     });
     t.wait_for("both panes listed", |x| {
         x.contains("first") && x.contains("second")

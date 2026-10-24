@@ -1,9 +1,10 @@
-//! The sidebar. By default it's organised for triage: agents that need you
-//! (blocked, or finished and unseen) on top, then the ones working, then the
-//! quiet ones. It can list them by project instead. The focused agent opens
-//! up to show its title and branch. Collapsed, it shrinks to a
-//! rail of agent numbers and state marks. Rendering returns what each row
-//! does when clicked.
+//! The sidebar. On top, the spaces: one per project (workspace), with its
+//! branch and a mark when an agent in it needs you. Under them, the agents
+//! of the space you're in, grouped for triage by default (those that need
+//! you, then the ones working, then the quiet ones) or in the order they
+//! started. The focused agent opens up to show its title and branch.
+//! Collapsed, it shrinks to a rail of agent numbers and state marks.
+//! Rendering returns what each row does when clicked.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -28,15 +29,16 @@ pub enum Order {
     /// NEEDS YOU, WORKING, QUIET.
     #[default]
     Need,
-    /// One section per project (workspace), in the order they started.
-    Project,
+    /// In the order they started.
+    Flat,
 }
 
 impl Order {
     /// From the config's `sidebar_order`.
     pub fn from_config(s: &str) -> Order {
         match s {
-            "project" => Order::Project,
+            // `project` is what this was called before spaces.
+            "flat" | "project" => Order::Flat,
             _ => Order::Need,
         }
     }
@@ -44,21 +46,21 @@ impl Order {
     pub fn config_value(self) -> &'static str {
         match self {
             Order::Need => "need",
-            Order::Project => "project",
+            Order::Flat => "flat",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Order::Need => "by need",
-            Order::Project => "by project",
+            Order::Need => "grouped",
+            Order::Flat => "in order",
         }
     }
 
     pub fn toggled(self) -> Order {
         match self {
-            Order::Need => Order::Project,
-            Order::Project => Order::Need,
+            Order::Need => Order::Flat,
+            Order::Flat => Order::Need,
         }
     }
 }
@@ -88,12 +90,33 @@ pub struct Section<'a> {
     pub members: Vec<&'a PaneInfo>,
 }
 
-/// Non-empty sections in sidebar order.
+/// A project (workspace) and its panes, in the order they started.
+pub struct Space<'a> {
+    pub name: &'a str,
+    pub panes: Vec<&'a PaneInfo>,
+}
+
+/// The spaces, in the order their first pane started.
+pub fn spaces(panes: &[PaneInfo]) -> Vec<Space<'_>> {
+    let mut out: Vec<Space> = Vec::new();
+    for p in panes {
+        match out.iter_mut().find(|s| s.name == p.workspace) {
+            Some(s) => s.panes.push(p),
+            None => out.push(Space {
+                name: &p.workspace,
+                panes: vec![p],
+            }),
+        }
+    }
+    out
+}
+
+/// Non-empty sections of `panes` in sidebar order.
 ///
-/// By need, blocked comes before done and exited after idle within a
-/// section; otherwise agents keep their creation order. By project, each
-/// project lists its agents in creation order.
-pub fn sections(panes: &[PaneInfo], order: Order) -> Vec<Section<'_>> {
+/// Grouped, blocked comes before done and exited after idle within a
+/// section; otherwise agents keep their creation order. In order, there's
+/// one untitled section.
+pub fn sections<'a>(panes: &[&'a PaneInfo], order: Order) -> Vec<Section<'a>> {
     let t = theme::get();
     match order {
         Order::Need => {
@@ -108,8 +131,11 @@ pub fn sections(panes: &[PaneInfo], order: Order) -> Vec<Section<'_>> {
             ]
             .into_iter()
             .filter_map(|(need, title)| {
-                let mut members: Vec<&PaneInfo> =
-                    panes.iter().filter(|p| Need::of(p.state) == need).collect();
+                let mut members: Vec<&PaneInfo> = panes
+                    .iter()
+                    .copied()
+                    .filter(|p| Need::of(p.state) == need)
+                    .collect();
                 members.sort_by_key(|p| rank(p.state));
                 let color = match need {
                     Need::NeedsYou if members.iter().any(|p| p.state == AgentState::Blocked) => {
@@ -127,40 +153,33 @@ pub fn sections(panes: &[PaneInfo], order: Order) -> Vec<Section<'_>> {
             })
             .collect()
         }
-        Order::Project => {
-            let mut projects: Vec<&str> = Vec::new();
-            for p in panes {
-                if !projects.contains(&p.workspace.as_str()) {
-                    projects.push(&p.workspace);
-                }
-            }
-            projects
-                .into_iter()
-                .map(|w| {
-                    let members: Vec<&PaneInfo> =
-                        panes.iter().filter(|p| p.workspace == w).collect();
-                    // The count takes the colour of the most pressing agent.
-                    let color = [AgentState::Blocked, AgentState::Done, AgentState::Working]
-                        .into_iter()
-                        .find(|s| members.iter().any(|p| p.state == *s))
-                        .map_or(t.muted, |s| t.state(s));
-                    Section {
-                        title: w.to_string(),
-                        color,
-                        members,
-                    }
-                })
-                .collect()
-        }
+        Order::Flat if panes.is_empty() => Vec::new(),
+        Order::Flat => vec![Section {
+            title: String::new(),
+            color: t.muted,
+            members: panes.to_vec(),
+        }],
     }
 }
 
-/// Panes in the order the sidebar lists them; j/k follow this order.
+/// Panes in the order the sidebar lists them, space by space; j/k follow
+/// this order.
 pub fn display_order(panes: &[PaneInfo], order: Order) -> Vec<&PaneInfo> {
-    sections(panes, order)
+    spaces(panes)
         .into_iter()
+        .flat_map(|s| sections(&s.panes, order))
         .flat_map(|s| s.members)
         .collect()
+}
+
+/// The pane to bring up for a space: the one that most needs you, else its
+/// first.
+pub fn space_pick<'a>(panes: &'a [PaneInfo], name: &str) -> Option<&'a PaneInfo> {
+    let space = spaces(panes).into_iter().find(|s| s.name == name)?;
+    sections(&space.panes, Order::Need)
+        .into_iter()
+        .flat_map(|s| s.members)
+        .next()
 }
 
 /// A pane's number for `^b 1`…`^b 9`: its position by creation, so it stays
@@ -232,6 +251,24 @@ pub fn badge(p: &PaneInfo, age: Duration, frame: usize) -> (String, Style) {
 }
 
 /// Cut `s` to at most `width` columns, ending with `…` if shortened.
+/// Like [`truncate`], but keeps the end, where a path's folder is.
+fn truncate_start(s: &str, width: usize) -> String {
+    if s.width() <= width || width == 0 {
+        return truncate(s, width);
+    }
+    let mut tail = Vec::new();
+    let mut w = 1;
+    for c in s.chars().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if w + cw > width {
+            break;
+        }
+        tail.push(c);
+        w += cw;
+    }
+    std::iter::once('…').chain(tail.into_iter().rev()).collect()
+}
+
 pub fn truncate(s: &str, width: usize) -> String {
     if s.width() <= width {
         return s.to_string();
@@ -274,9 +311,11 @@ pub enum Click {
     New,
     /// The "≡ menu" button.
     Menu,
+    /// A space's row: bring up its agent that most needs you.
+    Space(String),
     /// The "✕ exit" button.
     Exit,
-    /// The "⇅ by need" / "⇅ by project" switch.
+    /// The "⇅ grouped" / "⇅ in order" switch on the agents header.
     Order,
     /// The "✦ stories" button.
     Stories,
@@ -320,7 +359,8 @@ pub struct Sidebar<'a> {
 
 struct Row<'a> {
     line: Line<'a>,
-    pane: Option<PaneId>,
+    /// What clicking anywhere on the row does.
+    click: Option<Click>,
     selected: bool,
     /// A button at the row's right end.
     button: Option<(&'static str, Click)>,
@@ -330,27 +370,78 @@ impl Row<'_> {
     fn plain(line: Line<'static>) -> Row<'static> {
         Row {
             line,
-            pane: None,
+            click: None,
             selected: false,
             button: None,
         }
     }
 }
 
-/// A section's header: its title, a rule, and its count at the right end
-/// (` WORKING ──────── 2`).
-fn section_header(section: &Section, width: usize) -> Line<'static> {
+/// A header: its title, a rule, and something at the right end, a count or
+/// a switch (` AGENTS ──────── ⇅ grouped`).
+fn header(title: &str, right: &str, right_style: Style, width: usize) -> Line<'static> {
     let t = theme::get();
-    let count = section.members.len().to_string();
-    // A space before the title, around the rule, and after the count.
-    let title = truncate(&section.title, width.saturating_sub(count.width() + 6));
-    let rule = width.saturating_sub(title.width() + count.width() + 4);
+    // A space before the title, around the rule, and after the right end.
+    let title = truncate(title, width.saturating_sub(right.width() + 6));
+    let rule = width.saturating_sub(title.width() + right.width() + 4);
     Line::from(vec![
         Span::styled(format!(" {title} "), t.muted().add_modifier(Modifier::BOLD)),
         Span::styled("─".repeat(rule), t.faint()),
         Span::raw(" "),
-        Span::styled(count, t.fg(section.color).add_modifier(Modifier::BOLD)),
+        Span::styled(right.to_string(), right_style),
     ])
+}
+
+/// A group's title inside the agents, quieter than a header: ` WORKING 1`.
+fn group_title(section: &Section) -> Line<'static> {
+    let t = theme::get();
+    Line::from(vec![
+        Span::styled(format!(" {}  ", section.title), t.muted()),
+        Span::styled(
+            section.members.len().to_string(),
+            t.fg(section.color).add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+/// Draw `rows` from `y`, stopping before `end`; returns the clicks and the
+/// row after the last one drawn.
+fn draw_rows(
+    rows: Vec<Row>,
+    inner: Rect,
+    mut y: u16,
+    end: u16,
+    buf: &mut Buffer,
+) -> (Vec<Hit>, u16) {
+    let t = theme::get();
+    let mut hits = Vec::new();
+    for row in rows {
+        if y >= end {
+            break;
+        }
+        let rect = Rect::new(inner.x, y, inner.width, 1);
+        if row.selected {
+            buf.set_style(rect, t.selected());
+        }
+        row.line.render(rect, buf);
+        // Before the row's own hit, so it wins the click.
+        if let Some((label, click)) = row.button {
+            let w = label.width() as u16;
+            let area = Rect::new(
+                rect.x + rect.width.saturating_sub(w + 1),
+                rect.y,
+                w.min(rect.width),
+                1,
+            );
+            Line::styled(label, t.muted()).render(area, buf);
+            hits.push(Hit { area, click });
+        }
+        if let Some(click) = row.click {
+            hits.push(Hit { area: rect, click });
+        }
+        y += 1;
+    }
+    (hits, y)
 }
 
 impl Sidebar<'_> {
@@ -371,88 +462,214 @@ impl Sidebar<'_> {
             return Vec::new();
         }
 
-        let mut rows: Vec<Row> = vec![
-            Row::plain(Line::from(Span::styled(
-                " corral",
-                t.accent().add_modifier(Modifier::BOLD),
-            ))),
-            Row::plain(Line::default()),
-        ];
-
-        if self.panes.is_empty() {
-            rows.push(Row::plain(Line::styled(" no agents yet", t.muted())));
-            rows.push(Row::plain(Line::styled(" start one below", t.faint())));
-        }
-
-        for (i, section) in sections(self.panes, self.order).into_iter().enumerate() {
-            if i > 0 {
-                rows.push(Row::plain(Line::default()));
-            }
-            rows.push(Row::plain(section_header(&section, width)));
-            for p in section.members {
-                self.agent_rows(p, width, &mut rows);
-            }
-        }
-
-        // Buttons on the last four rows: new and menu, a rule, then two rows
-        // of the rest.
-        let show_buttons = inner.height >= 8;
-        let list_rows = if show_buttons {
-            inner.height - 4
-        } else {
-            inner.height
-        } as usize;
-        let mut hits = Vec::new();
-        for (i, row) in rows.into_iter().take(list_rows).enumerate() {
-            let rect = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
-            if row.selected {
-                buf.set_style(rect, t.selected());
-            }
-            row.line.render(rect, buf);
-            // Before the row's own hit, so it wins the click.
-            if let Some((label, click)) = row.button {
-                let w = label.width() as u16;
-                let area = Rect::new(
-                    rect.x + rect.width.saturating_sub(w + 1),
-                    rect.y,
-                    w.min(rect.width),
-                    1,
-                );
-                Line::styled(label, t.muted()).render(area, buf);
-                hits.push(Hit { area, click });
-            }
-            if let Some(id) = row.pane {
-                hits.push(Hit {
-                    area: rect,
-                    click: Click::Focus(id),
-                });
-            }
-        }
-        hits.extend(render_title_buttons(
-            Rect::new(inner.x, inner.y, inner.width, 1),
-            buf,
-        ));
-        if show_buttons {
-            let y = inner.y + inner.height - 4;
-            hits.extend(render_new_and_menu(
-                Rect::new(inner.x, y, inner.width, 1),
-                buf,
-            ));
+        let mut hits = render_title_buttons(Rect::new(inner.x, inner.y, inner.width, 1), buf);
+        let rule = |y: u16, buf: &mut Buffer| {
             Line::styled(
                 format!(" {}", "─".repeat(width.saturating_sub(2))),
                 t.faint(),
             )
-            .render(Rect::new(inner.x, y + 1, inner.width, 1), buf);
-            // No agents, nothing to order.
-            let order = (!self.panes.is_empty()).then_some(self.order);
-            hits.extend(render_buttons(
-                Rect::new(inner.x, y + 2, inner.width, 2),
-                order,
+            .render(Rect::new(inner.x, y, inner.width, 1), buf);
+        };
+        // The foot, when there's room: a rule, then notes, stories, archive.
+        let bottom = inner.y + inner.height;
+        let end = if inner.height >= 10 {
+            rule(bottom - 2, buf);
+            hits.extend(render_footer(
+                Rect::new(inner.x, bottom - 1, inner.width, 1),
                 self.archived,
                 buf,
             ));
+            bottom - 2
+        } else {
+            bottom
+        };
+        let mut y = inner.y + 2;
+        let new_and_menu = |y: u16, buf: &mut Buffer| {
+            if y < end {
+                render_new_and_menu(Rect::new(inner.x, y, inner.width, 1), buf)
+            } else {
+                Vec::new()
+            }
+        };
+
+        if self.panes.is_empty() {
+            let rows = vec![
+                Row::plain(Line::styled(" no agents yet", t.muted())),
+                Row::plain(Line::styled(" start one below", t.faint())),
+                Row::plain(Line::default()),
+            ];
+            let (h, y) = draw_rows(rows, inner, y, end, buf);
+            hits.extend(h);
+            hits.extend(new_and_menu(y, buf));
+            return hits;
         }
+
+        let spaces = spaces(self.panes);
+        let here = self
+            .focus
+            .and_then(|f| self.panes.iter().find(|p| p.id == f))
+            .map_or(spaces[0].name, |p| p.workspace.as_str());
+
+        // The spaces get what's left once the agents have their header and a
+        // few rows; past that, the rest are counted.
+        let room = end.saturating_sub(y).saturating_sub(3 + 4) as usize;
+        if room >= 3 {
+            let count = spaces.len().to_string();
+            let (h, next) = draw_rows(
+                vec![Row::plain(header("SPACES", &count, t.muted(), width))],
+                inner,
+                y,
+                end,
+                buf,
+            );
+            hits.extend(h);
+            y = next;
+            let mut shown: Vec<&Space> = spaces.iter().collect();
+            let mut more = 0;
+            if 1 + 2 * shown.len() > room {
+                let fit = ((room - 2) / 2).max(1);
+                more = shown.len() - fit;
+                // The space you're in always shows.
+                let at = shown.iter().position(|s| s.name == here).unwrap_or(0);
+                if at >= fit {
+                    shown.swap(fit - 1, at);
+                }
+                shown.truncate(fit);
+            }
+            let mut rows = Vec::new();
+            for space in shown {
+                self.space_rows(space, space.name == here, width, &mut rows);
+            }
+            if more > 0 {
+                rows.push(Row::plain(Line::styled(
+                    format!("   … {more} more"),
+                    t.faint(),
+                )));
+            }
+            let (h, next) = draw_rows(rows, inner, y, end, buf);
+            hits.extend(h);
+            y = next;
+        }
+        hits.extend(new_and_menu(y, buf));
+        y += 1;
+        if y < end {
+            rule(y, buf);
+        }
+        y += 1;
+
+        // The agents of the space you're in, with the switch between grouped
+        // and in order at the right end of their header.
+        let members: Vec<&PaneInfo> = self.panes.iter().filter(|p| p.workspace == here).collect();
+        if y < end {
+            let label = format!("⇅ {}", self.order.label());
+            // `AGENTS`, a short rule and the switch, or just its mark.
+            let label = if label.width() + 14 <= width {
+                label
+            } else {
+                "⇅".into()
+            };
+            header("AGENTS", &label, t.muted(), width)
+                .render(Rect::new(inner.x, y, inner.width, 1), buf);
+            let w = label.width() as u16;
+            hits.push(Hit {
+                area: Rect::new(inner.x + inner.width.saturating_sub(w + 1), y, w, 1),
+                click: Click::Order,
+            });
+        }
+        y += 1;
+        let mut rows = Vec::new();
+        for (i, section) in sections(&members, self.order).into_iter().enumerate() {
+            if !section.title.is_empty() {
+                if i > 0 {
+                    rows.push(Row::plain(Line::default()));
+                }
+                rows.push(Row::plain(group_title(&section)));
+            }
+            for p in section.members {
+                self.agent_rows(p, width, &mut rows);
+            }
+        }
+        hits.extend(draw_rows(rows, inner, y, end, buf).0);
         hits
+    }
+
+    /// A space's two rows: its name, with a mark when an agent in it needs
+    /// you, then its branch (or folder). The space you're in is lit.
+    fn space_rows(&self, space: &Space, here: bool, width: usize, rows: &mut Vec<Row<'_>>) {
+        let t = theme::get();
+        let count = |s: AgentState| space.panes.iter().filter(|p| p.state == s).count();
+        let (mark, mark_style) = match (count(AgentState::Blocked), count(AgentState::Done)) {
+            (n @ 1.., _) => (
+                format!("◆ {n}"),
+                t.fg(t.blocked).add_modifier(Modifier::BOLD),
+            ),
+            (_, n @ 1..) => (format!("✓ {n}"), t.fg(t.done)),
+            _ if count(AgentState::Working) > 0 => (
+                SPINNER[self.frame % SPINNER.len()].to_string(),
+                t.fg(t.working),
+            ),
+            _ => (String::new(), Style::new()),
+        };
+        let (marker, marker_style) = if here {
+            ("▍", t.accent())
+        } else {
+            (" ", Style::new())
+        };
+        let gone = space.panes.iter().all(|p| p.state == AgentState::Exited);
+        let name_style = if here {
+            t.bold()
+        } else if gone {
+            t.muted()
+        } else {
+            Style::new().fg(t.text)
+        };
+        let name = truncate(space.name, width.saturating_sub(mark.width() + 4).max(1));
+        let pad = width.saturating_sub(2 + name.width() + mark.width() + 1);
+        let click = Some(Click::Space(space.name.to_string()));
+        rows.push(Row {
+            line: Line::from(vec![
+                Span::styled(marker, marker_style),
+                Span::raw(" "),
+                Span::styled(name, name_style),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(mark, mark_style),
+            ]),
+            click: click.clone(),
+            selected: here,
+            button: None,
+        });
+        // The focused agent's branch when it's here, else the first one in
+        // a repository, else the first one's folder.
+        let focused = space
+            .panes
+            .iter()
+            .copied()
+            .find(|p| self.focus == Some(p.id.as_str()));
+        let place = focused
+            .and_then(|p| p.git.as_ref())
+            .or_else(|| space.panes.iter().find_map(|p| p.git.as_ref()))
+            .map(|g| truncate(&format!("⎇ {}", g.branch), width.saturating_sub(3)))
+            .unwrap_or_else(|| {
+                let p = focused.unwrap_or(space.panes[0]);
+                truncate_start(&super::ui::home_relative(&p.cwd), width.saturating_sub(3))
+            });
+        let place_style = if here {
+            t.fg(t.git)
+        } else if gone {
+            t.faint()
+        } else {
+            t.muted()
+        };
+        rows.push(Row {
+            line: Line::from(vec![
+                Span::styled(marker, marker_style),
+                Span::raw(" "),
+                Span::styled(place, place_style),
+            ]),
+            click,
+            selected: here,
+            button: None,
+        });
     }
 
     /// The collapsed sidebar: menu and expand buttons, then each agent's
@@ -482,7 +699,8 @@ impl Sidebar<'_> {
         }
 
         let mut rows: Vec<Option<&PaneInfo>> = Vec::new();
-        for (i, section) in sections(self.panes, self.order).into_iter().enumerate() {
+        let all: Vec<&PaneInfo> = self.panes.iter().collect();
+        for (i, section) in sections(&all, self.order).into_iter().enumerate() {
             if i > 0 {
                 rows.push(None);
             }
@@ -592,106 +810,105 @@ impl Sidebar<'_> {
                 Span::raw(" ".repeat(pad)),
                 Span::styled(badge, badge_style),
             ]),
-            pane: Some(p.id.clone()),
+            click: Some(Click::Focus(p.id.clone())),
             selected: focused,
             button: None,
         });
+        // Under the name, where it's working: its branch, or its folder
+        // when it isn't in a repository.
+        let indent = "   ";
+        let room = width.saturating_sub(indent.len() + 1);
+        let (place, fit): (String, fn(&str, usize) -> String) = match &p.git {
+            Some(git) => (format!("⎇ {}", git.branch), truncate),
+            None => (super::ui::home_relative(&p.cwd), truncate_start),
+        };
         if !focused {
+            let style = if p.state == AgentState::Exited {
+                t.faint()
+            } else {
+                t.muted()
+            };
+            rows.push(Row {
+                line: Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::raw("  "),
+                    Span::styled(fit(&place, room), style),
+                ]),
+                click: Some(Click::Focus(p.id.clone())),
+                selected: false,
+                button: None,
+            });
             return;
         }
 
-        // The focused agent opens up: its title and branch.
-        let indent = "   ";
-        let room = width.saturating_sub(indent.len() + 1);
+        // The focused agent opens up: its task, then where it's working in
+        // colour, with the archive button at that row's right end.
         let mut detail = |line: Line<'a>, button: Option<(&'static str, Click)>| {
             rows.push(Row {
                 line,
-                pane: Some(p.id.clone()),
+                click: Some(Click::Focus(p.id.clone())),
                 selected: true,
                 button,
             })
         };
         let marker = || Span::styled("▍", t.accent());
-        // The archive button sits at the right end of the last detail row,
-        // two columns clear of its text; it drops its word when tight.
-        let archive = |used: usize| {
-            let label = if used + "↓ archive".width() + 2 <= room {
-                "↓ archive"
-            } else {
-                "↓"
-            };
-            (label, room.saturating_sub(label.width() + 2))
-        };
-        let title = task_title(p);
-        if let Some(title) = title {
-            let (button, room) = match p.git {
-                Some(_) => (None, room),
-                None => {
-                    let (label, room) = archive(title.width());
-                    (Some((label, Click::Archive(p.id.clone()))), room)
-                }
-            };
+        if let Some(title) = task_title(p) {
             detail(
                 Line::from(vec![
                     marker(),
                     Span::raw("  "),
                     Span::styled(truncate(title, room), Style::new().fg(t.text)),
                 ]),
-                button,
+                None,
             );
         }
-        if let Some(git) = &p.git {
-            let mut tail = Vec::new();
-            if let Some(pr) = &git.pr {
-                let (label, style) = match pr.state.as_str() {
-                    "MERGED" => (format!(" #{} merged", pr.number), t.fg(t.done)),
-                    "CLOSED" => (format!(" #{} closed", pr.number), t.muted()),
-                    _ => (format!(" #{}", pr.number), t.accent()),
-                };
-                tail.push(Span::styled(label, style));
-            }
-            let tail_width: usize = tail.iter().map(|s| s.content.width()).sum();
-            let branch = format!("⎇ {}", git.branch);
-            let (label, room) = archive(branch.width() + tail_width);
-            let branch = truncate(&branch, room.saturating_sub(tail_width));
-            let mut spans = vec![marker(), Span::raw("  "), Span::styled(branch, t.fg(t.git))];
-            spans.extend(tail);
-            detail(
-                Line::from(spans),
-                Some((label, Click::Archive(p.id.clone()))),
-            );
-        } else if title.is_none() {
-            // Nothing else to show: the button gets a row of its own.
-            detail(
-                Line::from(marker()),
-                Some((archive(0).0, Click::Archive(p.id.clone()))),
-            );
+        let mut tail = Vec::new();
+        if let Some(pr) = p.git.as_ref().and_then(|g| g.pr.as_ref()) {
+            let (label, style) = match pr.state.as_str() {
+                "MERGED" => (format!(" #{} merged", pr.number), t.fg(t.done)),
+                "CLOSED" => (format!(" #{} closed", pr.number), t.muted()),
+                _ => (format!(" #{}", pr.number), t.accent()),
+            };
+            tail.push(Span::styled(label, style));
         }
+        let tail_width: usize = tail.iter().map(|s| s.content.width()).sum();
+        // Two columns clear of the text; the button drops its word when tight.
+        let used = place.width() + tail_width;
+        let label = if used + "↓ archive".width() + 2 <= room {
+            "↓ archive"
+        } else {
+            "↓"
+        };
+        let room = room.saturating_sub(label.width() + 2);
+        let place = fit(&place, room.saturating_sub(tail_width));
+        let mut spans = vec![marker(), Span::raw("  "), Span::styled(place, t.fg(t.git))];
+        spans.extend(tail);
+        detail(
+            Line::from(spans),
+            Some((label, Click::Archive(p.id.clone()))),
+        );
     }
 }
 
-/// `✕ exit  «`, right-aligned on the title row (`✕  «` when that would
-/// crowd the wordmark).
+/// The title row: `✕ exit` at the left (`✕` when narrow), `«` at the right.
 fn render_title_buttons(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
     let exit = if row.width >= 20 { "✕ exit" } else { "✕" };
-    let buttons = [
-        ("«", t.muted(), Click::Collapse),
-        (exit, t.muted(), Click::Exit),
-    ];
-    // Right to left, one column in from the edge, two apart.
-    let mut right = row.x + row.width.saturating_sub(1);
-    let mut hits = Vec::new();
-    for (label, style, click) in buttons {
-        let w = label.width() as u16;
-        let area = Rect::new(right.saturating_sub(w), row.y, w, 1);
-        Line::styled(label, style).render(area, buf);
-        hits.push(Hit { area, click });
-        right = area.x.saturating_sub(2);
-    }
-    // Left to right, like the rest of the sidebar.
-    hits.reverse();
-    hits
+    // One column in from each edge.
+    let exit_area = Rect::new(row.x + 1, row.y, exit.width() as u16, 1);
+    let collapse_area = Rect::new(row.x + row.width.saturating_sub(2), row.y, 1, 1);
+    Line::styled(exit, t.muted()).render(exit_area, buf);
+    Line::styled("«", t.muted()).render(collapse_area, buf);
+    vec![
+        Hit {
+            area: exit_area,
+            click: Click::Exit,
+        },
+        Hit {
+            area: collapse_area,
+            click: Click::Collapse,
+        },
+    ]
 }
 
 /// `+ new` with `≡ menu` at the other end, the row above the rule.
@@ -722,55 +939,42 @@ fn render_new_and_menu(row: Rect, buf: &mut Buffer) -> Vec<Hit> {
     ]
 }
 
-/// Two rows of buttons in two columns, under the rule: `✎ notes` and the
-/// `⇅ by need` switch (when there are agents to order), then `✦ stories`
-/// and `↺ archive` (with how many, when any are). A column's labels shorten
-/// to their icons when they don't fit.
-fn render_buttons(area: Rect, order: Option<Order>, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
+/// The foot's row: `✎ notes`, `✦ stories` and `↺ archive` (with how many,
+/// when any are). Labels shorten until the row fits.
+fn render_footer(row: Rect, archived: usize, buf: &mut Buffer) -> Vec<Hit> {
     let t = theme::get();
-    // One column in from each side, two between the columns.
-    let room = area.width.saturating_sub(2) as usize;
-    let col = room.saturating_sub(2) / 2;
-    let order_label = order.map(|o| format!("⇅ {}", o.label()));
-    let archive_label = if archived > 0 {
-        format!("↺ archive {archived}")
-    } else {
-        "↺ archive".to_string()
+    // One column in from each side.
+    let room = row.width.saturating_sub(2) as usize;
+    let count = |long: bool| match (archived, long) {
+        (0, true) => "↺ archive".to_string(),
+        (0, false) => "↺".to_string(),
+        (n, true) => format!("↺ archive {n}"),
+        (n, false) => format!("↺ {n}"),
     };
-    let left = [
-        Some(("✎ notes".to_string(), "✎", t.muted(), Click::Notes)),
-        Some(("✦ stories".to_string(), "✦", t.fg(t.done), Click::Stories)),
+    let levels = [
+        ["✎ notes".to_string(), "✦ stories".into(), count(true)],
+        ["✎ notes".to_string(), "✦ news".into(), count(true)],
+        ["✎ notes".to_string(), "✦ news".into(), count(false)],
+        ["✎".to_string(), "✦".into(), count(false)],
     ];
-    let right = [
-        order_label.map(|l| (l, "⇅", t.muted(), Click::Order)),
-        Some((archive_label, "↺", t.muted(), Click::Archived)),
+    let fits = |l: &[String; 3]| l.iter().map(|s| s.width()).sum::<usize>() + 4 <= room;
+    let labels = levels.iter().find(|l| fits(l)).unwrap_or(&levels[3]);
+    let styles = [
+        (t.muted(), Click::Notes),
+        (t.fg(t.done), Click::Stories),
+        (t.muted(), Click::Archived),
     ];
-    let fits = |c: &[Option<(String, &str, Style, Click)>]| {
-        c.iter().flatten().all(|(l, ..)| l.width() <= col)
-    };
-    let (long_left, long_right) = (fits(&left), fits(&right));
     let mut hits = Vec::new();
-    for (dy, (l, r)) in left.into_iter().zip(right).enumerate() {
-        let y = area.y + dy as u16;
-        if dy as u16 >= area.height {
+    let mut x = row.x + 1;
+    for (label, (style, click)) in labels.iter().zip(styles) {
+        let w = label.width() as u16;
+        if x + w > row.x + row.width {
             break;
         }
-        for (button, long, x) in [
-            (l, long_left, area.x + 1),
-            (r, long_right, area.x + 1 + (col + 2) as u16),
-        ] {
-            let Some((label, short, style, click)) = button else {
-                continue;
-            };
-            let label = if long { label.as_str() } else { short };
-            let w = label.width() as u16;
-            if x + w > area.x + area.width {
-                continue;
-            }
-            let rect = Rect::new(x, y, w, 1);
-            Line::styled(label.to_string(), style).render(rect, buf);
-            hits.push(Hit { area: rect, click });
-        }
+        let r = Rect::new(x, row.y, w, 1);
+        Line::styled(label.clone(), style).render(r, buf);
+        hits.push(Hit { area: r, click });
+        x += w + 2;
     }
     hits
 }
@@ -879,8 +1083,8 @@ mod tests {
         };
         // Needs you (blocked, done), working, quiet (idle, exited).
         assert_eq!(ids(Order::Need), vec!["p1", "p3", "p2", "p5", "p4"]);
-        // By project, in creation order.
-        assert_eq!(ids(Order::Project), vec!["p1", "p3", "p2", "p4", "p5"]);
+        // Space by space (corral, then website), in creation order.
+        assert_eq!(ids(Order::Flat), vec!["p1", "p3", "p2", "p4", "p5"]);
         // Numbers follow creation, not position.
         assert_eq!(number(&panes, "p4"), Some(4));
     }
@@ -908,53 +1112,100 @@ mod tests {
     }
 
     #[test]
+    fn folders_keep_their_end() {
+        assert_eq!(truncate_start("~/src/corral", 20), "~/src/corral");
+        assert_eq!(truncate_start("~/Developer/corral", 10), "…er/corral");
+        let mut a = pane("p1", "claude", "corral", AgentState::Idle);
+        a.cwd = "/srv/some/deep/project/folder".into();
+        let (text, _) = render(&[a], None, &[], 24);
+        assert!(
+            text.contains("…") && text.contains("project/folder"),
+            "{text}"
+        );
+        assert!(!text.contains("/srv"), "{text}");
+    }
+
+    #[test]
     fn sidebar_snapshot() {
         let (text, hits) = render(&sample(), Some("p1"), &["p1".into(), "p2".into()], 32);
         insta::assert_snapshot!(text);
         let clicks: Vec<Click> = hits.iter().map(|h| h.click.clone()).collect();
         let f = |id: &str| Click::Focus(id.into());
+        let space = |name: &str| Click::Space(name.into());
         assert_eq!(
             clicks,
             vec![
-                // The focused agent's row plus its two detail rows, the
-                // branch row with the archive button.
+                // Exit and collapse on the title row, then the foot.
+                Click::Exit,
+                Click::Collapse,
+                Click::Notes,
+                Click::Stories,
+                Click::Archived,
+                // Each space's two rows.
+                space("corral"),
+                space("corral"),
+                space("website"),
+                space("website"),
+                Click::New,
+                Click::Menu,
+                Click::Order,
+                // Only the agents of the space you're in: the focused one
+                // opens up, with the archive button on its branch row.
                 f("p1"),
                 f("p1"),
                 Click::Archive("p1".into()),
                 f("p1"),
                 f("p3"),
-                f("p2"),
-                f("p5"),
-                f("p4"),
-                Click::Exit,
-                Click::Collapse,
-                Click::New,
-                Click::Menu,
-                Click::Notes,
-                Click::Order,
-                Click::Stories,
-                Click::Archived,
+                f("p3"),
             ]
         );
+        let at = |c: Click| hits.iter().find(|h| h.click == c).unwrap().area;
         // Exit and collapse on the title row.
-        let ys: Vec<u16> = hits[8..10].iter().map(|h| h.area.y).collect();
-        assert_eq!(ys, vec![0, 0]);
-        assert!(hits[8].area.x + hits[8].area.width < hits[9].area.x);
-        // New, and menu at its right end, above the rule.
-        let (new, menu) = (hits[10].area, hits[11].area);
-        assert_eq!((new.y, menu.y), (18, 18));
+        assert_eq!((at(Click::Exit).y, at(Click::Collapse).y), (0, 0));
+        // The spaces from row 3; corral, where the focus is, first.
+        assert_eq!(hits[5].area.y, 3);
+        // New with menu at its right end under the spaces, then the agents'
+        // header with its switch at the right end.
+        let (new, menu, order) = (at(Click::New), at(Click::Menu), at(Click::Order));
+        assert_eq!((new.y, menu.y, order.y), (7, 7, 9));
         assert_eq!(menu.x + menu.width, 30);
-        // Notes and the order switch under the rule, stories and archive
-        // under them, in two columns.
-        let [notes, order, stories, archive] = [12, 13, 14, 15].map(|i| hits[i].area);
-        assert_eq!((notes.y, order.y), (20, 20));
-        assert_eq!((stories.y, archive.y), (21, 21));
-        assert_eq!((notes.x, stories.x), (new.x, new.x));
-        assert_eq!(order.x, archive.x);
-        assert!(notes.x + notes.width < order.x);
+        assert_eq!(order.x + order.width, 30);
+        // Notes, stories and archive on the last row.
+        let ys: Vec<u16> = [Click::Notes, Click::Stories, Click::Archived]
+            .map(|c| at(c).y)
+            .to_vec();
+        assert_eq!(ys, vec![21, 21, 21]);
         // The archive button sits at the right end of the branch row.
-        let archive = hits[2].area;
-        assert_eq!((archive.y, archive.x + archive.width), (5, 30));
+        let archive = at(Click::Archive("p1".into()));
+        assert_eq!((archive.y, archive.x + archive.width), (13, 30));
+    }
+
+    #[test]
+    fn a_space_brings_up_its_most_pressing_agent() {
+        let panes = sample();
+        // website: codex working, zsh exited, docs idle.
+        assert_eq!(space_pick(&panes, "website").unwrap().id, "p2");
+        assert_eq!(space_pick(&panes, "corral").unwrap().id, "p1");
+        assert!(space_pick(&panes, "nowhere").is_none());
+        // Focused in website, its agents list and corral's don't.
+        let (text, _) = render(&panes, Some("p5"), &[], 32);
+        assert!(text.contains("docs") && text.contains("codex"), "{text}");
+        assert!(!text.contains("claude"), "{text}");
+        // corral's blocked agent still shows on its space.
+        assert!(text.contains("corral                   ◆ 1"), "{text}");
+    }
+
+    #[test]
+    fn many_spaces_are_counted_and_yours_stays() {
+        let panes: Vec<PaneInfo> = (1..=12)
+            .map(|i| pane(&format!("p{i}"), "zsh", &format!("ws{i}"), AgentState::Idle))
+            .collect();
+        let (text, _) = render(&panes, Some("p12"), &[], 32);
+        assert!(text.contains("more"), "{text}");
+        assert!(text.contains("ws12"), "{text}");
+        assert!(text.contains("ws1 "), "{text}");
+        // The agents still get their header.
+        assert!(text.contains("AGENTS"), "{text}");
     }
 
     #[test]
@@ -992,7 +1243,7 @@ mod tests {
 
     #[test]
     fn sidebar_by_project_snapshot() {
-        let (text, _) = render_in(&sample(), Some("p1"), &[], 32, Order::Project);
+        let (text, _) = render_in(&sample(), Some("p1"), &[], 32, Order::Flat);
         insta::assert_snapshot!(text);
     }
 

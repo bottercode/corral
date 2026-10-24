@@ -7,7 +7,7 @@
 //! sidebar_width = 30
 //! sidebar_collapsed = false        # just agent numbers (^b c, or « in the sidebar)
 //! theme = "ranch"                  # ranch, ink or terminal
-//! sidebar_order = "need"           # need (what needs you first) or project
+//! sidebar_order = "need"           # need (agents grouped by what needs you) or flat
 //! update_check = true              # once a day, a toast when a newer corral is out
 //! ```
 
@@ -81,7 +81,8 @@ impl Config {
     }
 }
 
-pub const SIDEBAR_ORDERS: [&str; 2] = ["need", "project"];
+/// `project` is the old name for `flat`, from before spaces.
+pub const SIDEBAR_ORDERS: [&str; 3] = ["need", "flat", "project"];
 
 /// Set one top-level key in the config file, keeping everything else in it
 /// (comments included). Creates the file if needed.

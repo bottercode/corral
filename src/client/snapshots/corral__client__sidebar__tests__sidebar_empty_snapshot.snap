@@ -1,27 +1,27 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 999
+assertion_line: 1253
 expression: text
 ---
- corral              ✕ exit  « │
+ ✕ exit                      « │
                                │
  no agents yet                 │
  start one below               │
                                │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
  + new                  ≡ menu │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
  ───────────────────────────── │
- ✎ notes                       │
- ✦ stories      ↺ archive      │
+ ✎ notes  ✦ stories  ↺ archive │

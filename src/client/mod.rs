@@ -1184,6 +1184,12 @@ impl App {
                     .map(|h| h.click.clone());
                 match click {
                     Some(sidebar::Click::Focus(id)) => self.set_focus(id),
+                    Some(sidebar::Click::Space(name)) => {
+                        if let Some(p) = sidebar::space_pick(&self.panes, &name) {
+                            let id = p.id.clone();
+                            self.set_focus(id);
+                        }
+                    }
                     Some(sidebar::Click::New) => self.new_shell(),
                     Some(sidebar::Click::Menu) => self.open_menu(),
                     Some(sidebar::Click::Exit) => self.mode = Mode::Quit,
@@ -2055,7 +2061,7 @@ mod tests {
         assert_eq!(theme::get().name, before);
         // The sidebar order flips, and so does j/k's order.
         a.on_stdin(b"j\r");
-        assert_eq!(a.order, Order::Project);
+        assert_eq!(a.order, Order::Flat);
         a.on_stdin(b"\x1b");
         assert!(matches!(a.mode, Mode::Normal));
         a.on_stdin(b"\x02j");
@@ -2342,7 +2348,7 @@ mod tests {
             click: sidebar::Click::Order,
         }];
         a.on_stdin(b"\x1b[<0;17;2M");
-        assert_eq!(a.order, Order::Project);
+        assert_eq!(a.order, Order::Flat);
         a.on_stdin(b"\x1b[<0;17;2M");
         assert_eq!(a.order, Order::Need);
     }

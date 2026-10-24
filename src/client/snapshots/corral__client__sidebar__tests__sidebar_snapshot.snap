@@ -1,27 +1,27 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 911
+assertion_line: 1131
 expression: text
 ---
- corral              ✕ exit  « │
+ ✕ exit                      « │
                                │
- NEEDS YOU ───────────────── 2 │
+ SPACES ──────────────────── 2 │
+▍ corral                   ◆ 1 │
+▍ ⎇ fix/token-refresh          │
+  website                    ⠋ │
+  /tmp                         │
+ + new                  ≡ menu │
+ ───────────────────────────── │
+ AGENTS ──────────── ⇅ grouped │
+ NEEDS YOU  2                  │
 ▍1 claude         ◆ blocked 4m │
 ▍  Fix token refresh           │
 ▍  ⎇ fix/token-refresh       ↓ │
  3 a-very-long-agen… ✓ done 4m │
-                               │
- WORKING ─────────────────── 1 │
-▏2 codex                  ⠋ 4m │
-                               │
- QUIET ───────────────────── 2 │
- 5 docs                   idle │
- 4 zsh                exited 1 │
+   /tmp                        │
                                │
                                │
                                │
                                │
- + new                  ≡ menu │
  ───────────────────────────── │
- ✎ notes        ⇅ by need      │
- ✦ stories      ↺ archive      │
+ ✎ notes  ✦ stories  ↺ archive │

@@ -89,7 +89,7 @@
   .chrome { display: flex; align-items: center; height: 42px; padding: 0 20px; gap: 8px; border-bottom: 1px solid var(--t-line); }
   .chrome i { width: 10px; height: 10px; border-radius: 50%; background: #2a2c2e; }
   .chrome .t { flex: 1; text-align: center; color: var(--t-muted); font: 12px var(--sans); margin-right: 46px; }
-  .scr { display: grid; grid-template-columns: 268px 1fr 1fr; height: 440px; }
+  .scr { display: grid; grid-template-columns: 268px 1fr 1fr; height: 520px; }
   .scr > * { min-width: 0; }
   .sb { border-right: 1px solid var(--t-line); display: flex; flex-direction: column; padding-top: 6px; }
   .r { padding: 0 12px; white-space: pre; display: flex; gap: 8px; overflow: hidden; }
@@ -97,7 +97,16 @@
   .r.head b { color: var(--t-text); }
   .r.rail { color: var(--t-muted); align-items: center; }
   .r.rail::before { content: ""; flex: 1; border-top: 1px solid var(--t-faint); }
-  .r.sec { color: var(--t-muted); font-weight: 600; margin-top: 10px; }
+  .r.sec { color: var(--t-muted); margin-top: 6px; }
+  .r.hd { color: var(--t-muted); font-weight: 600; align-items: center; }
+  .r.hd .ru { flex: 1; border-top: 1px solid var(--t-faint); }
+  .r.sp { cursor: pointer; justify-content: space-between; border-left: 2px solid transparent; padding-left: 10px; }
+  .r.sp.br2 { justify-content: flex-start; color: var(--t-muted); }
+  .r.sp.on { background: var(--t-bg-2); border-left-color: var(--hay); }
+  .r.sp.on .nm { font-weight: 600; }
+  .r.sp.br2.on { color: var(--heather); }
+  .r.nm-row { justify-content: space-between; margin-top: 2px; }
+  .sb > .rule { margin: 2px 12px 4px; border-top: 1px solid var(--t-faint); }
   .ag { cursor: pointer; border-left: 2px solid transparent; padding-left: 10px; transition: background .12s; }
   .ag:hover { background: #18191a; }
   .ag.on { background: var(--t-bg-2); border-left-color: var(--hay); }
@@ -107,13 +116,16 @@
   .ag.on .nm { font-weight: 600; }
   .dt { background: var(--t-bg-2); border-left: 2px solid var(--hay); padding-left: 32px; color: var(--t-muted); }
   .dt.t { color: var(--t-text); }
+  .dt.br { justify-content: space-between; padding-right: 12px; }
+  .ag.place { padding-left: 32px; color: var(--t-muted); }
   .dt .g { color: var(--heather); }
   .sw { color: var(--creek); } .sbk { color: var(--rust); font-weight: 600; } .sd { color: var(--sage); } .si { color: var(--t-muted); }
   .sb .ft { margin-top: auto; padding: 0 0 8px; }
   .ft .r { justify-content: space-between; }
+  .ft .lk { color: var(--t-muted); }
   .ft .rule { margin: 0 12px 2px; border-top: 1px solid var(--t-faint); height: 0; }
   .ft .grid { display: grid; grid-template-columns: 1fr 1fr; padding: 0 12px; color: var(--t-muted); }
-  .ft .a { color: var(--hay); font-weight: 600; } .ft .mn { color: var(--hay); } .ft .c { color: var(--sage); }
+  .sb .a { color: var(--hay); font-weight: 600; } .sb .mn { color: var(--hay); } .sb .c { color: var(--sage); }
   .tile { display: flex; flex-direction: column; border-right: 1px solid var(--t-line); }
   .tile:last-child { border-right: 0; }
   .th { display: flex; justify-content: space-between; gap: 10px; padding: 0 12px; height: 24px; align-items: center; color: var(--t-muted); white-space: nowrap; overflow: hidden; }
@@ -539,9 +551,23 @@ corral read "$p" --lines 30</pre>
   function second() { return focus === 1 ? 4 : 1; }
   var groups = [['NEEDS YOU', ['blocked', 'done']], ['WORKING', ['working']], ['QUIET', ['idle']]];
   function render() {
-    var h = '<div class="r head"><b>corral</b><span style="color:var(--t-muted)">✕ exit  «</span></div><div class="r">&nbsp;</div>';
+    var h = '<div class="r head"><span style="color:var(--t-muted)">✕ exit</span><span style="color:var(--t-muted)">«</span></div><div class="r">&nbsp;</div>';
+    var here = byN(focus).ws, spaces = [];
+    agents.forEach(function (a) { if (spaces.indexOf(a.ws) < 0) spaces.push(a.ws); });
+    function hd(title, right) { return '<div class="r hd"><span>' + title + '</span><span class="ru"></span><span>' + right + '</span></div>'; }
+    h += hd('SPACES', spaces.length);
+    spaces.forEach(function (ws) {
+      var m = agents.filter(function (a) { return a.ws === ws; }), on = ws === here;
+      var nb = m.filter(function (a) { return a.state === 'blocked'; }).length, nd = m.filter(function (a) { return a.state === 'done'; }).length;
+      var mark = nb ? '<span class="sbk">◆ ' + nb + '</span>' : nd ? '<span class="sd">✓ ' + nd + '</span>' : m.some(function (a) { return a.state === 'working'; }) ? '<span class="sw">' + SPIN[frame % 10] + '</span>' : '';
+      var br = (on ? byN(focus) : m[0]).branch;
+      h += '<div class="r sp' + (on ? ' on' : '') + '" data-space="' + ws + '"><span class="nm">' + esc(ws) + '</span>' + mark + '</div>';
+      h += '<div class="r sp br2' + (on ? ' on' : '') + '" data-space="' + ws + '">⎇ ' + esc(br) + '</div>';
+    });
+    h += '<div class="r nm-row"><span class="a">+ new</span><span class="mn">≡ menu</span></div><div class="rule"></div>';
+    h += hd('AGENTS', '⇅ grouped');
     groups.forEach(function (g) {
-      var m = agents.filter(function (a) { return g[1].indexOf(a.state) >= 0; })
+      var m = agents.filter(function (a) { return a.ws === here && g[1].indexOf(a.state) >= 0; })
         .sort(function (x, y) { return g[1].indexOf(x.state) - g[1].indexOf(y.state); });
       if (!m.length) return;
       var color = g[0] === 'NEEDS YOU' ? (m.some(function (a) { return a.state === 'blocked'; }) ? 'var(--rust)' : 'var(--sage)') : g[0] === 'WORKING' ? 'var(--creek)' : 'var(--t-muted)';
@@ -551,14 +577,14 @@ corral read "$p" --lines 30</pre>
         h += '<div class="r ag' + (on ? ' on' : alt ? ' alt' : '') + '" data-n="' + a.n + '"><span class="n">' + a.n + '</span><span class="nm">' + esc(a.name) + '</span>' + badge(a) + '</div>';
         if (on) {
           h += '<div class="r dt t" data-n="' + a.n + '">' + esc(a.title) + '</div>';
-          h += '<div class="r dt" data-n="' + a.n + '">' + esc(a.ws + ' · ' + a.agent) + '</div>';
           var d = a.pr ? ' <span style="color:var(--hay)">#' + a.pr + '</span>' : '';
-          h += '<div class="r dt" data-n="' + a.n + '"><span class="g">⎇ ' + esc(a.branch) + '</span>' + d + '</div>';
+          h += '<div class="r dt br" data-n="' + a.n + '"><span><span class="g">⎇ ' + esc(a.branch) + '</span>' + d + '</span><span>↓ archive</span></div>';
+        } else {
+          h += '<div class="r ag place' + (alt ? ' alt' : '') + '" data-n="' + a.n + '">⎇ ' + esc(a.branch) + '</div>';
         }
       });
     });
-    h += '<div class="ft"><div class="r"><span class="a">+ new</span><span class="mn">≡ menu</span></div><div class="rule"></div>' +
-      '<div class="grid"><span>✎ notes</span><span>⇅ by need</span><span class="c">✦ stories</span><span>↺ archive</span></div></div>';
+    h += '<div class="ft"><div class="rule"></div><div class="r"><span class="lk">✎ notes  <span class="c">✦ stories</span>  ↺ archive</span></div></div>';
     document.getElementById('sb').innerHTML = h;
     [[focus, 't1'], [second(), 't2']].forEach(function (p) {
       var a = byN(p[0]);
@@ -568,6 +594,12 @@ corral read "$p" --lines 30</pre>
     document.getElementById('status').textContent = status;
   }
   document.getElementById('sb').addEventListener('click', function (e) {
+    var sp = e.target.closest('[data-space]');
+    if (sp) {
+      var ws = sp.getAttribute('data-space'), rank = ['blocked', 'done', 'working', 'idle'];
+      var m = agents.filter(function (a) { return a.ws === ws; }).sort(function (x, y) { return rank.indexOf(x.state) - rank.indexOf(y.state); });
+      focus = m[0].n; status = ''; paused = 8; render(); return;
+    }
     var r = e.target.closest('[data-n]');
     if (!r) return;
     focus = +r.getAttribute('data-n');
