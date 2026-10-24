@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# A stand-in coding agent for recording the README demo. It draws enough of
+# Claude Code's screen (a "⏺" transcript, an "esc to interrupt" spinner, a
+# numbered permission prompt) for corral's screen rules to tell working from
+# blocked from done. Run as `claude` or, through the symlink, `codex`, so
+# corral sees that agent's name.
+#
+#   claude work       TITLE STEP…   keep working, cycling through the steps
+#   claude block N    TITLE STEP…   work N seconds, then ask permission; 1 resumes
+#   claude finish N   TITLE STEP…   work N seconds, then stop and wait
+set -u
+
+mode=$1
+shift
+[[ $mode == work ]] || { secs=$1; shift; }
+title=$1
+shift
+steps=("$@")
+
+printf '\033]0;\342\234\263 %s\007' "$title"
+printf '\033[2J\033[H'
+printf '\033[1m%s\033[0m\n\n' "$title"
+
+spin=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+start=$SECONDS
+tick=0
+
+status() {
+    printf '\r\033[K\033[2m%s Working… (%ss · esc to interrupt)\033[0m' \
+        "${spin[tick % 10]}" "$((SECONDS - start))"
+    tick=$((tick + 1))
+}
+
+say() {
+    printf '\r\033[K%s\n' "$1"
+    status
+}
+
+# Work for $1 seconds, printing a step now and then.
+work() {
+    local until=$((SECONDS + $1)) i=0
+    while ((SECONDS < until)); do
+        if ((i % 12 == 0)); then
+            say "⏺ ${steps[(i / 12) % ${#steps[@]}]}"
+            say "  ⎿ ok"
+        fi
+        status
+        sleep 0.2
+        i=$((i + 1))
+    done
+}
+
+case $mode in
+work)
+    work 100000
+    ;;
+block)
+    work "$secs"
+    printf '\r\033[K\n'
+    printf '╭──────────────────────────────────────────╮\n'
+    printf '│ Bash command                             │\n'
+    printf '│   cargo test -p auth refresh             │\n'
+    printf '│                                          │\n'
+    printf '│ Do you want to proceed?                  │\n'
+    printf '│ ❯ 1. Yes                                 │\n'
+    printf "│   2. Yes, and don't ask again            │\n"
+    printf '│   3. No                                  │\n'
+    printf '╰──────────────────────────────────────────╯\n'
+    until read -rsn1 key && [[ $key == 1 ]]; do :; done
+    printf '\033[2J\033[H\033[1m%s\033[0m\n\n' "$title"
+    say "⏺ Bash(cargo test -p auth refresh)"
+    say "  ⎿ test result: ok. 12 passed"
+    work 100000
+    ;;
+finish)
+    work "$secs"
+    printf '\r\033[K\n⏺ Done. Updated 3 files.\n\n› '
+    read -r _
+    ;;
+esac

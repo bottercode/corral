@@ -11,24 +11,9 @@ A terminal runtime for coding agents. Run Claude Code, Codex, opencode and
 friends side by side, see at a glance which one is waiting for you, and keep
 them running when you close the laptop or lose SSH.
 
-```
- corral    ≡ menu  ✕ exit  « │ 2 fixer · Fix token refresh   ◆ blocked 4m│▍1 api · Add rate limiting         ⠋ 32s
- ───────────────── ⇅ by need │⏺ I'll patch the refresh lock.             │⏺ Reading src/limits.rs
- NEEDS YOU  2                │                                            │
- 2 fixer       ◆ blocked 4m  │ Do you want to proceed?                    │  ⎿ Read 120 lines
- 3 docs           ✓ done 1m  │ ❯ 1. Yes                                   │
-                             │   2. No                                    │⏺ Adding a token bucket
- WORKING  1                  │                                            │
-▍1 api               ⠋ 32s   │                                            │
-▍  Add rate limiting         │                                            │
-▍  api · claude              │                                            │
-▍  ⎇ rate-limits #128        │                                            │
-                             │                                            │
- QUIET  1                    │                                            │
- 4 tests               idle  │                                            │
- ─────────────────────────── │                                            │
- + new shell                 │                                            │          ^b ? keys
-```
+<p align="center">
+  <img src="docs/demo.gif" alt="corral: agents sorted by who needs you; jumping to a blocked agent and approving it" width="900">
+</p>
 
 ## Why
 
