@@ -1,6 +1,6 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 1350
+assertion_line: 1441
 expression: text
 ---
  ✕               « │
@@ -13,15 +13,15 @@ expression: text
                    │
                    │
                    │
-                   │
  + new      ≡ menu │
  ───────────────── │
  AGENTS ──────── ⇅ │
  WORKING  1        ┃
 ▍2 codex      ⠋ 4m ┃
-▍  /tmp  ↓ archive ┃
-                   ┃
+▍  /tmp  ↓ archive │
+                   │
  QUIET  2          │
- 5 docs       idle │
  ───────────────── │
- ✎  ✦  ↺ archive   │
+ 📝  notes          │
+ 📰  stories        │
+ 📦  archive        │

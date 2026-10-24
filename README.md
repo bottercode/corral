@@ -123,8 +123,8 @@ wheel when it's full (and following the focus until you do):
   of their header switches between grouping them by what they need from you
   and listing them in the order they started.
 
-Along the foot, **✎ notes** opens your notes, **✦ stories** the news, and
-**↺ archive** the agents you've archived.
+Along the foot, **📝 notes** opens your notes, **📰 stories** the news, and
+**📦 archive** the agents you've archived.
 
 At the top:
 
@@ -148,7 +148,7 @@ SSH): run `corral` again and everything is where you left it.
 Done with an agent for now, but not with its work? Press `^b a` (or click
 **↓ archive** next to the focused agent in the sidebar) to archive it.
 corral ends its process but keeps its folder and its conversation. Archived agents survive restarts. `^b A` (or the
-**↺ archive** button) lists them: Enter brings one back, resuming its
+**📦 archive** button) lists them: Enter brings one back, resuming its
 conversation, and `x` forgets it.
 
 ### After a reboot or a stop
@@ -182,7 +182,7 @@ update), the next `corral` offers to bring your panes back:
 
 ### Top stories
 
-While your agents work, `^b t` (or **✦ stories** in the sidebar) shows the
+While your agents work, `^b t` (or **📰 stories** in the sidebar) shows the
 front pages of Hacker News and lobste.rs in place of the agents, with the
 sidebar still beside it:
 
@@ -211,7 +211,7 @@ sidebar still beside it:
 
 ### Notes
 
-`^b w` (or **✎ notes** in the sidebar) opens a notepad in place of the agents,
+`^b w` (or **📝 notes** in the sidebar) opens a notepad in place of the agents,
 with your notes down the left and the selected one beside them:
 
 ```
@@ -230,6 +230,9 @@ with your notes down the left and the selected one beside them:
 - `n` (or **+ new note**) starts a note; its first line is the title.
   `Enter` or a click opens one for editing, `Esc` goes back to the list, and
   `x` deletes the selected note (after a `y`).
+- `s` (`^s` while editing, or **↳ send to …** at the top) pastes the note
+  into the agent you were on and takes you there. Enter is left to you, so
+  you can add to it before the agent acts on it.
 - Notes are Markdown, drawn with their formatting as you type: `#` headings,
   `**bold**`, `*italic*`, `` `code` ``, `~~struck~~`, `-` and `1.` lists,
   `- [ ]` tasks, `>` quotes, `---` rules and fenced code. The marks stay in

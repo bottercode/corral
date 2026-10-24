@@ -1,6 +1,6 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 1184
+assertion_line: 1199
 expression: text
 ---
  ✕ exit                      « │
@@ -10,7 +10,6 @@ expression: text
 ▍ ⎇ fix/token-refresh          │
   website                    ⠋ │
   /tmp                         │
-                               │
                                │
                                │
                                │
@@ -24,4 +23,5 @@ expression: text
  3 a-very-long-agen… ✓ done 4m │
    /tmp                        │
  ───────────────────────────── │
- ✎ notes  ✦ stories  ↺ archive │
+ 📝  notes  📰  stories          │
+ 📦  archive                    │

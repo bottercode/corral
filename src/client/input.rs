@@ -39,6 +39,11 @@ pub enum Chunk {
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// `text` as a bracketed paste, the way a terminal sends one.
+pub fn paste_bytes(text: &str) -> Vec<u8> {
+    [PASTE_START, text.as_bytes(), PASTE_END].concat()
+}
+
 pub struct Splitter {
     prefix: u8,
     pending: Vec<u8>,

@@ -306,6 +306,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         app.stories.render(areas.pane, f.buffer_mut(), now);
     } else if matches!(app.mode, Mode::Notes) {
         f.render_widget(ratatui::widgets::Clear, areas.pane);
+        app.notes.send_to = app.focused().map(|p| p.name.clone());
         if let Some(at) = app.notes.render(areas.pane, f.buffer_mut()) {
             f.set_cursor_position(at);
         }
@@ -632,6 +633,7 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
                 ("`c`", "code"),
                 ("-", "list"),
                 ("^t", "task"),
+                ("^s", "send to agent"),
                 ("Esc", "done"),
             ])
         } else {
@@ -639,6 +641,7 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
                 ("↑↓", "pick"),
                 ("Enter", "edit"),
                 ("n", "new"),
+                ("s", "send to agent"),
                 ("x", "delete"),
                 ("Esc", "back to agents"),
             ])
