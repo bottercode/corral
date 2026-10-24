@@ -1,6 +1,6 @@
 ---
 source: src/client/sidebar.rs
-assertion_line: 1296
+assertion_line: 1350
 expression: text
 ---
  ✕               « │
@@ -10,18 +10,18 @@ expression: text
   ⎇ fix/token-ref… │
 ▍ website        ⠋ │
 ▍ /tmp             │
+                   │
+                   │
+                   │
+                   │
  + new      ≡ menu │
  ───────────────── │
  AGENTS ──────── ⇅ │
- WORKING  1        │
-▍2 codex      ⠋ 4m │
-▍  /tmp  ↓ archive │
-                   │
+ WORKING  1        ┃
+▍2 codex      ⠋ 4m ┃
+▍  /tmp  ↓ archive ┃
+                   ┃
  QUIET  2          │
  5 docs       idle │
-   /tmp            │
- 4 zsh    exited 1 │
-   /tmp            │
-                   │
  ───────────────── │
- ✎  ✦  ↺           │
+ ✎  ✦  ↺ archive   │

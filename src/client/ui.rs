@@ -290,6 +290,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             frame: app.frame,
             age_offset: app.state_at.elapsed(),
             archived: app.archived.len(),
+            scroll: app.sidebar_scroll,
         }
         .render(areas.sidebar, f.buffer_mut());
     } else {
