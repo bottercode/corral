@@ -232,6 +232,24 @@ pub fn badge(p: &PaneInfo, age: Duration, frame: usize) -> (String, Style) {
 }
 
 /// Cut `s` to at most `width` columns, ending with `…` if shortened.
+/// Like [`truncate`], but keeps the end, where a path's folder is.
+fn truncate_start(s: &str, width: usize) -> String {
+    if s.width() <= width || width == 0 {
+        return truncate(s, width);
+    }
+    let mut tail = Vec::new();
+    let mut w = 1;
+    for c in s.chars().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if w + cw > width {
+            break;
+        }
+        tail.push(c);
+        w += cw;
+    }
+    std::iter::once('…').chain(tail.into_iter().rev()).collect()
+}
+
 pub fn truncate(s: &str, width: usize) -> String {
     if s.width() <= width {
         return s.to_string();
@@ -371,13 +389,8 @@ impl Sidebar<'_> {
             return Vec::new();
         }
 
-        let mut rows: Vec<Row> = vec![
-            Row::plain(Line::from(Span::styled(
-                " corral",
-                t.accent().add_modifier(Modifier::BOLD),
-            ))),
-            Row::plain(Line::default()),
-        ];
+        // The title row holds just its buttons, drawn over it below.
+        let mut rows: Vec<Row> = vec![Row::plain(Line::default()), Row::plain(Line::default())];
 
         if self.panes.is_empty() {
             rows.push(Row::plain(Line::styled(" no agents yet", t.muted())));
@@ -596,13 +609,35 @@ impl Sidebar<'_> {
             selected: focused,
             button: None,
         });
+        // Under the name, where it's working: its branch, or its folder
+        // when it isn't in a repository.
+        let indent = "   ";
+        let room = width.saturating_sub(indent.len() + 1);
+        let (place, fit): (String, fn(&str, usize) -> String) = match &p.git {
+            Some(git) => (format!("⎇ {}", git.branch), truncate),
+            None => (super::ui::home_relative(&p.cwd), truncate_start),
+        };
         if !focused {
+            let style = if p.state == AgentState::Exited {
+                t.faint()
+            } else {
+                t.muted()
+            };
+            rows.push(Row {
+                line: Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::raw("  "),
+                    Span::styled(fit(&place, room), style),
+                ]),
+                pane: Some(p.id.clone()),
+                selected: false,
+                button: None,
+            });
             return;
         }
 
-        // The focused agent opens up: its title and branch.
-        let indent = "   ";
-        let room = width.saturating_sub(indent.len() + 1);
+        // The focused agent opens up: its task, then where it's working in
+        // colour, with the archive button at that row's right end.
         let mut detail = |line: Line<'a>, button: Option<(&'static str, Click)>| {
             rows.push(Row {
                 line,
@@ -612,61 +647,41 @@ impl Sidebar<'_> {
             })
         };
         let marker = || Span::styled("▍", t.accent());
-        // The archive button sits at the right end of the last detail row,
-        // two columns clear of its text; it drops its word when tight.
-        let archive = |used: usize| {
-            let label = if used + "↓ archive".width() + 2 <= room {
-                "↓ archive"
-            } else {
-                "↓"
-            };
-            (label, room.saturating_sub(label.width() + 2))
-        };
-        let title = task_title(p);
-        if let Some(title) = title {
-            let (button, room) = match p.git {
-                Some(_) => (None, room),
-                None => {
-                    let (label, room) = archive(title.width());
-                    (Some((label, Click::Archive(p.id.clone()))), room)
-                }
-            };
+        if let Some(title) = task_title(p) {
             detail(
                 Line::from(vec![
                     marker(),
                     Span::raw("  "),
                     Span::styled(truncate(title, room), Style::new().fg(t.text)),
                 ]),
-                button,
+                None,
             );
         }
-        if let Some(git) = &p.git {
-            let mut tail = Vec::new();
-            if let Some(pr) = &git.pr {
-                let (label, style) = match pr.state.as_str() {
-                    "MERGED" => (format!(" #{} merged", pr.number), t.fg(t.done)),
-                    "CLOSED" => (format!(" #{} closed", pr.number), t.muted()),
-                    _ => (format!(" #{}", pr.number), t.accent()),
-                };
-                tail.push(Span::styled(label, style));
-            }
-            let tail_width: usize = tail.iter().map(|s| s.content.width()).sum();
-            let branch = format!("⎇ {}", git.branch);
-            let (label, room) = archive(branch.width() + tail_width);
-            let branch = truncate(&branch, room.saturating_sub(tail_width));
-            let mut spans = vec![marker(), Span::raw("  "), Span::styled(branch, t.fg(t.git))];
-            spans.extend(tail);
-            detail(
-                Line::from(spans),
-                Some((label, Click::Archive(p.id.clone()))),
-            );
-        } else if title.is_none() {
-            // Nothing else to show: the button gets a row of its own.
-            detail(
-                Line::from(marker()),
-                Some((archive(0).0, Click::Archive(p.id.clone()))),
-            );
+        let mut tail = Vec::new();
+        if let Some(pr) = p.git.as_ref().and_then(|g| g.pr.as_ref()) {
+            let (label, style) = match pr.state.as_str() {
+                "MERGED" => (format!(" #{} merged", pr.number), t.fg(t.done)),
+                "CLOSED" => (format!(" #{} closed", pr.number), t.muted()),
+                _ => (format!(" #{}", pr.number), t.accent()),
+            };
+            tail.push(Span::styled(label, style));
         }
+        let tail_width: usize = tail.iter().map(|s| s.content.width()).sum();
+        // Two columns clear of the text; the button drops its word when tight.
+        let used = place.width() + tail_width;
+        let label = if used + "↓ archive".width() + 2 <= room {
+            "↓ archive"
+        } else {
+            "↓"
+        };
+        let room = room.saturating_sub(label.width() + 2);
+        let place = fit(&place, room.saturating_sub(tail_width));
+        let mut spans = vec![marker(), Span::raw("  "), Span::styled(place, t.fg(t.git))];
+        spans.extend(tail);
+        detail(
+            Line::from(spans),
+            Some((label, Click::Archive(p.id.clone()))),
+        );
     }
 }
 
@@ -908,6 +923,20 @@ mod tests {
     }
 
     #[test]
+    fn folders_keep_their_end() {
+        assert_eq!(truncate_start("~/src/corral", 20), "~/src/corral");
+        assert_eq!(truncate_start("~/Developer/corral", 10), "…er/corral");
+        let mut a = pane("p1", "claude", "corral", AgentState::Idle);
+        a.cwd = "/srv/some/deep/project/folder".into();
+        let (text, _) = render(&[a], None, &[], 24);
+        assert!(
+            text.contains("…") && text.contains("project/folder"),
+            "{text}"
+        );
+        assert!(!text.contains("/srv"), "{text}");
+    }
+
+    #[test]
     fn sidebar_snapshot() {
         let (text, hits) = render(&sample(), Some("p1"), &["p1".into(), "p2".into()], 32);
         insta::assert_snapshot!(text);
@@ -922,9 +951,14 @@ mod tests {
                 f("p1"),
                 Click::Archive("p1".into()),
                 f("p1"),
+                // Every other agent's two rows: name, then where it works.
+                f("p3"),
                 f("p3"),
                 f("p2"),
+                f("p2"),
                 f("p5"),
+                f("p5"),
+                f("p4"),
                 f("p4"),
                 Click::Exit,
                 Click::Collapse,
@@ -937,16 +971,16 @@ mod tests {
             ]
         );
         // Exit and collapse on the title row.
-        let ys: Vec<u16> = hits[8..10].iter().map(|h| h.area.y).collect();
+        let ys: Vec<u16> = hits[12..14].iter().map(|h| h.area.y).collect();
         assert_eq!(ys, vec![0, 0]);
-        assert!(hits[8].area.x + hits[8].area.width < hits[9].area.x);
+        assert!(hits[12].area.x + hits[12].area.width < hits[13].area.x);
         // New, and menu at its right end, above the rule.
-        let (new, menu) = (hits[10].area, hits[11].area);
+        let (new, menu) = (hits[14].area, hits[15].area);
         assert_eq!((new.y, menu.y), (18, 18));
         assert_eq!(menu.x + menu.width, 30);
         // Notes and the order switch under the rule, stories and archive
         // under them, in two columns.
-        let [notes, order, stories, archive] = [12, 13, 14, 15].map(|i| hits[i].area);
+        let [notes, order, stories, archive] = [16, 17, 18, 19].map(|i| hits[i].area);
         assert_eq!((notes.y, order.y), (20, 20));
         assert_eq!((stories.y, archive.y), (21, 21));
         assert_eq!((notes.x, stories.x), (new.x, new.x));

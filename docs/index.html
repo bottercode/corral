@@ -89,7 +89,7 @@
   .chrome { display: flex; align-items: center; height: 42px; padding: 0 20px; gap: 8px; border-bottom: 1px solid var(--t-line); }
   .chrome i { width: 10px; height: 10px; border-radius: 50%; background: #2a2c2e; }
   .chrome .t { flex: 1; text-align: center; color: var(--t-muted); font: 12px var(--sans); margin-right: 46px; }
-  .scr { display: grid; grid-template-columns: 268px 1fr 1fr; height: 440px; }
+  .scr { display: grid; grid-template-columns: 268px 1fr 1fr; height: 470px; }
   .scr > * { min-width: 0; }
   .sb { border-right: 1px solid var(--t-line); display: flex; flex-direction: column; padding-top: 6px; }
   .r { padding: 0 12px; white-space: pre; display: flex; gap: 8px; overflow: hidden; }
@@ -107,6 +107,8 @@
   .ag.on .nm { font-weight: 600; }
   .dt { background: var(--t-bg-2); border-left: 2px solid var(--hay); padding-left: 32px; color: var(--t-muted); }
   .dt.t { color: var(--t-text); }
+  .dt.br { justify-content: space-between; padding-right: 12px; }
+  .ag.place { padding-left: 32px; color: var(--t-muted); }
   .dt .g { color: var(--heather); }
   .sw { color: var(--creek); } .sbk { color: var(--rust); font-weight: 600; } .sd { color: var(--sage); } .si { color: var(--t-muted); }
   .sb .ft { margin-top: auto; padding: 0 0 8px; }
@@ -539,7 +541,7 @@ corral read "$p" --lines 30</pre>
   function second() { return focus === 1 ? 4 : 1; }
   var groups = [['NEEDS YOU', ['blocked', 'done']], ['WORKING', ['working']], ['QUIET', ['idle']]];
   function render() {
-    var h = '<div class="r head"><b>corral</b><span style="color:var(--t-muted)">✕ exit  «</span></div><div class="r">&nbsp;</div>';
+    var h = '<div class="r head"><span></span><span style="color:var(--t-muted)">✕ exit  «</span></div><div class="r">&nbsp;</div>';
     groups.forEach(function (g) {
       var m = agents.filter(function (a) { return g[1].indexOf(a.state) >= 0; })
         .sort(function (x, y) { return g[1].indexOf(x.state) - g[1].indexOf(y.state); });
@@ -551,9 +553,10 @@ corral read "$p" --lines 30</pre>
         h += '<div class="r ag' + (on ? ' on' : alt ? ' alt' : '') + '" data-n="' + a.n + '"><span class="n">' + a.n + '</span><span class="nm">' + esc(a.name) + '</span>' + badge(a) + '</div>';
         if (on) {
           h += '<div class="r dt t" data-n="' + a.n + '">' + esc(a.title) + '</div>';
-          h += '<div class="r dt" data-n="' + a.n + '">' + esc(a.ws + ' · ' + a.agent) + '</div>';
           var d = a.pr ? ' <span style="color:var(--hay)">#' + a.pr + '</span>' : '';
-          h += '<div class="r dt" data-n="' + a.n + '"><span class="g">⎇ ' + esc(a.branch) + '</span>' + d + '</div>';
+          h += '<div class="r dt br" data-n="' + a.n + '"><span><span class="g">⎇ ' + esc(a.branch) + '</span>' + d + '</span><span>↓ archive</span></div>';
+        } else {
+          h += '<div class="r ag place' + (alt ? ' alt' : '') + '" data-n="' + a.n + '">⎇ ' + esc(a.branch) + '</div>';
         }
       });
     });
