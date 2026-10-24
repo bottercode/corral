@@ -66,7 +66,7 @@ mv corral-agents-*/corral ~/.local/bin/
 
 ### From source
 
-With Rust 1.88 or newer:
+With Rust 1.90 or newer:
 
 ```sh
 cargo install --git https://github.com/bottercode/corral
