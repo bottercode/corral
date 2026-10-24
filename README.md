@@ -254,6 +254,40 @@ kitty draw it sharp, iTerm2 and WezTerm too; other terminals (and tmux) get
 it in coloured half blocks. On Linux the clipboard is read with `wl-paste`
 or `xclip`. `image_previews = false` turns it off.
 
+### From your phone
+
+`corral web` serves a small web app that you add to your phone's home
+screen. There's no app store, and nothing to pay or sign. It shows your agents
+the way the sidebar does, with **Approve** and **Deny** on blocked ones (and
+the bottom of their screen, so you can see what you're saying yes to). It can
+send an agent a note, opens a full terminal on any agent, and sends a push
+notification when one starts needing you.
+
+```sh
+corral web            # or: corral web --daemon
+```
+
+It prints a QR code. Scan it with your phone's camera to pair (the code works
+once, for 10 minutes; `corral web pair` makes another).
+
+The phone needs HTTPS to install the app and get notifications. The easy,
+free way is [Tailscale](https://tailscale.com): install it on this machine and
+the phone, then run `tailscale serve --bg 7777` once. `corral web` finds your
+machine's Tailscale name and puts it in the QR code. Other HTTPS proxies work
+too; pass their address with `--url`.
+
+On iPhone, open the link in Safari, then Share → Add to Home Screen, and turn
+on notifications from the app's menu (iOS 16.4 or later).
+
+- It listens on `127.0.0.1` only. Listening anywhere else needs `--bind ADDR
+  --expose`, and goes over plain HTTP.
+- Each phone gets its own token (only its hash is stored, in
+  `~/.corral/web/`). `corral web devices` lists them and
+  `corral web revoke NAME` signs one out straight away.
+- A terminal opened on the phone is sized to the phone, the way tmux sizes
+  a window to its latest client. Typing in the TUI takes the pane back;
+  the phone's Fit button takes it back again.
+
 ## Agent state
 
 | State | Meaning |
@@ -331,6 +365,8 @@ name.
 | `corral integrate claude\|codex [--uninstall] [--yes]` | install agent hooks |
 | `corral server [--daemon]`, `corral kill-server` | run / stop the server (stopping ends every agent; the next start offers to bring them back) |
 | `corral restore [--discard]` | bring back the panes from before corral stopped, or let them go |
+| `corral web [--port P] [--url URL] [--daemon]` | serve the phone app (see [From your phone](#from-your-phone)) |
+| `corral web pair\|devices\|revoke NAME\|stop` | pair another phone, list or unpair phones, stop the daemon |
 | `corral debug dump <pane> [-o FILE]` | save a pane's screen as replayable bytes (for rule fixtures) |
 
 Example: run an agent unattended and collect its answer.
